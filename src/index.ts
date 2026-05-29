@@ -20,6 +20,8 @@ import { scrapeInstagram } from './scrapers/instagram.js'
 import { scrapeUSCEvents } from './scrapers/usc-events.js'
 import { loadAllSkills, getRegistryStats } from './skills/index.js'
 import { getToolDefinitions } from './agent/tool-registry.js'
+import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
+import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filter.js'
 
 // Import ALL tools to register them
 import './tools/search-events.js'
@@ -86,6 +88,17 @@ function adminAuth(req: express.Request, res: express.Response, next: express.Ne
   next()
 }
 
+// Path B auth: separate token for the dedicated iPhone running Shortcuts.
+// Compromise of this token only exposes the iMessage queue endpoints, not
+// the admin operations gated by ADMIN_TOKEN.
+function phoneAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!config.adminTokenPhone)
+    return res.status(403).json({ error: 'phone_token_not_configured' })
+  const token = req.headers.authorization?.replace('Bearer ', '')
+  if (token !== config.adminTokenPhone) return res.status(401).json({ error: 'Unauthorized' })
+  next()
+}
+
 // /stats was previously unauthenticated. It exposes aggregate operational
 // metrics (active students, message volume, event count). Public observability
 // is a credibility leak; gate behind the admin token like /chat.
@@ -123,6 +136,98 @@ app.post('/chat', adminAuth, async (req, res) => {
     // "invalid api_key sk-ant-..."), or DB connection strings never reach
     // the chat client.
     log('error', 'chat_endpoint_error', { error: (err as Error).message })
+    res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// ──────────────────────────────────────────────────────────────────────
+// Path B — iPhone Shortcuts dual-mode endpoints
+// ──────────────────────────────────────────────────────────────────────
+// When the China side runs iMessage on an iPhone via Apple Shortcuts (no Mac
+// available yet), the Shortcut on "When I receive a message" POSTs to
+// /imessage/incoming. A second Shortcut polls /imessage/outgoing every minute
+// and POSTs an ack per delivered message to /imessage/outgoing/:id/ack.
+//
+// When the Mac mini comes online (Path A), the iPhone Shortcuts are disabled
+// and the Mac mini's imessage adapter takes over by POSTing to /chat directly.
+// These endpoints stay mounted but go idle.
+//
+// All three endpoints are gated by phoneAuth (ADMIN_TOKEN_PHONE) so a
+// compromised Shortcut token only exposes the iMessage queue, not the admin
+// or relay surfaces.
+
+app.post('/imessage/incoming', phoneAuth, async (req, res) => {
+  const body = req.body as { sender?: string; text?: string; timestamp?: number }
+  if (!body?.sender || !body.text) {
+    return res.status(400).json({ error: 'sender and text required' })
+  }
+  // Run the injection filter at the HTTP boundary, before the 202 ack and
+  // before any agent-loop cost. processMessage runs the same check internally,
+  // but for the Shortcut path we want to:
+  //   1. avoid the LLM + DB cost on known-bad input;
+  //   2. still queue a polite refusal so the user gets feedback;
+  //   3. log the attempt at the boundary so phoneAuth-gated abuse stands out.
+  const check = checkInjection(body.text)
+  if (check.blocked) {
+    res.status(202).json({ accepted: true, filtered: 'injection' })
+    const rejection =
+      INJECTION_REJECTIONS[Math.floor(Math.random() * INJECTION_REJECTIONS.length)]
+    try {
+      await enqueueOutgoing(body.sender, rejection)
+    } catch (err) {
+      log('error', 'phone_injection_enqueue_error', { error: (err as Error).message })
+    }
+    return
+  }
+  // Ack the Shortcut immediately so the iPhone automation can return; run
+  // processMessage async and write the response to the outgoing queue when
+  // it lands. Polling Shortcut picks it up on the next tick.
+  res.status(202).json({ accepted: true })
+  void processMessage({
+    userId: body.sender,
+    platform: 'imessage',
+    text: body.text,
+    msgType: 'text',
+    timestamp: typeof body.timestamp === 'number' ? body.timestamp : Date.now(),
+  })
+    .then(async (reply) => {
+      if (!reply) return // filtered as automated-message noise
+      try {
+        await enqueueOutgoing(body.sender!, reply)
+      } catch (err) {
+        log('error', 'phone_enqueue_error', { error: (err as Error).message })
+      }
+    })
+    .catch((err) => {
+      log('error', 'phone_incoming_error', { error: (err as Error).message })
+    })
+})
+
+app.get('/imessage/outgoing', phoneAuth, async (req, res) => {
+  try {
+    const after = typeof req.query.after === 'string' ? req.query.after : undefined
+    const rawLimit = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 10
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(rawLimit, 50)) : 10
+    const rows = await fetchPending(after, limit)
+    res.json(rows)
+  } catch (err) {
+    log('error', 'phone_outgoing_list_error', { error: (err as Error).message })
+    res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+app.post('/imessage/outgoing/:id/ack', phoneAuth, async (req, res) => {
+  const id = String(req.params.id ?? '')
+  if (!id) return res.status(400).json({ error: 'id required' })
+  const body = req.body as { status?: 'sent' | 'failed'; error?: string }
+  if (body?.status !== 'sent' && body?.status !== 'failed') {
+    return res.status(400).json({ error: 'status must be "sent" or "failed"' })
+  }
+  try {
+    await ackOutgoing(id, body.status, body.error)
+    res.json({ ok: true })
+  } catch (err) {
+    log('error', 'phone_outgoing_ack_error', { error: (err as Error).message })
     res.status(500).json({ error: 'internal_error' })
   }
 })
