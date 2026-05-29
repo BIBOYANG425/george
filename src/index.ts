@@ -47,7 +47,23 @@ import './tools/update-profile.js'
 import './tools/places.js'
 
 const app = express()
-app.use(cors())
+
+// CORS pinned to known origins. Web chat is relayed server-to-server from
+// uscbia.com's /api/george/chat (not browser-direct), but the * wildcard from
+// `cors()` would allow any webpage to invoke /stats, /health, or future
+// browser-exposed routes from a user's session. List both apex and www so the
+// production redirect path keeps working.
+app.use(cors({
+  origin: [
+    'https://uscbia.com',
+    'https://www.uscbia.com',
+    'https://admin.uscbia.com',
+    // Vercel preview deployments under the bia-roommate project (used for PR review).
+    /^https:\/\/bia-roommate-[a-z0-9]+-biboyang425s-projects\.vercel\.app$/,
+  ],
+  credentials: false,
+}))
+
 app.use(express.text({ type: 'text/xml' }))
 app.use(express.json())
 
@@ -63,23 +79,27 @@ app.get('/health', (_req, res) => {
   })
 })
 
-app.get('/stats', async (_req, res) => {
-  try {
-    const stats = await getStats()
-    res.json(stats)
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message })
-  }
-})
-
-app.use(createWeChatRouter())
-
 function adminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!config.adminToken) return res.status(403).json({ error: 'Admin token not configured' })
   const token = req.headers.authorization?.replace('Bearer ', '')
   if (token !== config.adminToken) return res.status(401).json({ error: 'Unauthorized' })
   next()
 }
+
+// /stats was previously unauthenticated. It exposes aggregate operational
+// metrics (active students, message volume, event count). Public observability
+// is a credibility leak; gate behind the admin token like /chat.
+app.get('/stats', adminAuth, async (_req, res) => {
+  try {
+    const stats = await getStats()
+    res.json(stats)
+  } catch (err) {
+    log('error', 'stats_endpoint_error', { error: (err as Error).message })
+    res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+app.use(createWeChatRouter())
 
 // Dev test console endpoint — runs the full agent team end-to-end.
 // Gated by admin token so it isn't open to the public internet.
@@ -98,8 +118,12 @@ app.post('/chat', adminAuth, async (req, res) => {
     })
     res.json({ response })
   } catch (err) {
+    // Log the real error for diagnostics, return a generic message to the
+    // caller so upstream stack traces, API keys in error strings (e.g.
+    // "invalid api_key sk-ant-..."), or DB connection strings never reach
+    // the chat client.
     log('error', 'chat_endpoint_error', { error: (err as Error).message })
-    res.status(500).json({ error: (err as Error).message })
+    res.status(500).json({ error: 'internal_error' })
   }
 })
 
@@ -108,7 +132,8 @@ app.post('/admin/scrape-instagram', adminAuth, async (_req, res) => {
     await scrapeInstagram()
     res.json({ status: 'ok' })
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message })
+    log('error', 'scrape_instagram_endpoint_error', { error: (err as Error).message })
+    res.status(500).json({ error: 'internal_error' })
   }
 })
 
@@ -117,7 +142,8 @@ app.post('/admin/scrape-usc', adminAuth, async (_req, res) => {
     await scrapeUSCEvents()
     res.json({ status: 'ok' })
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message })
+    log('error', 'scrape_usc_endpoint_error', { error: (err as Error).message })
+    res.status(500).json({ error: 'internal_error' })
   }
 })
 
