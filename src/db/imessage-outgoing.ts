@@ -24,6 +24,27 @@ export async function enqueueOutgoing(recipient: string, text: string): Promise<
   if (error) throw new Error(`enqueueOutgoing failed: ${error.message}`)
 }
 
+// KNOWN GAP — race vulnerability between consecutive polls.
+//
+// fetchPending currently SELECTs status='pending'. If the iPhone's polling
+// Shortcut runs twice in quick succession (iOS Personal Automation can fire
+// before the previous run finishes), both polls fetch the same rows and the
+// user gets the same iMessage twice. Same race exists if Cloudflare retries
+// the request on a transient 5xx the iPhone never saw.
+//
+// Production-grade fix: atomic claim via Postgres RPC that does
+//   UPDATE imessage_outgoing SET status='sending', claimed_at=now()
+//   WHERE id IN (SELECT id FROM imessage_outgoing
+//                WHERE status='pending'
+//                ORDER BY queued_at LIMIT $1 FOR UPDATE SKIP LOCKED)
+//   RETURNING *
+// plus a 5-minute stale-claim recovery so dropped sends get re-tried.
+//
+// Deferred because: single-iPhone Path B polling makes the race rare in
+// practice, the user-facing impact is "occasional duplicate iMessage"
+// (annoying, not catastrophic), and the fix needs a schema migration to
+// add a 'sending' state + claimed_at column. Revisit before adding a
+// second poller or when daily volume exceeds a few hundred messages.
 export async function fetchPending(afterISO?: string, limit = 10): Promise<OutgoingRow[]> {
   let q = supabase
     .from('imessage_outgoing')

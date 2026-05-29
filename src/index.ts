@@ -21,6 +21,7 @@ import { scrapeUSCEvents } from './scrapers/usc-events.js'
 import { loadAllSkills, getRegistryStats } from './skills/index.js'
 import { getToolDefinitions } from './agent/tool-registry.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
+import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filter.js'
 
 // Import ALL tools to register them
 import './tools/search-events.js'
@@ -159,6 +160,24 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
   const body = req.body as { sender?: string; text?: string; timestamp?: number }
   if (!body?.sender || !body.text) {
     return res.status(400).json({ error: 'sender and text required' })
+  }
+  // Run the injection filter at the HTTP boundary, before the 202 ack and
+  // before any agent-loop cost. processMessage runs the same check internally,
+  // but for the Shortcut path we want to:
+  //   1. avoid the LLM + DB cost on known-bad input;
+  //   2. still queue a polite refusal so the user gets feedback;
+  //   3. log the attempt at the boundary so phoneAuth-gated abuse stands out.
+  const check = checkInjection(body.text)
+  if (check.blocked) {
+    res.status(202).json({ accepted: true, filtered: 'injection' })
+    const rejection =
+      INJECTION_REJECTIONS[Math.floor(Math.random() * INJECTION_REJECTIONS.length)]
+    try {
+      await enqueueOutgoing(body.sender, rejection)
+    } catch (err) {
+      log('error', 'phone_injection_enqueue_error', { error: (err as Error).message })
+    }
+    return
   }
   // Ack the Shortcut immediately so the iPhone automation can return; run
   // processMessage async and write the response to the outgoing queue when

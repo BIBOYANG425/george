@@ -53,7 +53,7 @@ If you change either side of that contract, the matching change goes in bia-room
 
 Production runs the agent backend on a Cloudflare Container (outside the China firewall) and iMessage on a Mac in China. The connection between them is one of two paths, switchable by env vars on the China side.
 
-```
+```text
                 Cloudflare Container (agent backend)
                 ─────────────────────────────────────
                   IMESSAGE_ENABLED=false

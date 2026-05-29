@@ -20,14 +20,17 @@
 //
 // Header last reviewed: 2026-05-28
 
-import { IMessageSDK } from '@photon-ai/imessage-kit'
+// IMessageSDK is type-only at module load so the package's native binding
+// never gets required on Linux. The runtime instance is dynamic-imported
+// inside startIMessageAdapter() after the platform === 'darwin' guard.
+import type { IMessageSDK as IMessageSDKType } from '@photon-ai/imessage-kit'
 import { config } from '../config.js'
 import { processMessage } from '../agent/george.js'
 import { log } from '../observability/logger.js'
 import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS } from './split-response.js'
 import type { IncomingMessage } from './types.js'
 
-let sdk: IMessageSDK | null = null
+let sdk: IMessageSDKType | null = null
 
 const BRIDGE_TIMEOUT_MS = 45_000
 const RELAY_FALLBACK_MSG = '我这边联系不上服务器，几分钟后再试 🥲'
@@ -83,7 +86,20 @@ async function forwardToBackend(incoming: IncomingMessage): Promise<string | nul
     log('error', 'relay_5xx', { status: res.status, body: text.slice(0, 200) })
     return RELAY_FALLBACK_MSG
   }
-  const data = (await res.json().catch(() => ({}))) as { response?: string; error?: string }
+  const data = (await res.json().catch(() => ({}))) as {
+    response?: string | null
+    error?: string
+  }
+  // Distinguish three cases:
+  //   data.response === null  → backend filtered the message (automated-message
+  //                             noise, meeting invite, etc). Propagate null so
+  //                             onDirectMessage drops it silently, matching
+  //                             local-mode behavior. NO reply sent.
+  //   data.response missing or empty string → backend responded but didn't
+  //                             produce a reply we can use. Treat as a
+  //                             relay-side hiccup and show the fallback.
+  //   data.response is a non-empty string → real reply, send it through.
+  if (data.response === null) return null
   if (!data.response || !data.response.trim()) {
     log('warn', 'relay_empty_response', {})
     return RELAY_FALLBACK_MSG
@@ -115,6 +131,11 @@ export async function startIMessageAdapter() {
   }
 
   try {
+    // Dynamic import so the native module isn't required on non-macOS.
+    // The Container deploy runs on Linux with IMESSAGE_ENABLED=false and
+    // never reaches this point; a top-level require would crash startup
+    // because @photon-ai/imessage-kit binds to macOS frameworks.
+    const { IMessageSDK } = await import('@photon-ai/imessage-kit')
     sdk = new IMessageSDK()
 
     await sdk.startWatching({
