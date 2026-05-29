@@ -49,6 +49,48 @@ The relay in bia-roommate forwards to `GEORGE_BACKEND_URL` (Cloudflare quick tun
 
 If you change either side of that contract, the matching change goes in bia-roommate the same day.
 
+## Dual-mode iMessage (Mac mini bridge + iPhone Shortcuts fallback)
+
+Production runs the agent backend on a Cloudflare Container (outside the China firewall) and iMessage on a Mac in China. The connection between them is one of two paths, switchable by env vars on the China side.
+
+```
+                Cloudflare Container (agent backend)
+                ─────────────────────────────────────
+                  IMESSAGE_ENABLED=false
+                  BACKEND_RELAY_URL=  (unset)
+                  ANTHROPIC_API_KEY, SUPABASE_*, …
+                  ADMIN_TOKEN_PHONE (only if serving Path B)
+                ▲                                          ▲
+                │ POST /chat (Mac mini, Path A)            │ POST /imessage/incoming (iPhone, Path B)
+                │ bearer ADMIN_TOKEN                       │ bearer ADMIN_TOKEN_PHONE
+                │                                          │
+   ┌────────────┴───── Path A ──────┐         ┌────────────┴───── Path B ──────┐
+   │ Mac mini in China               │         │ iPhone in China                 │
+   │   IMESSAGE_ENABLED=true         │         │   Apple Shortcuts:              │
+   │   BACKEND_RELAY_URL=<container> │         │   - "When I receive a message"  │
+   │   ADMIN_TOKEN=<matches above>   │         │     POSTs to /imessage/incoming │
+   │   Photon SDK reads iMessage     │         │   - Personal Automation every   │
+   │   from the paired iPhone        │         │     1m polls /imessage/outgoing │
+   │                                 │         │     and sends via Messages.app  │
+   └─────────────────────────────────┘         │   - ack /imessage/outgoing/:id  │
+                                                │     after each send             │
+                                                └─────────────────────────────────┘
+```
+
+**Path A (Mac mini bridge)** is the production-grade target. ~10s round-trip end-to-end. Single bearer hop. No queue. Same flow as today's George.
+
+**Path B (iPhone Shortcuts)** is the no-Mac interim. Outgoing latency up to 60 seconds (the polling cadence). Personal Automation reliability has gaps. Use until the Mac mini arrives, then switch by disabling the iOS automations and starting the Mac mini bridge process.
+
+Switch between the two by what's running on the China side:
+
+| Running | Path active | Switch by |
+|---|---|---|
+| iPhone Shortcuts enabled, no Mac bridge | Path B | iOS Settings → Shortcuts → enable/disable Personal Automation |
+| Mac mini `npm run dev` with `BACKEND_RELAY_URL` set | Path A | pm2 start/stop the bridge process |
+| Both | Don't do this — double replies | Disable the iPhone Shortcuts before starting the Mac mini |
+
+The Container always exposes both endpoint sets, so swapping doesn't require redeploying the backend.
+
 ## How to run locally
 
 ```bash

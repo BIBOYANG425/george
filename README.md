@@ -85,6 +85,26 @@ curl -X POST http://localhost:3001/chat \
 
 For deeper setup (iMessage Full Disk Access, Cloudflare tunnel, cloud deploy without iMessage), see [CLAUDE.md](CLAUDE.md).
 
+## Dual-mode iMessage
+
+Production runs in two modes off the same codebase, switched by env vars:
+
+**Mode 1 — Agent backend (Cloudflare Container, Vercel function, or local dev).** Runs the full agent loop: intent classifier, sub-agents, tools, Supabase, Anthropic. Required env: `ANTHROPIC_API_KEY`, `SUPABASE_*`, `ADMIN_TOKEN`. Optional: `ADMIN_TOKEN_PHONE` if serving the iPhone Shortcuts (Path B) endpoints. `IMESSAGE_ENABLED=false` so it doesn't try to open Photon on a Linux container.
+
+**Mode 2 — iMessage bridge (Mac mini in China).** Runs ONLY the iMessage adapter. Reads new iMessages via Photon SDK, POSTs each to the agent backend's `/chat`, sends the response back via SDK. Required env: `IMESSAGE_ENABLED=true`, `BACKEND_RELAY_URL=https://your-backend`, `ADMIN_TOKEN=<must match backend>`. Does NOT need Anthropic / Supabase / Maps keys — config.ts skips those required-checks when `BACKEND_RELAY_URL` is set.
+
+If you don't have a Mac yet, the agent backend also exposes a Path B set of endpoints that a dedicated iPhone running Apple Shortcuts can drive:
+
+- `POST /imessage/incoming` — iPhone Personal Automation "When I receive a message" POSTs `{sender, text}` here
+- `GET /imessage/outgoing` — iPhone polls every minute, gets pending replies queued in Supabase
+- `POST /imessage/outgoing/:id/ack` — iPhone confirms each reply was sent
+
+All three are gated by `ADMIN_TOKEN_PHONE`. Outgoing latency under this mode is up to 60 seconds (the polling cadence), so Path A (Mac mini) is the production-grade target. Path B is the no-Mac interim.
+
+See [CLAUDE.md](CLAUDE.md) for the full topology + deploy steps.
+
+
+
 ## Repo structure
 
 ```
