@@ -48,10 +48,9 @@ vi.mock('../../src/db/client.js', () => ({
   },
 }))
 
-async function callTool(input: { student_id?: string }) {
-  await import('../../src/tools/get-student-academic-state.js')
-  const { executeTool } = await import('../../src/agent/tool-registry.js')
-  const result = await executeTool('get_student_academic_state', input)
+async function callHandler(input: { student_id?: string }) {
+  const { getStudentAcademicStateHandler } = await import('../../src/tools/get-student-academic-state.js')
+  const result = await getStudentAcademicStateHandler(input)
   return JSON.parse(result)
 }
 
@@ -62,15 +61,20 @@ describe('get_student_academic_state', () => {
     memoryRows = []
   })
 
+  it('tool name is get_student_academic_state', async () => {
+    const { getStudentAcademicStateTool } = await import('../../src/tools/get-student-academic-state.js')
+    expect(getStudentAcademicStateTool.name).toBe('get_student_academic_state')
+  })
+
   it('returns an error result when no student_id is provided', async () => {
-    const out = await callTool({})
+    const out = await callHandler({})
     expect(out.error).toMatch(/no student context/i)
   })
 
   it('flags year/major/ge_status/units_preference as missing for empty profile', async () => {
     studentRow = { year: null, major: null, interests: null }
     memoryRows = []
-    const out = await callTool({ student_id: 'stu-empty' })
+    const out = await callHandler({ student_id: 'stu-empty' })
     expect(out.profile).toEqual({ year: null, major: null, interests: [] })
     expect(out.completed_courses).toEqual([])
     expect(out.ge_status).toEqual({})
@@ -85,7 +89,7 @@ describe('get_student_academic_state', () => {
       { key: 'GE-A', value: 'done', category: 'ge_completed' },
       { key: 'default', value: '14', category: 'units_preference' },
     ]
-    const out = await callTool({ student_id: 'stu-full' })
+    const out = await callHandler({ student_id: 'stu-full' })
     expect(out.missing).toEqual([])
     expect(out.profile.year).toBe('junior')
     expect(out.profile.major).toBe('CS')
@@ -102,7 +106,7 @@ describe('get_student_academic_state', () => {
       { key: 'default', value: 'no class before 10am', category: 'time_preference' },
       { key: 'GE-C', value: 'in progress', category: 'ge_completed' },
     ]
-    const out = await callTool({ student_id: 'stu-rich' })
+    const out = await callHandler({ student_id: 'stu-rich' })
     expect(out.completed_courses).toEqual(
       expect.arrayContaining(['CSCI 104', 'MATH 225']),
     )
@@ -117,7 +121,7 @@ describe('get_student_academic_state', () => {
       { key: 'year', value: 'sophomore', category: 'personal_fact' },
       { key: 'major', value: 'EE', category: 'personal_fact' },
     ]
-    const out = await callTool({ student_id: 'stu-mem-fallback' })
+    const out = await callHandler({ student_id: 'stu-mem-fallback' })
     expect(out.profile.year).toBe('sophomore')
     expect(out.profile.major).toBe('EE')
     expect(out.missing).not.toContain('year')
@@ -125,16 +129,13 @@ describe('get_student_academic_state', () => {
   })
 
   it('ignores memory rows whose category falls outside the queried set', async () => {
-    // We pre-filter via `.in('category', [...])` so the DB shouldn't return
-    // unknown categories — but if it ever does (replication lag, manual
-    // insert), the switch statement quietly drops them.
     studentRow = { year: 'freshman', major: 'CS', interests: [] }
     memoryRows = [
       { key: 'GE-A', value: 'done', category: 'ge_completed' },
       // @ts-expect-error simulating bad data from DB
       { key: 'whatever', value: 'unrelated', category: 'food_preference' },
     ]
-    const out = await callTool({ student_id: 'stu-with-noise' })
+    const out = await callHandler({ student_id: 'stu-with-noise' })
     expect(out.ge_status).toEqual({ 'GE-A': 'done' })
     // No throw, no crash — bad row silently skipped.
   })
