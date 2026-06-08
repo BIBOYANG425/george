@@ -34,6 +34,7 @@ import {
 } from './onboarding/pending-users.js'
 import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filter.js'
 import { startHeartbeatScheduler } from './jobs/heartbeat-scheduler.js'
+import { startPendingUsersCleanupCron } from './jobs/pending-users-cleanup-cron.js'
 import { runHeartbeat } from './agent/heartbeat.js'
 import { ProfileStore, createSupabaseProfileDB } from './memory/profile.js'
 import { InstructionsStore, createSupabaseInstructionsDB } from './memory/instructions.js'
@@ -484,6 +485,11 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
     },
   });
   console.log('[heartbeat] scheduler started, ticks every 10 minutes');
+
+  if (process.env.ONBOARDING_ENABLED !== 'false') {
+    startPendingUsersCleanupCron(supabase);
+    console.log('[pending-cleanup] cron scheduled (daily 03:00 LA, purge >14 days)');
+  }
 
   // Promote to module scope so /chat and /imessage/incoming can use them.
   _cache = cache;
