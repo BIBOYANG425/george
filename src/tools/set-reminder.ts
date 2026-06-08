@@ -1,32 +1,40 @@
-import { registerTool } from '../agent/tool-registry.js'
+import { z } from 'zod'
 import { createReminder } from '../db/reminders.js'
 import { supabase } from '../db/client.js'
+import { wrapTool } from './_wrap.js'
 
-registerTool(
-  'set_reminder',
-  'Set a reminder for a student about an upcoming event.',
-  {
-    properties: {
-      event_id: { type: 'string', description: 'The event UUID' },
-      remind_at: { type: 'string', description: 'When to send reminder (ISO 8601)' },
-      platform: { type: 'string', enum: ['wechat', 'imessage'], description: 'Platform to send reminder on' },
-    },
-    required: ['event_id', 'remind_at'],
-  },
-  async (input) => {
-    if (!input.student_id) return 'No student context available.'
-    await supabase.from('event_attendance').upsert({
-      student_id: input.student_id as string,
-      event_id: input.event_id as string,
-      source: 'reminder',
-    }, { onConflict: 'student_id,event_id' })
+const inputSchema = {
+  student_id: z.string().optional().describe('The student UUID (injected from context)'),
+  event_id: z.string().describe('The event UUID'),
+  remind_at: z.string().describe('When to send reminder (ISO 8601)'),
+  platform: z.enum(['wechat', 'imessage']).optional().describe('Platform to send reminder on'),
+}
 
-    await createReminder(
-      input.student_id as string,
-      input.event_id as string,
-      input.remind_at as string,
-      (input.platform as string) || 'wechat',
-    )
-    return `Reminder set! George will poke you at ${input.remind_at}. 👻`
-  },
-)
+export async function setReminderHandler(input: {
+  student_id?: string
+  event_id: string
+  remind_at: string
+  platform?: 'wechat' | 'imessage'
+}): Promise<string> {
+  if (!input.student_id) return 'No student context available.'
+  await supabase.from('event_attendance').upsert({
+    student_id: input.student_id,
+    event_id: input.event_id,
+    source: 'reminder',
+  }, { onConflict: 'student_id,event_id' })
+
+  await createReminder(
+    input.student_id,
+    input.event_id,
+    input.remind_at,
+    input.platform || 'wechat',
+  )
+  return `Reminder set! George will poke you at ${input.remind_at}. 👻`
+}
+
+export const setReminderTool = wrapTool({
+  name: 'set_reminder',
+  description: 'Set a reminder for a student about an upcoming event.',
+  schema: inputSchema,
+  handler: setReminderHandler,
+})
