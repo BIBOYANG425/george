@@ -23,6 +23,13 @@ import { loadAllSkills, getRegistryStats } from './skills/index.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
 import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filter.js'
+import { startHeartbeatScheduler } from './jobs/heartbeat-scheduler.js'
+import { runHeartbeat } from './agent/heartbeat.js'
+import { ProfileStore, createSupabaseProfileDB } from './memory/profile.js'
+import { InstructionsStore, createSupabaseInstructionsDB } from './memory/instructions.js'
+import { getKVCache } from './memory/kv-cache.js'
+import { createDeepSeekClient } from './agent/llm-clients.js'
+import { createServiceRoleClient } from './memory/supabase-client.js'
 
 // ALL_TOOLS (imported above) registers all 23 tools as a side effect.
 
@@ -315,6 +322,90 @@ cron.schedule('0 6 * * *', () => {
     log('error', 'usc_cron_error', { error: err.message })
   })
 })
+
+// ==========================================
+// HEARTBEAT SCHEDULER
+// ==========================================
+
+if (process.env.HEARTBEAT_ENABLED !== 'false') {
+  const cache = getKVCache();
+  const profileStore = new ProfileStore(createSupabaseProfileDB(), cache);
+  const instructionsStore = new InstructionsStore(createSupabaseInstructionsDB(), cache);
+  const supabase = createServiceRoleClient();
+  const llm = createDeepSeekClient();
+  const heartbeatDeps = {
+    profileStore,
+    instructionsStore,
+    async loadConfig(userId: string) {
+      const { data, error } = await supabase
+        .from('user_heartbeat_config')
+        .select('*')
+        .eq('user_id', userId)
+        .maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+    async loadRecentMessages(userId: string, limit: number) {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('role, content, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return (data ?? []).reverse();
+    },
+    async loadDueFollowups(userId: string) {
+      const { data, error } = await supabase
+        .from('student_followups')
+        .select('id, content, scheduled_for')
+        .eq('user_id', userId)
+        .eq('status', 'pending')
+        .lte('scheduled_for', new Date().toISOString());
+      if (error) throw error;
+      return data ?? [];
+    },
+    async sendImessage(msg: { to: string; text: string }) {
+      await supabase.from('imessage_outgoing').insert({
+        recipient: msg.to,
+        body: msg.text,
+        status: 'queued',
+        created_at: new Date().toISOString(),
+      });
+    },
+    async insertFollowup(row: { userId: string; content: string; scheduledFor: string }) {
+      const { error } = await supabase.from('student_followups').insert({
+        user_id: row.userId,
+        content: row.content,
+        scheduled_for: row.scheduledFor,
+      });
+      if (error) throw error;
+    },
+    async writeLog(entry: any) {
+      const { error } = await supabase.from('heartbeat_log').insert(entry);
+      if (error) console.error('heartbeat log write failed', error);
+    },
+    async updateLastHeartbeatAt(userId: string) {
+      const { error } = await supabase
+        .from('user_heartbeat_config')
+        .update({ last_heartbeat_at: new Date().toISOString() })
+        .eq('user_id', userId);
+      if (error) throw error;
+    },
+    callLLM: llm.call.bind(llm),
+  };
+  startHeartbeatScheduler({
+    async loadAllConfigs() {
+      const { data, error } = await supabase.from('user_heartbeat_config').select('*');
+      if (error) throw error;
+      return data ?? [];
+    },
+    async runHeartbeat(userId: string) {
+      await runHeartbeat(userId, heartbeatDeps);
+    },
+  });
+  console.log('[heartbeat] scheduler started, ticks every 10 minutes');
+}
 
 // ==========================================
 // PROCESS RESILIENCE
