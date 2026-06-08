@@ -4,9 +4,9 @@
 
 **Goal:** Build the user-facing onboarding flow that Slice β specified as a contract. Web landing → iMessage handshake with 5-image showcase → web profile form → writes the 3-table contract → first heartbeat fires within 12h.
 
-**Architecture:** Web landing at `uscbia.com/george` uses an `sms:` URL with a server-generated 6-char code prefilled in the message body. george's iMessage handler recognizes the `-START` suffix, looks up the pending_users row, sends 5 messages in sequence (greeting, contact card vcf, "what I can do" line, 5 image attachments with captions, onboarding link). The web profile form (4 steps: USC email verify, identity, interests, heartbeat prefs) writes user_profiles + user_heartbeat_config + user_heartbeat_instructions + pairs a cohort senior + sends a Slack webhook.
+**Architecture:** Web landing at `uscbia.com/george` uses an `sms:` URL with a server-generated 6-char code prefilled in the message body. george's iMessage handler recognizes the `-START` suffix, looks up the pending_users row, sends 5 messages in sequence (greeting, contact card vcf, "what I can do" line, 5 image attachments with captions, onboarding link). The web profile form (4 steps: USC email verify, identity, interests, heartbeat prefs) writes user_profiles + user_heartbeat_config + user_heartbeat_instructions.
 
-**Tech Stack:** TypeScript (george, Node), Next.js 14 (bia-roommate), Supabase (auth + 6 tables already migrated), `@photon-ai/imessage-kit` for outgoing iMessage with attachments, node-cron for daily cleanup, Slack webhook URL for senior notifications.
+**Tech Stack:** TypeScript (george, Node), Next.js 14 (bia-roommate), Supabase (auth + 6 tables already migrated), `@photon-ai/imessage-kit` for outgoing iMessage with attachments, node-cron for daily cleanup.
 
 **Spec reference:** `docs/superpowers/specs/2026-06-07-memory-heartbeat-profiles-design.md`, "Onboarding contract" section. The `pending_users` table (migration 015) is already in prod.
 
@@ -15,14 +15,13 @@
 - PR #4 hotfix merged (Zod v4 + Poke polish)
 - bia-roommate PR #64 (`/account/george` hub) merged OR being merged in parallel
 - 5 showcase images generated externally by user (Bobby) via GPT Image 2, in BIA brand style. **Image generation is NOT part of this plan**; tasks reference file paths and ship with placeholder PNGs.
-- Slack webhook URL for cohort senior notifications — `BIA_SENIOR_SLACK_WEBHOOK` env var
-- `cohort_seniors` table exists in Supabase with rows for current seniors
 
 **Out of scope:**
 - Squad-mode tool (`squad_find`) — Slice D
 - Marketplace approval flow — Slice C
 - DPS spatial overlay — Slice A
 - Image generation itself — manual via GPT Image 2
+- **Cohort senior pairing + Slack notification — DEFERRED (mentor bandwidth).** To resurrect later: (1) add migration creating `cohort_seniors (id uuid pk, name text, slack_user_id text, mentee_count int default 0, active boolean default true)` + seed rows, (2) re-add `app/george/api/pair-senior/route.ts` (load-balance by `mentee_count`), (3) re-add the `seniorRes` fetch + `relationships` write + Slack webhook block in Task 9 Step 1's submit handler, (4) set `BIA_SENIOR_SLACK_WEBHOOK` env var.
 
 ---
 
@@ -55,9 +54,8 @@
 | `app/george/profile/_components/IdentityStep.tsx` | Step 2 |
 | `app/george/profile/_components/InterestsStep.tsx` | Step 3 |
 | `app/george/profile/_components/HeartbeatPrefsStep.tsx` | Step 4 |
-| `app/george/profile/api/submit/route.ts` | Submit handler; writes 3-table contract + pairs senior + notifies |
+| `app/george/profile/api/submit/route.ts` | Submit handler; writes 3-table contract |
 | `app/george/profile/confirm/page.tsx` | Post-submit "george knows you now" confirmation page |
-| `app/george/api/pair-senior/route.ts` | Internal call from profile-submit; load-balances cohort_seniors |
 
 ### Files to MODIFY
 
@@ -75,7 +73,7 @@ None.
 
 ## Task ordering rationale
 
-Backend (george) before frontend (bia-roommate) because the iMessage handshake is what closes the loop. Tasks 1-5 cover george-side; 6-10 cover bia-roommate web side; 11 covers cohort senior pairing; 12 covers docs + cutover.
+Backend (george) before frontend (bia-roommate) because the iMessage handshake is what closes the loop. Tasks 1-6 cover george-side; 7-9 cover bia-roommate web side; 10 covers smoke + E2E; 11 covers PRs/tagging.
 
 The bia-roommate landing page (Task 6) can technically ship before the iMessage handshake is built, but it would link freshmen to a dead end. Better order: handshake first, then web.
 
@@ -107,7 +105,6 @@ george's `.env.example` appends:
 
 ```
 # Slice B onboarding
-BIA_SENIOR_SLACK_WEBHOOK=https://hooks.slack.com/services/replace
 GEORGE_IMESSAGE_PHONE=+1XXXXXXXXXX
 ONBOARDING_PROFILE_URL_BASE=https://uscbia.com/george/profile
 ```
@@ -1144,11 +1141,12 @@ git commit -m "feat(george): 4-step profile form (verify, identity, interests, p
 
 ---
 
-## Task 9: Profile-submit API + cohort senior pairing
+## Task 9: Profile-submit API
+
+> **Note:** Cohort senior pairing + Slack notification are DEFERRED in this slice (see Out of scope). The block below writes only the 3-table contract. The deferred resurrection recipe is in the Out-of-scope section near the top of this plan.
 
 **Files:**
 - Create: `app/george/profile/api/submit/route.ts`
-- Create: `app/george/api/pair-senior/route.ts` (internal)
 
 - [ ] **Step 1: Submit handler**
 
@@ -1206,22 +1204,13 @@ export async function POST(req: NextRequest) {
   const userId = (pending as any).user_id;
   if (!userId) return NextResponse.json({ error: 'user not verified' }, { status: 400 });
 
-  // Pair cohort senior
-  const seniorRes = await fetch(new URL('/george/api/pair-senior', req.url), {
-    method: 'POST',
-    body: JSON.stringify({ user_id: userId, year: identity.year }),
-  });
-  const senior = await seniorRes.json();
-
-  const today = new Date().toISOString().slice(0, 10);
-
   // Write 3-table contract
   const { error: profileErr } = await supabase.from('user_profiles').insert({
     user_id: userId,
     identity: renderIdentity(identity),
     academic: `year: ${identity.year}, major: ${identity.major}`,
     interests: renderInterests(interests),
-    relationships: senior?.name ? `cohort_senior: ${senior.name} (assigned ${today})` : '',
+    relationships: '',
     state: `new_user: true, onboarded_at: ${new Date().toISOString()}`,
     george_notes: '',
   });
@@ -1250,21 +1239,6 @@ export async function POST(req: NextRequest) {
 
   // Mark pending row completed
   await supabase.from('pending_users').update({ status: 'completed' }).eq('code', code);
-
-  // Slack/Discord notification
-  if (process.env.BIA_SENIOR_SLACK_WEBHOOK && senior?.name) {
-    try {
-      await fetch(process.env.BIA_SENIOR_SLACK_WEBHOOK, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: `new mentee: ${identity.name}, ${identity.year}, paired with ${senior.name}`,
-        }),
-      });
-    } catch (err) {
-      console.error('senior notification webhook failed:', err);
-    }
-  }
 
   return NextResponse.json({ ok: true });
 }
@@ -1304,49 +1278,12 @@ function renderStandingInstructions(identity: any, interests: any, prefs: any): 
 }
 ```
 
-- [ ] **Step 2: Cohort senior pairing API**
-
-```typescript
-// app/george/api/pair-senior/route.ts
-import { NextRequest, NextResponse } from 'next/server';
-import { createServiceRoleClient } from '@/lib/supabase/service-role';
-
-export async function POST(req: NextRequest) {
-  const { user_id, year } = await req.json();
-  const supabase = createServiceRoleClient();
-
-  // Load-balance: pick the senior with the fewest current mentees.
-  // Assume cohort_seniors has { id, name, mentee_count, active }.
-  const { data: senior, error } = await supabase
-    .from('cohort_seniors')
-    .select('*')
-    .eq('active', true)
-    .order('mentee_count', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (error || !senior) {
-    return NextResponse.json({ name: null, error: error?.message ?? 'no seniors available' });
-  }
-
-  // Increment mentee_count
-  await supabase
-    .from('cohort_seniors')
-    .update({ mentee_count: (senior.mentee_count ?? 0) + 1 })
-    .eq('id', senior.id);
-
-  // Optional: write a mentee_assignments row if the table exists.
-
-  return NextResponse.json({ name: senior.name, id: senior.id });
-}
-```
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 2: Commit**
 
 ```bash
 cd ~/Code/bia-roommate
-git add app/george/profile/api/submit/route.ts app/george/api/pair-senior/route.ts
-git commit -m "feat(george): profile-submit writes 3-table contract + cohort senior pairing"
+git add app/george/profile/api/submit/route.ts
+git commit -m "feat(george): profile-submit writes 3-table contract"
 ```
 
 ---
@@ -1423,7 +1360,7 @@ cd ~/Code/bia-roommate
 git push -u origin feat/slice-b-onboarding-web
 gh pr create --title "feat: Slice B — /george landing + profile form" --body-file <(cat <<'EOF'
 ## Summary
-Client-side half of Slice B onboarding. /george landing page mints a pending_users code and links to iMessage via `sms:` URL. /george/profile is a 4-step form (USC email verify, identity, interests, heartbeat prefs) that writes the 3-table contract on submit + pairs a cohort senior + fires Slack notification.
+Client-side half of Slice B onboarding. /george landing page mints a pending_users code and links to iMessage via `sms:` URL. /george/profile is a 4-step form (USC email verify, identity, interests, heartbeat prefs) that writes the 3-table contract on submit. Cohort senior pairing + Slack notification deferred to a later slice (mentor bandwidth).
 
 Companion george PR: see above.
 
@@ -1432,14 +1369,11 @@ Companion george PR: see above.
 - app/george/api/code/route.ts (mint pending_users row)
 - app/george/profile/page.tsx + 3 step components + confirm page
 - app/george/profile/api/submit/route.ts (3-table contract writer)
-- app/george/api/pair-senior/route.ts (load-balanced senior pairing)
 
 ## Test plan
 - [ ] /george landing renders, "Connect with george" opens iMessage with prefilled code
 - [ ] /george/profile 4-step form completes
 - [ ] On submit: user_profiles, user_heartbeat_config, user_heartbeat_instructions all populated
-- [ ] cohort_seniors.mentee_count incremented for paired senior
-- [ ] Slack webhook fires (if env configured)
 EOF
 )
 ```
@@ -1457,9 +1391,9 @@ git push origin v2.2.0-slice-b-onboarding
 
 ## Self-review checklist
 
-- [x] **Spec coverage:** Onboarding contract from Slice β spec covered. Tasks 2 (DB layer), 3 (showcase), 4 (handshake), 5 (handler wiring), 6 (cleanup cron), 7 (landing), 8 (profile form), 9 (submit + pairing).
+- [x] **Spec coverage:** Onboarding contract from Slice β spec covered minus the senior-pairing optional add-on. Tasks 2 (DB layer), 3 (showcase), 4 (handshake), 5 (handler wiring), 6 (cleanup cron), 7 (landing), 8 (profile form), 9 (submit). Senior pairing explicitly deferred — resurrection recipe in Out-of-scope.
 - [x] **Placeholder scan:** Showcase PNGs flagged as placeholders requiring Bobby's GPT Image 2 outputs. george.vcf flagged for phone number. `GEORGE_IMESSAGE_PHONE` env var holds the real number.
-- [x] **Type consistency:** `PendingUser` type used across pending-users.ts, handshake.ts, and submit. `code: string` of length 6 invariant enforced via `isValidCodeFormat` + Zod schema. Cohort senior shape (`{ name, id }`) consistent.
+- [x] **Type consistency:** `PendingUser` type used across pending-users.ts, handshake.ts, and submit. `code: string` of length 6 invariant enforced via `isValidCodeFormat` + Zod schema.
 - [x] **TDD throughout:** Tasks 2, 4 have failing-test-first steps. Tasks 7-9 are UI/API where smoke testing replaces unit testing per project pattern.
 
 ## Acceptance criteria
@@ -1471,7 +1405,7 @@ git push origin v2.2.0-slice-b-onboarding
   4. Click the profile link → complete the 4-step form
   5. See "george knows you now" confirmation
   6. Within 12 hours, receive a heartbeat-driven nudge (or HEARTBEAT_OK silently)
-- Supabase shows: `user_profiles` row, `user_heartbeat_config` row, `user_heartbeat_instructions` row, `pending_users.status = 'completed'`, `cohort_seniors.mentee_count` incremented for the paired senior
+- Supabase shows: `user_profiles` row, `user_heartbeat_config` row, `user_heartbeat_instructions` row, `pending_users.status = 'completed'`
 - 5 showcase images are real (BIA brand, GPT Image 2 outputs) — manual swap by Bobby, not part of this plan's code
 
 ## Cross-references
