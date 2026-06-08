@@ -9,7 +9,7 @@ George is the AI companion for [BIA (Bridging Internationals Association)](https
 Most campus AI chatbots are GPT wrappers with a system prompt that says "You are a helpful assistant for X University." George is the opposite of that.
 
 - **Voice distilled from real WeChat messages.** The founder of BIA spent years organizing on WeChat. George's persona, idioms, register, even his emoji palette are pulled from those actual messages. He does not sound like a chatbot because he is not trying to.
-- **Multi-agent architecture.** Five domain sub-agents (event, course, housing, social, campus) each with their own scoped toolset, voice calibration, and domain rules. An intent classifier routes each message.
+- **Multi-agent architecture.** One orchestrator + three intent sub-agents (Find People, What's Happening, Know Things) built on `@anthropic-ai/claude-agent-sdk`. Each agent has scoped tools, voice calibration, and domain rules. The orchestrator routes via Agent SDK's description-based dispatch.
 - **Anti-fabrication by design.** George does not invent course numbers, professor names, event dates, or prices. When he does not know, he says "戳到知识盲区了😢" and uses a tool to find out.
 - **Calendar-aware moods.** During finals week George is grumpy and terse. During orientation he is warm and welcoming. Mood is driven by the actual USC academic calendar.
 - **Section-level course advice.** Not "CSCI 102 is a good intro class." George knows that BUAD 280 Sweeney gives 200-question 90-minute exams, that writ150 quality varies more by professor than by topic, and that you should default to RMP 5.0 professors and surface the highest available rating when none clear 4.0.
@@ -39,9 +39,10 @@ Most campus AI chatbots are GPT wrappers with a system prompt that says "You are
 │   rate-limit ──► injection filter ──► student lookup       │
 │                                          │                 │
 │                                          ▼                 │
-│   intent classifier ──► sub-agent loop (up to 12 tool      │
-│                          calls per turn) ──► memory        │
-│                          extraction (async) ──► response   │
+│   orchestrator (Agent SDK) ──► sub-agent dispatch          │
+│   + routing ──► sub-agent loop (up to 12 tool             │
+│                  calls per turn) ──► memory               │
+│                  extraction (async) ──► response           │
 └────────────────────────────────────────────────────────────┘
         │                       │                  │
         │ Claude Sonnet 4.6     │ Supabase         │ Apify
@@ -89,7 +90,7 @@ For deeper setup (iMessage Full Disk Access, Cloudflare tunnel, cloud deploy wit
 
 Production runs in two modes off the same codebase, switched by env vars:
 
-**Mode 1 — Agent backend (Cloudflare Container, Vercel function, or local dev).** Runs the full agent loop: intent classifier, sub-agents, tools, Supabase, Anthropic. Required env: `ANTHROPIC_API_KEY`, `SUPABASE_*`, `ADMIN_TOKEN`. Optional: `ADMIN_TOKEN_PHONE` if serving the iPhone Shortcuts (Path B) endpoints. `IMESSAGE_ENABLED=false` so it doesn't try to open Photon on a Linux container.
+**Mode 1 — Agent backend (Cloudflare Container, Vercel function, or local dev).** Runs the full agent loop: orchestrator dispatch to sub-agents, tools, Supabase, Anthropic. Required env: `ANTHROPIC_API_KEY`, `SUPABASE_*`, `ADMIN_TOKEN`. Optional: `ADMIN_TOKEN_PHONE` if serving the iPhone Shortcuts (Path B) endpoints. `IMESSAGE_ENABLED=false` so it doesn't try to open Photon on a Linux container.
 
 **Mode 2 — iMessage bridge (Mac mini in China).** Runs ONLY the iMessage adapter. Reads new iMessages via Photon SDK, POSTs each to the agent backend's `/chat`, sends the response back via SDK. Required env: `IMESSAGE_ENABLED=true`, `BACKEND_RELAY_URL=https://your-backend`, `ADMIN_TOKEN=<must match backend>`. Does NOT need Anthropic / Supabase / Maps keys — config.ts skips those required-checks when `BACKEND_RELAY_URL` is set.
 
@@ -109,13 +110,18 @@ See [CLAUDE.md](CLAUDE.md) for the full topology + deploy steps.
 
 ```
 src/
-  agent/                  Persona, intent classifier, tool registry, agent loop
-    personality.ts        Persona prompts, voice calibration, mood logic
+  agent/                  Orchestrator, sub-agents, session state
+    orchestrator.ts       Agent SDK orchestrator + direct tools (set_reminder, load_skill)
+    agents.config.ts      Sub-agent definitions + tool routing
+    session-store.ts      Supabase-backed conversation memory
     bia-lore.ts           USC locations, neighborhoods, signature phrases, anti-patterns
-    george.ts             Main message processor (rate limit → router → loop)
-    intent-classifier.ts  Routes to sub-agents (event/course/housing/social/campus)
-    tool-registry.ts      All registered tools
-  tools/                  21 callable tools (search_events, get_course_reviews, ...)
+  prompts/                Shared + specialized voice prompts
+    master.md             Shared identity (loaded into all 4 agents)
+    orchestrator.md       Routing logic
+    find-people.md        Squad mode rules
+    whats-happening.md    Events + places
+    know-things.md        USC knowledge
+  tools/                  23 callable tools (search_events, get_course_reviews, ...)
   db/                     Supabase helpers (students, messages, reminders, events)
   adapters/               WeChat (XML webhook), iMessage (Photon SDK), rate-limiter, send-message
   scrapers/               Instagram (Apify), USC calendar (iCal)
@@ -153,9 +159,9 @@ Network boundary: uscbia.com's relay forwards to `GEORGE_BACKEND_URL` (Cloudflar
 
 See [CLAUDE.md](CLAUDE.md) for the full guardrails. Short version:
 
-- **Persona is the product.** Read [AGENT.md](AGENT.md) before editing `src/agent/personality.ts` or `src/agent/bia-lore.ts`. The voice rules are non-negotiable.
+- **Persona is the product.** Read [AGENT.md](AGENT.md) before editing `prompts/master.md` or `src/agent/bia-lore.ts`. The voice rules are non-negotiable.
 - **No invented facts.** Course numbers, professor names, event dates, prices. If George does not know, he says so and uses a tool.
-- **Tool registration is side-effect imports.** Add the new tool file to `src/index.ts` or the registry will never see it.
+- **Tool registration is declarative.** Add the new tool to `src/tools/index.ts` and wire it into `src/agent/agents.config.ts`. The Agent SDK handles dispatch.
 - **Mac-only code stays env-gated.** Anything Photon SDK related sits behind `if (config.imessageEnabled)`. Cloud deploy depends on this.
 
 ## Built by

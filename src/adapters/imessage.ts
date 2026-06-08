@@ -1,9 +1,9 @@
 // iMessage adapter (macOS only, via @photon-ai/imessage-kit). Two modes:
 //
 // 1. LOCAL mode (config.backendRelayUrl unset): the adapter reads new iMessages
-//    via Photon SDK and calls processMessage() in-process. The full agent loop
-//    (intent classifier, sub-agents, tools, Supabase, Anthropic) runs on this
-//    host. Used when the whole George stack is colocated on one Mac.
+//    via Photon SDK and calls runOrchestrator() in-process. The full agent loop
+//    (orchestrator + sub-agents via Agent SDK, tools, Supabase, Anthropic) runs
+//    on this host. Used when the whole George stack is colocated on one Mac.
 //
 // 2. BRIDGE mode (config.backendRelayUrl set): the adapter reads new iMessages
 //    locally but forwards them over HTTPS to a remote backend (e.g. the
@@ -18,14 +18,14 @@
 // relay_unauthorized / relay_unreachable so config errors surface immediately
 // instead of failing silently on the first incoming message.
 //
-// Header last reviewed: 2026-05-28
+// Header last reviewed: 2026-06-07
 
 // IMessageSDK is type-only at module load so the package's native binding
 // never gets required on Linux. The runtime instance is dynamic-imported
 // inside startIMessageAdapter() after the platform === 'darwin' guard.
 import type { IMessageSDK as IMessageSDKType } from '@photon-ai/imessage-kit'
 import { config } from '../config.js'
-import { processMessage } from '../agent/george.js'
+import { runOrchestrator } from '../agent/orchestrator.js'
 import { log } from '../observability/logger.js'
 import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS } from './split-response.js'
 import type { IncomingMessage } from './types.js'
@@ -154,15 +154,24 @@ export async function startIMessageAdapter() {
 
         try {
           // Bridge mode: forward to remote backend and use whatever it returns.
-          // Local mode: run processMessage in-process.
-          const response = config.backendRelayUrl
-            ? await forwardToBackend(incoming)
-            : await processMessage(incoming)
+          // Local mode: run runOrchestrator in-process.
+          let response: string | null
+          if (config.backendRelayUrl) {
+            response = await forwardToBackend(incoming)
+          } else {
+            const collectedText: string[] = []
+            for await (const event of runOrchestrator({
+              userId: incoming.userId,
+              channel: 'imessage',
+              text: incoming.text,
+            })) {
+              if (event.type === 'text' && event.text) {
+                collectedText.push(event.text)
+              }
+            }
+            response = collectedText.join('') || null
+          }
 
-          // null response = filtered (automated-message / meeting-invite noise).
-          // Silently drop; no reply back to the sender. Bridge mode never
-          // returns null — it returns the fallback string instead, which DOES
-          // get sent (because backend unreachable IS a user-visible event).
           if (response !== null) {
             const parts = splitIntoMessages(response)
             for (let i = 0; i < parts.length; i++) {

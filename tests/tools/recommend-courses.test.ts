@@ -1,14 +1,16 @@
-import { describe, it, expect, beforeAll, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+
+// Stub required env vars BEFORE config.ts loads
+process.env.ANTHROPIC_API_KEY ||= 'test-key'
+process.env.SUPABASE_URL ||= 'http://localhost'
+process.env.SUPABASE_ANON_KEY ||= 'test-key'
+process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-key'
 
 const fetchMock = vi.fn()
 // @ts-expect-error override
 globalThis.fetch = fetchMock
 
 describe('recommend_courses tool', () => {
-  beforeAll(async () => {
-    await import('../../src/tools/recommend-courses.js')
-  })
-
   afterEach(() => fetchMock.mockReset())
 
   it("POSTs with mode='free' to avoid LLM agent timeout", async () => {
@@ -16,8 +18,8 @@ describe('recommend_courses tool', () => {
       ok: true,
       json: async () => ({ recommendations: [{ dept: 'CSCI', code: '201L' }] }),
     })
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    await executeTool('recommend_courses', { interests: 'AI, startups' })
+    const { recommendCoursesHandler } = await import('../../src/tools/recommend-courses.js')
+    await recommendCoursesHandler({ interests: 'AI, startups' })
     expect(fetchMock).toHaveBeenCalledOnce()
     const call = fetchMock.mock.calls[0]
     const url = call[0] as string
@@ -33,15 +35,15 @@ describe('recommend_courses tool', () => {
       ok: true,
       json: async () => ({ recommendations: [] }),
     })
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('recommend_courses', { interests: 'abstract algebra' })
+    const { recommendCoursesHandler } = await import('../../src/tools/recommend-courses.js')
+    const result = await recommendCoursesHandler({ interests: 'abstract algebra' })
     expect(result.toLowerCase()).toContain('no recommendations')
   })
 
   it('returns failure message on non-ok response', async () => {
     fetchMock.mockResolvedValueOnce({ ok: false, status: 503 })
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('recommend_courses', { interests: 'chess' })
+    const { recommendCoursesHandler } = await import('../../src/tools/recommend-courses.js')
+    const result = await recommendCoursesHandler({ interests: 'chess' })
     expect(result).toContain('503')
   })
 })

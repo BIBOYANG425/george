@@ -4,10 +4,11 @@
 //
 // Header last reviewed: 2026-04-21
 
-import { registerTool } from '../agent/tool-registry.js'
+import { z } from 'zod'
 import { resolveAlias } from '../services/usc-aliases.js'
 import { geocode, distanceMatrix, GeoError } from '../services/google-maps.js'
 import { checkGeoBudget } from '../services/geo-rate-limit.js'
+import { wrapTool } from './_wrap.js'
 
 type Mode = 'walking' | 'driving' | 'transit' | 'bicycling'
 const ALLOWED_MODES: readonly Mode[] = ['walking', 'driving', 'transit', 'bicycling'] as const
@@ -62,56 +63,60 @@ async function resolveOrigin(
   }
 }
 
-registerTool(
-  'travel_time',
-  'Compute travel time and distance between two locations. Use BEFORE claiming something is walkable from somewhere. Inputs: from, to (names like "Frat Row" or "K-town" or LA addresses), mode (walking/driving/transit/bicycling, default walking). Returns { minutes, km, walkable, mode } or an error object.',
-  {
-    properties: {
-      from: { type: 'string', description: 'Origin name or address' },
-      to: { type: 'string', description: 'Destination name or address' },
-      mode: {
-        type: 'string',
-        description: 'Travel mode: walking (default) | driving | transit | bicycling',
-      },
-    },
-    required: ['from', 'to'],
-  },
-  async (input) => {
-    const from = String(input.from ?? '')
-    const to = String(input.to ?? '')
-    const rawMode = String(input.mode ?? 'walking').toLowerCase()
-    const mode: Mode = isValidMode(rawMode) ? rawMode : 'walking'
-    const studentId = String(input.student_id ?? '')
+const inputSchema = {
+  from: z.string().describe('Origin name or address'),
+  to: z.string().describe('Destination name or address'),
+  mode: z.string().optional().describe('Travel mode: walking (default) | driving | transit | bicycling'),
+  student_id: z.string().optional().describe('The student UUID (injected from context)'),
+}
 
-    if (!checkGeoBudget(studentId)) {
-      return JSON.stringify({ error: 'geo_budget_exceeded' } satisfies GeoToolError)
-    }
+export async function travelTimeHandler(input: {
+  from: string
+  to: string
+  mode?: string
+  student_id?: string
+}): Promise<string> {
+  const from = String(input.from ?? '')
+  const to = String(input.to ?? '')
+  const rawMode = String(input.mode ?? 'walking').toLowerCase()
+  const mode: Mode = isValidMode(rawMode) ? rawMode : 'walking'
+  const studentId = String(input.student_id ?? '')
 
-    const fromLoc = await resolveOrigin(from)
-    if ('error' in fromLoc) return JSON.stringify(fromLoc)
-    const toLoc = await resolveOrigin(to)
-    if ('error' in toLoc) return JSON.stringify(toLoc)
+  if (!checkGeoBudget(studentId)) {
+    return JSON.stringify({ error: 'geo_budget_exceeded' } satisfies GeoToolError)
+  }
 
-    try {
-      const matrix = await distanceMatrix([fromLoc], [toLoc], mode)
-      const el = matrix[0]?.[0]
-      if (!el) {
-        return JSON.stringify({
-          error: 'need_location',
-          hint: 'route could not be computed between those points',
-        })
-      }
+  const fromLoc = await resolveOrigin(from)
+  if ('error' in fromLoc) return JSON.stringify(fromLoc)
+  const toLoc = await resolveOrigin(to)
+  if ('error' in toLoc) return JSON.stringify(toLoc)
+
+  try {
+    const matrix = await distanceMatrix([fromLoc], [toLoc], mode)
+    const el = matrix[0]?.[0]
+    if (!el) {
       return JSON.stringify({
-        minutes: el.minutes,
-        km: el.km,
-        walkable: mode === 'walking' && el.minutes <= 20,
-        mode,
+        error: 'need_location',
+        hint: 'route could not be computed between those points',
       })
-    } catch (err) {
-      if (err instanceof GeoError) {
-        return JSON.stringify({ error: err.code } satisfies GeoToolError)
-      }
-      return JSON.stringify({ error: 'geo_unavailable' } satisfies GeoToolError)
     }
-  },
-)
+    return JSON.stringify({
+      minutes: el.minutes,
+      km: el.km,
+      walkable: mode === 'walking' && el.minutes <= 20,
+      mode,
+    })
+  } catch (err) {
+    if (err instanceof GeoError) {
+      return JSON.stringify({ error: err.code } satisfies GeoToolError)
+    }
+    return JSON.stringify({ error: 'geo_unavailable' } satisfies GeoToolError)
+  }
+}
+
+export const placesTool = wrapTool({
+  name: 'travel_time',
+  description: 'Compute travel time and distance between two locations. Use BEFORE claiming something is walkable from somewhere. Returns { minutes, km, walkable, mode } or an error object.',
+  schema: inputSchema,
+  handler: travelTimeHandler,
+})

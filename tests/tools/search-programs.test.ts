@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, vi } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 
 // Mock the searchWithFallback helper so the test is hermetic (no live Supabase).
 const mockSearch = vi.fn()
@@ -7,22 +7,15 @@ vi.mock('../../src/tools/search-helpers.js', () => ({
 }))
 
 describe('search_programs tool', () => {
-  beforeAll(async () => {
-    await import('../../src/tools/search-programs.js')
-  })
-
-  it('registers with query required', async () => {
-    const { getToolDefinitions } = await import('../../src/agent/tool-registry.js')
-    const tool = getToolDefinitions().find((t) => t.name === 'search_programs')
-    expect(tool).toBeDefined()
-    expect(tool?.input_schema.properties).toHaveProperty('query')
-    expect((tool?.input_schema as { required?: string[] }).required).toEqual(['query'])
+  it('tool name is search_programs', async () => {
+    const { searchProgramsTool } = await import('../../src/tools/search-programs.js')
+    expect(searchProgramsTool.name).toBe('search_programs')
   })
 
   it('returns a not-found message when nothing matches', async () => {
     mockSearch.mockResolvedValueOnce([])
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('search_programs', { query: 'zzzzznonsense_xyz' })
+    const { searchProgramsHandler } = await import('../../src/tools/search-programs.js')
+    const result = await searchProgramsHandler({ query: 'zzzzznonsense_xyz' })
     expect(result.toLowerCase()).toContain('no programs')
   })
 
@@ -30,8 +23,8 @@ describe('search_programs tool', () => {
     mockSearch.mockResolvedValueOnce([
       { name: 'Accounting (BS)', degree_type: 'BS', school: 'USC Marshall School of Business', description: 'Accounting description.' },
     ])
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('search_programs', { query: 'accounting' })
+    const { searchProgramsHandler } = await import('../../src/tools/search-programs.js')
+    const result = await searchProgramsHandler({ query: 'accounting' })
     expect(result).toContain('Accounting (BS)')
     expect(result).toContain('Marshall')
   })

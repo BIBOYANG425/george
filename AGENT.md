@@ -4,7 +4,7 @@
 > Voice distilled from the BIA founder's 2024 group messages (see
 > `.claude/skills/immortals/boyang/`). This doc is the single source of truth for
 > **who George is** and **what he does**，the executable prompts live in
-> `src/agent/personality.ts` and `src/agent/bia-lore.ts`.
+> `prompts/master.md` and `src/agent/bia-lore.ts`.
 
 ## Who George is
 
@@ -16,17 +16,24 @@ A senior 学长 (junior/senior-year Chinese international student) who has been 
 
 **Honesty > polish.** If you don't know, say "戳到知识盲区了😢" and use a tool. If you said something wrong, say "学长说错了" and restate，don't hedge or paraphrase.
 
-## What George does (5 sub-agents)
+## Architecture (Slice α — Claude Agent SDK)
 
-| Domain | Tools | What the sub-agent handles |
+george runs on `@anthropic-ai/claude-agent-sdk`. One orchestrator routes to three specialized sub-agents.
+
+- **Orchestrator** (`src/agent/orchestrator.ts`): receives the user message, holds 2 direct tools (`set_reminder`, `load_skill`), dispatches to sub-agents via Agent SDK's description-based routing, persists conversation state.
+- **Find People sub-agent**: matching, squad discovery, connection suggestions (3 tools).
+- **What's Happening sub-agent**: events, places, travel (4 tools).
+- **Know Things sub-agent**: courses, professors, programs, housing, campus knowledge (14 tools).
+
+Onboarding flow gates all sub-agent features until 4 profile fields are set.
+
+## What George does (3 sub-agents)
+
+| Sub-agent | Tools | What it handles |
 |---|---|---|
-| **event** | search_events, get_event_details, set_reminder, submit_event, suggest_connection | BIA event discovery + recommendation. Anti-zoom-mixer. Filters, doesn't enumerate. |
-| **course** | search_courses, get_course_reviews, recommend_courses, plan_schedule | Section-level course advice. Names professors, cites rmp. Honest about workload. |
-| **housing** | search_sublets, post_sublet | Rental ranges by neighborhood, dorm tier, Flywire/epay cost hierarchy. Never invents prices. |
-| **social** | suggest_connection, search_roommates, search_events | Based-on-evidence roommate/friend matching. Respects social-visibility opt-in. |
-| **campus** | campus_knowledge, update_profile | Study spots, dining, DPS Lyft, meal plans, food scene. Floor-level specific. |
-
-An intent classifier (`src/agent/george.ts` → `classifyIntent`) routes each message to one of these. Onboarding flow runs separately and gates all other features until the 4 profile fields are set.
+| **Find People** | lookup_student, update_profile, suggest_connection | Matching, squad discovery, connection suggestions. Match on specific evidence. Respects privacy gates. |
+| **What's Happening** | search_events, submit_event, get_event_details, travel_time | BIA event discovery + recommendation. Anti-zoom-mixer. Filters, doesn't enumerate. |
+| **Know Things** | search_courses, get_course_reviews, recommend_courses, plan_schedule, campus_knowledge, search_sublets, post_sublet + 6 more | Section-level course advice. Housing ranges by neighborhood. Study spots, dining, DPS Lyft. Never invents prices/names. |
 
 ## Voice fingerprint (the specific tells)
 
@@ -102,14 +109,15 @@ These phrases are banned and post-checked by `voiceLint()` in `bia-lore.ts` (`AN
 
 When you need to edit George's voice, here's where to look:
 
-- **Persona identity + voice fingerprint + DO/DON'T + few-shots** → `src/agent/personality.ts` `GEORGE_BASE`
-- **Per-sub-agent voice calibration** (event/course/housing/social/campus) → `src/agent/personality.ts` `VOICE_CALIBRATION`
-- **Per-sub-agent domain rules + tools** → `src/agent/personality.ts` `DOMAIN_EXPERTISE`
+- **Persona identity + voice fingerprint + DO/DON'T + few-shots** → `prompts/master.md`
+- **Per-sub-agent voice calibration** (Find People / What's Happening / Know Things) → `prompts/find-people.md`, `prompts/whats-happening.md`, `prompts/know-things.md`
+- **Per-sub-agent domain rules + tools** → same prompt files
+- **Orchestrator routing logic** → `prompts/orchestrator.md`
 - **Signature phrases (the optional sprinkle)** → `src/agent/bia-lore.ts` `SIGNATURE_PHRASES` (max 1 per reply)
 - **Banned phrases + regex enforcer** → `src/agent/bia-lore.ts` `ANTI_PATTERNS` + `voiceLint()`
 - **USC locations / neighborhoods / events / pain points** → `src/agent/bia-lore.ts` top-level exports
-- **Mood by calendar** (finals, orientation, offer season, visa panic) → `src/agent/personality.ts` `getCurrentMood()` + `data/usc-calendar.json`
-- **Onboarding flow prompts** → `src/agent/personality.ts` `ONBOARDING_*_PROMPT` constants
+- **Mood by calendar** (finals, orientation, offer season, visa panic) → `prompts/master.md` (via `getCurrentMood()` in orchestrator) + `data/usc-calendar.json`
+- **Onboarding flow prompts** → `prompts/master.md` + orchestrator logic in `src/agent/orchestrator.ts`
 
 Distilled founder voice source: `.claude/skills/immortals/boyang/`，`procedure.md`, `interaction.md`, `memory.md`, `personality.md`. If adding new verbatim phrases, pull from here.
 

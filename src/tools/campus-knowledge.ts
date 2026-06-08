@@ -1,6 +1,6 @@
-import { registerTool } from '../agent/tool-registry.js'
-import { supabase } from '../db/client.js'
+import { z } from 'zod'
 import { searchWithFallback } from './search-helpers.js'
+import { wrapTool } from './_wrap.js'
 
 // Embeds text via OpenAI text-embedding-3-small (1536-d, matches schema).
 // Returns null if OPENAI_API_KEY is not set — callers should fall back to
@@ -22,33 +22,37 @@ export async function embedText(text: string): Promise<number[] | null> {
   return data.data[0].embedding
 }
 
-registerTool(
-  'campus_knowledge',
-  "Search George's campus knowledge base for study spots, food recs, building tips.",
-  {
-    properties: {
-      query: { type: 'string', description: 'What to search for' },
-      category: { type: 'string', description: 'Category: food, study, buildings, tips, local' },
-    },
-    required: ['query'],
-  },
-  async (input) => {
-    const query = input.query as string
-    const category = input.category as string | undefined
+const inputSchema = {
+  query: z.string().describe('What to search for'),
+  category: z.string().optional().describe('Category: food, study, buildings, tips, local'),
+}
 
-    const data = await searchWithFallback<{
-      title: string
-      content: string
-      category: string
-    }>('campus_knowledge', 'title, content, category', query, {
-      ftsColumn: 'content',
-      ilikeColumns: ['title', 'content'],
-      applyFilters: (q) => (category ? q.eq('category', category) : q),
-    })
+export async function campusKnowledgeHandler(input: {
+  query: string
+  category?: string
+}): Promise<string> {
+  const query = input.query
+  const category = input.category
 
-    if (!data || data.length === 0) {
-      return 'No campus knowledge found for that query.'
-    }
-    return JSON.stringify(data, null, 2)
-  },
-)
+  const data = await searchWithFallback<{
+    title: string
+    content: string
+    category: string
+  }>('campus_knowledge', 'title, content, category', query, {
+    ftsColumn: 'content',
+    ilikeColumns: ['title', 'content'],
+    applyFilters: (q) => (category ? q.eq('category', category) : q),
+  })
+
+  if (!data || data.length === 0) {
+    return 'No campus knowledge found for that query.'
+  }
+  return JSON.stringify(data, null, 2)
+}
+
+export const campusKnowledgeTool = wrapTool({
+  name: 'campus_knowledge',
+  description: "Search George's campus knowledge base for study spots, food recs, building tips.",
+  schema: inputSchema,
+  handler: campusKnowledgeHandler,
+})

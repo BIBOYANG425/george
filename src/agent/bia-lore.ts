@@ -2,10 +2,10 @@
  * BIA cultural grounding + voice discipline for George.
  *
  * This file is the single source of truth for BIA/USC cultural references and
- * anti-AI-slop guardrails. It exists so that `personality.ts` (the prompt
- * composer) and `__tests__/voice-snapshot.test.ts` (the response linter) share
- * the same regex list，if we add a banned phrase here, both the prompt and the
- * post-response guard pick it up automatically.
+ * anti-AI-slop guardrails. The prompt files in src/agent/prompts/ and the
+ * response linter in tests/ share the same regex list — if we add a banned
+ * phrase here, both the prompt and the post-response guard pick it up
+ * automatically.
  *
  * Everything here should be drawn from the BIA content strategy library
  * (`BIA service Content Strategy/content/**`)，these are BIA's own phrases, so

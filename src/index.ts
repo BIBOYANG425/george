@@ -1,10 +1,10 @@
-// Express server entry. Registers tools (side-effect imports — count is reported
-// at startup via getToolDefinitions().length), mounts WeChat adapter, starts
+// Express server entry. Imports ALL_TOOLS (tool count reported at startup),
+// mounts WeChat adapter, starts
 // iMessage watcher, boots 4 cron jobs (proactive match / reminders / IG + USC
 // scrapes), and loads the skill registry. Nothing routes through this file at
-// runtime — message flow lives in agent/george.ts; this is wire-up only.
+// runtime — message flow lives in agent/orchestrator.ts; this is wire-up only.
 //
-// Header last reviewed: 2026-05-22
+// Header last reviewed: 2026-06-07
 
 import express from 'express'
 import cors from 'cors'
@@ -12,41 +12,23 @@ import cron from 'node-cron'
 import { config } from './config.js'
 import { createWeChatRouter } from './adapters/wechat.js'
 import { startIMessageAdapter, stopIMessageAdapter } from './adapters/imessage.js'
-import { processMessage } from './agent/george.js'
+import { runOrchestrator } from './agent/orchestrator.js'
+import { createSupabaseSessionStore } from './agent/session-store.js'
 import { getStats, log } from './observability/logger.js'
 import { matchStudentsToEvents } from './jobs/proactive.js'
 import { sendPendingReminders } from './jobs/reminder-sender.js'
 import { scrapeInstagram } from './scrapers/instagram.js'
 import { scrapeUSCEvents } from './scrapers/usc-events.js'
 import { loadAllSkills, getRegistryStats } from './skills/index.js'
-import { getToolDefinitions } from './agent/tool-registry.js'
+import { ALL_TOOLS } from './tools/index.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
 import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filter.js'
 
-// Import ALL tools to register them
-import './tools/search-events.js'
-import './tools/get-event-details.js'
-import './tools/campus-knowledge.js'
-import './tools/freshman-faq.js'
-import './tools/course-tips.js'
-import './tools/lookup-student.js'
-import './tools/get-student-academic-state.js'
-import './tools/search-courses.js'
-import './tools/describe-course.js'
-import './tools/get-course-reviews.js'
-import './tools/get-rmp-ratings.js'
-import './tools/recommend-courses.js'
-import './tools/plan-schedule.js'
-import './tools/search-programs.js'
-import './tools/search-roommates.js'
-import './tools/search-sublets.js'
-import './tools/post-sublet.js'
-import './tools/set-reminder.js'
-import './tools/suggest-connection.js'
-import './tools/submit-event.js'
-import './tools/load-skill.js'
-import './tools/update-profile.js'
-import './tools/places.js'
+// ALL_TOOLS (imported above) registers all 23 tools as a side effect.
+
+// Instantiated once at module load — createSupabaseSessionStore() creates a
+// Supabase client; calling it per-request would leak connections.
+const sessionStore = createSupabaseSessionStore()
 
 const app = express()
 
@@ -77,7 +59,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     character: 'George — BIA 学长',
-    tools: getToolDefinitions().length,
+    tools: Object.keys(ALL_TOOLS).length,
   })
 })
 
@@ -122,13 +104,34 @@ app.post('/chat', adminAuth, async (req, res) => {
     if (!body?.text || typeof body.text !== 'string') {
       return res.status(400).json({ error: 'text is required' })
     }
-    const response = await processMessage({
-      userId: body.userId || 'dev-console',
-      platform: body.platform || 'imessage',
-      text: body.text,
-      msgType: 'text',
-      timestamp: Date.now(),
+    const userId = body.userId || 'dev-console'
+    const text = body.text
+    const channel = body.platform === 'wechat' ? 'web' : 'imessage'
+
+    // Save user turn before running the orchestrator so the turn is persisted
+    // even if the orchestrator fails. save() only writes the last message in the
+    // array, so we call it once per turn.
+    await sessionStore.save(userId, {
+      sessionId: userId,
+      messages: [{ role: 'user', content: text }],
+      systemContext: {},
     })
+
+    const collectedText: string[] = []
+    for await (const event of runOrchestrator({ userId, channel, text, sessionStore })) {
+      if (event.type === 'text' && event.text) {
+        collectedText.push(event.text)
+      }
+    }
+    const response = collectedText.join('')
+
+    // Save assistant turn.
+    await sessionStore.save(userId, {
+      sessionId: userId,
+      messages: [{ role: 'assistant', content: response }],
+      systemContext: {},
+    })
+
     res.json({ response })
   } catch (err) {
     // Log the real error for diagnostics, return a generic message to the
@@ -180,27 +183,42 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
     return
   }
   // Ack the Shortcut immediately so the iPhone automation can return; run
-  // processMessage async and write the response to the outgoing queue when
+  // the orchestrator async and write the response to the outgoing queue when
   // it lands. Polling Shortcut picks it up on the next tick.
   res.status(202).json({ accepted: true })
-  void processMessage({
-    userId: body.sender,
-    platform: 'imessage',
-    text: body.text,
-    msgType: 'text',
-    timestamp: typeof body.timestamp === 'number' ? body.timestamp : Date.now(),
-  })
-    .then(async (reply) => {
-      if (!reply) return // filtered as automated-message noise
-      try {
-        await enqueueOutgoing(body.sender!, reply)
-      } catch (err) {
-        log('error', 'phone_enqueue_error', { error: (err as Error).message })
+  void (async () => {
+    const userId = body.sender!
+    const text = body.text!
+    try {
+      // Save user turn first so it's persisted even if the orchestrator errors.
+      await sessionStore.save(userId, {
+        sessionId: userId,
+        messages: [{ role: 'user', content: text }],
+        systemContext: {},
+      })
+
+      const collectedText: string[] = []
+      for await (const event of runOrchestrator({ userId, channel: 'imessage', text, sessionStore })) {
+        if (event.type === 'text' && event.text) {
+          collectedText.push(event.text)
+        }
       }
-    })
-    .catch((err) => {
+      const reply = collectedText.join('')
+
+      if (!reply) return // filtered as automated-message noise
+
+      // Save assistant turn.
+      await sessionStore.save(userId, {
+        sessionId: userId,
+        messages: [{ role: 'assistant', content: reply }],
+        systemContext: {},
+      })
+
+      await enqueueOutgoing(userId, reply)
+    } catch (err) {
       log('error', 'phone_incoming_error', { error: (err as Error).message })
-    })
+    }
+  })()
 })
 
 app.get('/imessage/outgoing', phoneAuth, async (req, res) => {
@@ -331,7 +349,7 @@ process.on('SIGINT', () => {
 
 async function startServer() {
   try {
-    const toolNames = new Set(getToolDefinitions().map((t) => t.name))
+    const toolNames = new Set(Object.keys(ALL_TOOLS))
     await loadAllSkills(toolNames)
     log('info', 'skill_registry_loaded', getRegistryStats())
   } catch (err) {
@@ -342,7 +360,7 @@ async function startServer() {
   app.listen(config.port, () => {
     log('info', 'server_started', {
       port: config.port,
-      tools: getToolDefinitions().length,
+      tools: Object.keys(ALL_TOOLS).length,
       proactive: config.proactive.enabled,
       rolloutPct: config.proactive.rolloutPct,
     })

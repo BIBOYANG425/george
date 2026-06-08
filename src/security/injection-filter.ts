@@ -1,9 +1,9 @@
 // Prompt injection + identity-override detection. Regex patterns for EN + 中文 jailbreaks,
-// system-prompt exposure, and PII harvesting. Runs in agent/george.ts before every message
-// hits a sub-agent. Blocked input short-circuits to a playful refusal; sanitize() strips
-// <script>, event handlers, and javascript: URIs.
+// system-prompt exposure, and PII harvesting. Called at the HTTP boundary (index.ts)
+// before the orchestrator. Blocked input short-circuits to a playful refusal;
+// sanitize() strips <script>, event handlers, and javascript: URIs.
 //
-// Header last reviewed: 2026-04-16
+// Header last reviewed: 2026-06-07
 
 import { log } from '../observability/logger.js'
 
