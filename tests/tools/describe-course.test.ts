@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, vi } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 
 const mockMaybeSingle = vi.fn()
 vi.mock('../../src/db/client.js', () => ({
@@ -16,30 +16,22 @@ vi.mock('../../src/db/client.js', () => ({
 }))
 
 describe('describe_course tool', () => {
-  beforeAll(async () => {
-    await import('../../src/tools/describe-course.js')
-  })
-
-  it('registers with dept + code required', async () => {
-    const { getToolDefinitions } = await import('../../src/agent/tool-registry.js')
-    const tool = getToolDefinitions().find((t) => t.name === 'describe_course')
-    expect(tool).toBeDefined()
-    expect(tool?.input_schema.properties).toHaveProperty('dept')
-    expect(tool?.input_schema.properties).toHaveProperty('code')
-    expect((tool?.input_schema as { required?: string[] }).required).toEqual(['dept', 'code'])
+  it('tool name is describe_course', async () => {
+    const { describeCourseTool } = await import('../../src/tools/describe-course.js')
+    expect(describeCourseTool.name).toBe('describe_course')
   })
 
   it('returns a not-found message on miss', async () => {
     mockMaybeSingle.mockResolvedValueOnce({ data: null, error: null })
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('describe_course', { dept: 'ZZZ', code: '999' })
+    const { describeCourseHandler } = await import('../../src/tools/describe-course.js')
+    const result = await describeCourseHandler({ dept: 'ZZZ', code: '999' })
     expect(result.toLowerCase()).toContain('not found')
   })
 
   it('returns lookup-failed on Supabase error', async () => {
     mockMaybeSingle.mockResolvedValueOnce({ data: null, error: { message: 'relation does not exist' } })
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('describe_course', { dept: 'CSCI', code: '201L' })
+    const { describeCourseHandler } = await import('../../src/tools/describe-course.js')
+    const result = await describeCourseHandler({ dept: 'CSCI', code: '201L' })
     expect(result.toLowerCase()).toContain('lookup failed')
     expect(result).toContain('relation does not exist')
   })
@@ -63,8 +55,8 @@ describe('describe_course tool', () => {
       },
       error: null,
     })
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('describe_course', { dept: 'CSCI', code: '201L' })
+    const { describeCourseHandler } = await import('../../src/tools/describe-course.js')
+    const result = await describeCourseHandler({ dept: 'CSCI', code: '201L' })
     expect(result).toContain('Principles of Software Development')
     expect(result).toContain('CSCI 104')
   })

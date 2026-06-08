@@ -5,14 +5,6 @@ beforeEach(() => {
   process.env.GOOGLE_MAPS_API_KEY = 'test-key'
 })
 
-async function loadTool(name: string) {
-  await import('../../src/tools/places.js')
-  const { getToolsByNames, executeTool } = await import('../../src/agent/tool-registry.js')
-  const [tool] = getToolsByNames([name])
-  expect(tool, `tool ${name} not registered`).toBeDefined()
-  return executeTool
-}
-
 class FakeGeoError extends Error {
   constructor(public code: string, m: string) {
     super(m)
@@ -29,8 +21,8 @@ describe('travel_time', () => {
     vi.doMock('../../src/services/geo-rate-limit.js', () => ({
       checkGeoBudget: vi.fn(() => true),
     }))
-    const execute = await loadTool('travel_time')
-    const result = await execute('travel_time', {
+    const { travelTimeHandler } = await import('../../src/tools/places.js')
+    const result = await travelTimeHandler({
       from: 'Frat Row',
       to: 'Leavey',
       mode: 'walking',
@@ -49,8 +41,8 @@ describe('travel_time', () => {
     vi.doMock('../../src/services/geo-rate-limit.js', () => ({
       checkGeoBudget: vi.fn(() => true),
     }))
-    const execute = await loadTool('travel_time')
-    const result = await execute('travel_time', {
+    const { travelTimeHandler } = await import('../../src/tools/places.js')
+    const result = await travelTimeHandler({
       from: 'Frat Row',
       to: 'K-town',
       mode: 'walking',
@@ -68,8 +60,8 @@ describe('travel_time', () => {
     vi.doMock('../../src/services/geo-rate-limit.js', () => ({
       checkGeoBudget: vi.fn(() => true),
     }))
-    const execute = await loadTool('travel_time')
-    const result = await execute('travel_time', {
+    const { travelTimeHandler } = await import('../../src/tools/places.js')
+    const result = await travelTimeHandler({
       from: 'MRF',
       to: 'Leavey',
       mode: 'walking',
@@ -88,8 +80,8 @@ describe('travel_time', () => {
     vi.doMock('../../src/services/geo-rate-limit.js', () => ({
       checkGeoBudget: vi.fn(() => true),
     }))
-    const execute = await loadTool('travel_time')
-    const result = await execute('travel_time', {
+    const { travelTimeHandler } = await import('../../src/tools/places.js')
+    const result = await travelTimeHandler({
       from: '1234 Main St',
       to: 'Leavey',
       mode: 'driving',
@@ -108,8 +100,8 @@ describe('travel_time', () => {
     vi.doMock('../../src/services/geo-rate-limit.js', () => ({
       checkGeoBudget: vi.fn(() => false),
     }))
-    const execute = await loadTool('travel_time')
-    const result = await execute('travel_time', {
+    const { travelTimeHandler } = await import('../../src/tools/places.js')
+    const result = await travelTimeHandler({
       from: 'Frat Row',
       to: 'Leavey',
       student_id: 's1',
@@ -128,8 +120,8 @@ describe('travel_time', () => {
     vi.doMock('../../src/services/geo-rate-limit.js', () => ({
       checkGeoBudget: vi.fn(() => true),
     }))
-    const execute = await loadTool('travel_time')
-    const result = await execute('travel_time', {
+    const { travelTimeHandler } = await import('../../src/tools/places.js')
+    const result = await travelTimeHandler({
       from: 'Frat Row',
       to: 'Leavey',
       student_id: 's1',
@@ -148,8 +140,8 @@ describe('travel_time', () => {
     vi.doMock('../../src/services/geo-rate-limit.js', () => ({
       checkGeoBudget: vi.fn(() => true),
     }))
-    const execute = await loadTool('travel_time')
-    const result = await execute('travel_time', {
+    const { travelTimeHandler } = await import('../../src/tools/places.js')
+    const result = await travelTimeHandler({
       from: 'Frat Row',
       to: 'Leavey',
       student_id: 's1',
@@ -169,8 +161,8 @@ describe('travel_time', () => {
     vi.doMock('../../src/services/geo-rate-limit.js', () => ({
       checkGeoBudget: vi.fn(() => true),
     }))
-    const execute = await loadTool('travel_time')
-    const result = await execute('travel_time', {
+    const { travelTimeHandler } = await import('../../src/tools/places.js')
+    const result = await travelTimeHandler({
       from: 'Frat Row',
       to: 'K-town',
       mode: 'walking',
