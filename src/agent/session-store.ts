@@ -92,6 +92,9 @@ export class SupabaseSessionStore implements SessionStore {
       created_at: new Date().toISOString(),
     });
     if (error) {
+      // Intentional silent degradation: orchestrator must not crash on
+      // DB write failures. A lost message is acceptable signal loss
+      // versus a crashed conversation.
       console.error('[sessionStore] save failed:', error.message);
     }
   }
@@ -117,6 +120,12 @@ export class SupabaseSessionStore implements SessionStore {
   }
 }
 
+/**
+ * Create a Supabase-backed SessionStore. Instantiate ONCE at application
+ * startup and share the returned instance across all requests; this function
+ * creates a new Supabase client on each call, so per-request invocation would
+ * leak connections.
+ */
 export function createSupabaseSessionStore(): SessionStore {
   const supabase = createClient(
     process.env.SUPABASE_URL!,
