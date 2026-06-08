@@ -66,30 +66,9 @@ export function createDeepSeekClient(): LLMClient {
 }
 
 function zodToJsonSchema(schema: z.ZodSchema): Record<string, unknown> {
-  // Minimal Zod -> JSON Schema conversion for the limited shapes used in heartbeat tools.
-  // For richer support, swap in `zod-to-json-schema` package.
-  if (schema instanceof z.ZodObject) {
-    const properties: Record<string, unknown> = {};
-    const required: string[] = [];
-    const shape = (schema as z.ZodObject<z.ZodRawShape>).shape;
-    for (const key of Object.keys(shape)) {
-      const field = shape[key];
-      properties[key] = zodFieldToJsonSchema(field);
-      if (!(field instanceof z.ZodOptional) && !(field instanceof z.ZodDefault)) {
-        required.push(key);
-      }
-    }
-    return { type: 'object', properties, required };
-  }
-  return { type: 'object' };
-}
-
-function zodFieldToJsonSchema(field: z.ZodSchema): Record<string, unknown> {
-  if (field instanceof z.ZodString) return { type: 'string' };
-  if (field instanceof z.ZodNumber) return { type: 'number' };
-  if (field instanceof z.ZodBoolean) return { type: 'boolean' };
-  if (field instanceof z.ZodEnum) return { type: 'string', enum: (field as any)._def.values };
-  if (field instanceof z.ZodDefault) return zodFieldToJsonSchema((field as any)._def.innerType);
-  if (field instanceof z.ZodOptional) return zodFieldToJsonSchema((field as any)._def.innerType);
-  return { type: 'string' };
+  // Zod v4 ships toJSONSchema() natively. Strip the $schema key so the
+  // function-calling API only sees the plain JSON Schema object.
+  const full = (schema as any).toJSONSchema() as Record<string, unknown>;
+  const { $schema, ...rest } = full;
+  return rest;
 }
