@@ -14,6 +14,9 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.102.0
         version: 0.102.0(zod@4.4.3)
+      '@cloudflare/workers-types':
+        specifier: ^4.20260608.1
+        version: 4.20260608.1
       '@photon-ai/imessage-kit':
         specifier: ^2.1.2
         version: 2.1.2
@@ -148,6 +151,9 @@ packages:
   '@babel/runtime@7.29.7':
     resolution: {integrity: sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==}
     engines: {node: '>=6.9.0'}
+
+  '@cloudflare/workers-types@4.20260608.1':
+    resolution: {integrity: sha512-Yz90KXPZBB9K/AhsnLaA321s5+i5ZpWZRFbcGx9dWjyknQJXPAS1pK5CJSFEedwY6zoEr1cf2SkpBATL1idsWA==}
 
   '@crawlee/types@3.17.0':
     resolution: {integrity: sha512-y67RHnM+b8eoaTRoouB0jbqpwpUE+4ZTxeEgvnLx+ABkdtkLNYlXQOx3FybEWzFVp6MnmBtmsez2tQjRCmIopQ==}
@@ -1627,6 +1633,8 @@ snapshots:
       '@apify/log': 2.5.41
 
   '@babel/runtime@7.29.7': {}
+
+  '@cloudflare/workers-types@4.20260608.1': {}
 
   '@crawlee/types@3.17.0':
     dependencies:

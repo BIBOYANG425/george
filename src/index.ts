@@ -1,8 +1,11 @@
 // Express server entry. Imports ALL_TOOLS (tool count reported at startup),
 // mounts WeChat adapter, starts
 // iMessage watcher, boots 4 cron jobs (proactive match / reminders / IG + USC
-// scrapes), and loads the skill registry. Nothing routes through this file at
-// runtime — message flow lives in agent/orchestrator.ts; this is wire-up only.
+// scrapes), and loads the skill registry. User control commands (/profile,
+// /correct, /pause, /resume, /delete me) are intercepted before the
+// orchestrator in both /chat and /imessage/incoming via tryHandleUserCommand.
+// Nothing else routes through this file at runtime — message flow lives in
+// agent/orchestrator.ts.
 //
 // Header last reviewed: 2026-06-07
 
@@ -23,12 +26,29 @@ import { loadAllSkills, getRegistryStats } from './skills/index.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
 import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filter.js'
+import { startHeartbeatScheduler } from './jobs/heartbeat-scheduler.js'
+import { runHeartbeat } from './agent/heartbeat.js'
+import { ProfileStore, createSupabaseProfileDB } from './memory/profile.js'
+import { InstructionsStore, createSupabaseInstructionsDB } from './memory/instructions.js'
+import { getKVCache, KVCache } from './memory/kv-cache.js'
+import { createDeepSeekClient } from './agent/llm-clients.js'
+import { createServiceRoleClient } from './memory/supabase-client.js'
+import { parseAndRouteUserCommand, executeUserCommand, UserCommandDeps } from './tools/user-commands.js'
+import type { SupabaseClient } from '@supabase/supabase-js'
 
 // ALL_TOOLS (imported above) registers all 23 tools as a side effect.
 
 // Instantiated once at module load — createSupabaseSessionStore() creates a
 // Supabase client; calling it per-request would leak connections.
 const sessionStore = createSupabaseSessionStore()
+
+// Module-level handles for memory + user-command deps, populated once the
+// heartbeat block initializes below. Both /chat and /imessage/incoming check
+// these before dispatching to the orchestrator.
+let _cache: KVCache | null = null
+let _profileStore: ProfileStore | null = null
+let _supabase: SupabaseClient | null = null
+let _sendImessage: ((msg: { to: string; text: string }) => Promise<void>) | null = null
 
 const app = express()
 
@@ -108,6 +128,13 @@ app.post('/chat', adminAuth, async (req, res) => {
     const text = body.text
     const channel = body.platform === 'wechat' ? 'web' : 'imessage'
 
+    // User control commands (/profile, /correct, /pause, /resume, /delete me)
+    // are handled before the orchestrator so they never incur LLM cost.
+    const commandReply = await tryHandleUserCommand(userId, text)
+    if (commandReply !== null) {
+      return res.json({ response: commandReply })
+    }
+
     // Save user turn before running the orchestrator so the turn is persisted
     // even if the orchestrator fails. save() only writes the last message in the
     // array, so we call it once per turn.
@@ -118,7 +145,7 @@ app.post('/chat', adminAuth, async (req, res) => {
     })
 
     const collectedText: string[] = []
-    for await (const event of runOrchestrator({ userId, channel, text, sessionStore })) {
+    for await (const event of runOrchestrator({ userId, channel, text, sessionStore, profileStore: _profileStore ?? undefined })) {
       if (event.type === 'text' && event.text) {
         collectedText.push(event.text)
       }
@@ -190,6 +217,14 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
     const userId = body.sender!
     const text = body.text!
     try {
+      // User control commands (/profile, /correct, /pause, /resume, /delete me)
+      // are handled before the orchestrator so they never incur LLM cost.
+      const commandReply = await tryHandleUserCommand(userId, text)
+      if (commandReply !== null) {
+        await enqueueOutgoing(userId, commandReply)
+        return
+      }
+
       // Save user turn first so it's persisted even if the orchestrator errors.
       await sessionStore.save(userId, {
         sessionId: userId,
@@ -198,7 +233,7 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
       })
 
       const collectedText: string[] = []
-      for await (const event of runOrchestrator({ userId, channel: 'imessage', text, sessionStore })) {
+      for await (const event of runOrchestrator({ userId, channel: 'imessage', text, sessionStore, profileStore: _profileStore ?? undefined })) {
         if (event.type === 'text' && event.text) {
           collectedText.push(event.text)
         }
@@ -315,6 +350,171 @@ cron.schedule('0 6 * * *', () => {
     log('error', 'usc_cron_error', { error: err.message })
   })
 })
+
+// ==========================================
+// HEARTBEAT SCHEDULER
+// ==========================================
+
+if (process.env.HEARTBEAT_ENABLED !== 'false') {
+  const cache = getKVCache();
+  const profileStore = new ProfileStore(createSupabaseProfileDB(), cache);
+  const instructionsStore = new InstructionsStore(createSupabaseInstructionsDB(), cache);
+  const supabase = createServiceRoleClient();
+  const llm = createDeepSeekClient();
+  const heartbeatDeps = {
+    profileStore,
+    instructionsStore,
+    async loadConfig(userId: string) {
+      const { data, error } = await supabase
+        .from('user_heartbeat_config')
+        .select('*')
+        .eq('user_id', userId)
+        .maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+    async loadRecentMessages(userId: string, limit: number) {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('role, content, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return (data ?? []).reverse();
+    },
+    async loadDueFollowups(userId: string) {
+      const { data, error } = await supabase
+        .from('student_followups')
+        .select('id, content, scheduled_for')
+        .eq('user_id', userId)
+        .eq('status', 'pending')
+        .lte('scheduled_for', new Date().toISOString());
+      if (error) throw error;
+      return data ?? [];
+    },
+    async sendImessage(msg: { to: string; text: string }) {
+      await supabase.from('imessage_outgoing').insert({
+        recipient: msg.to,
+        body: msg.text,
+        status: 'queued',
+        created_at: new Date().toISOString(),
+      });
+    },
+    async insertFollowup(row: { userId: string; content: string; scheduledFor: string }) {
+      const { error } = await supabase.from('student_followups').insert({
+        user_id: row.userId,
+        content: row.content,
+        scheduled_for: row.scheduledFor,
+      });
+      if (error) throw error;
+    },
+    async writeLog(entry: any) {
+      const { error } = await supabase.from('heartbeat_log').insert(entry);
+      if (error) console.error('heartbeat log write failed', error);
+    },
+    async updateLastHeartbeatAt(userId: string) {
+      const { error } = await supabase
+        .from('user_heartbeat_config')
+        .update({ last_heartbeat_at: new Date().toISOString() })
+        .eq('user_id', userId);
+      if (error) throw error;
+    },
+    callLLM: llm.call.bind(llm),
+  };
+  startHeartbeatScheduler({
+    async loadAllConfigs() {
+      const { data, error } = await supabase.from('user_heartbeat_config').select('*');
+      if (error) throw error;
+      return data ?? [];
+    },
+    async runHeartbeat(userId: string) {
+      await runHeartbeat(userId, heartbeatDeps);
+    },
+  });
+  console.log('[heartbeat] scheduler started, ticks every 10 minutes');
+
+  // Promote to module scope so /chat and /imessage/incoming can use them.
+  _cache = cache;
+  _profileStore = profileStore;
+  _supabase = supabase;
+  _sendImessage = heartbeatDeps.sendImessage.bind(heartbeatDeps);
+}
+
+// ==========================================
+// USER COMMAND ROUTING (shared helper)
+// ==========================================
+//
+// Builds the full UserCommandDeps object from the module-level singletons.
+// Returns null when the memory layer hasn't been initialised (HEARTBEAT_ENABLED=false).
+function buildUserCommandDeps(): UserCommandDeps | null {
+  if (!_cache || !_profileStore || !_supabase || !_sendImessage) return null;
+  const cache = _cache;
+  const profileStore = _profileStore;
+  const supabase = _supabase;
+  const sendImessage = _sendImessage;
+  return {
+    profileStore,
+    async setPaused(userId: string, until: Date | null) {
+      await supabase
+        .from('user_heartbeat_config')
+        .update({ paused: until !== null, pause_until: until?.toISOString() ?? null })
+        .eq('user_id', userId);
+      await cache.delete(`user:${userId}:profile`);
+    },
+    async deleteUserData(userId: string) {
+      await Promise.all([
+        supabase.from('user_profiles').delete().eq('user_id', userId),
+        supabase.from('user_heartbeat_config').delete().eq('user_id', userId),
+        supabase.from('user_heartbeat_instructions').delete().eq('user_id', userId),
+        supabase.from('heartbeat_log').delete().eq('user_id', userId),
+        supabase.from('student_followups').delete().eq('user_id', userId),
+        supabase.from('messages').delete().eq('user_id', userId),
+      ]);
+      await cache.delete(`user:${userId}:profile`);
+      await cache.delete(`user:${userId}:instructions`);
+    },
+    sendImessage,
+    async setDeleteConfirmPending(userId: string, pending: boolean) {
+      await cache.set(`user:${userId}:delete_pending`, pending ? '1' : '0', 300);
+    },
+    async getDeleteConfirmPending(userId: string) {
+      return (await cache.get(`user:${userId}:delete_pending`)) === '1';
+    },
+    async writeAudit(entry: { userId: string; action: string; payload: Record<string, unknown> }) {
+      try {
+        await supabase.from('admin_audit_log').insert({
+          actor_email: 'system@george',
+          action: entry.action,
+          entity_type: 'user',
+          entity_id: entry.userId,
+          payload: entry.payload,
+        });
+      } catch {
+        // admin_audit_log may not exist yet; swallow so commands don't fail
+      }
+    },
+  };
+}
+
+/**
+ * Attempt to handle a user command message before the orchestrator sees it.
+ * Returns the reply string if handled, or null if not a command (or memory
+ * layer is uninitialised).
+ */
+async function tryHandleUserCommand(
+  userId: string,
+  text: string,
+): Promise<string | null> {
+  const parsed = parseAndRouteUserCommand(text);
+  if (parsed === null) return null;
+  const deps = buildUserCommandDeps();
+  if (deps === null) {
+    // Memory layer off — fall through to orchestrator
+    return null;
+  }
+  return executeUserCommand(userId, parsed, deps, text);
+}
 
 // ==========================================
 // PROCESS RESILIENCE

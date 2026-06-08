@@ -176,6 +176,28 @@ Changes here that require coordinated changes:
 - **New env var George reads** → update `.env.example` here, update deploy docs, update Bobby's Mac `.env`, and if it's required for web chat too, set it on bia-roommate's Vercel project.
 - **Behavioral changes that visitors will notice** (new tools, new sub-agent behavior, persona shifts) → ping Bobby. Web chat hits real users.
 
+## Memory + heartbeat layer (Slice β)
+
+george has per-user long-term memory via 6 markdown blocks (identity, academic, interests, relationships, state, george_notes) stored in the `user_profiles` Postgres table. Profile blocks are loaded into every agent's system prompt at conversation start via Cloudflare KV cache (5-min TTL, target <100ms load).
+
+A scheduled heartbeat fires per user every 12h during their active hours (default 09:00-22:00 LA). Each tick is an isolated `callLLM` call on DeepSeek-V3 with 4 tools available: `update_block`, `send_proactive_message`, `add_followup`, `heartbeat_ok`. Most ticks return HEARTBEAT_OK. Occasional ticks update memory or send proactive messages (Event Brief, followups, anomaly check-ins for opted-in users).
+
+Subsumes the Event Brief cron from Slice α (Event Brief was already skipped during Slice α planning per spec deviation). Onboarding (Slice B) writes the initial 3-table contract: `user_profiles` (form data), `user_heartbeat_config` (cadence + consents), `user_heartbeat_instructions` (initial standing doc).
+
+Key files:
+- `src/memory/profile.ts` — ProfileStore: 6 blocks, load/save, KV cache
+- `src/memory/instructions.ts` — InstructionsStore: standing instructions doc
+- `src/memory/kv-cache.ts` — Cloudflare KV adapter + in-memory fallback
+- `src/agent/heartbeat.ts` — runHeartbeat() per-user isolated handler
+- `src/agent/llm-clients.ts` — DeepSeek-V3 client (heartbeats) + interface for Anthropic (reactive)
+- `src/jobs/heartbeat-scheduler.ts` — node-cron every 10 min, dispatches due users
+- `src/tools/heartbeat/` — 4 heartbeat-only tools
+- `src/tools/user-commands.ts` — 5 user control commands routed before orchestrator
+
+User control commands (iMessage): `/profile`, `/correct <block> <content>`, `/pause [N days]`, `/resume`, `/delete me`. Web settings hub at `uscbia.com/account/george` (companion bia-roommate PR #64).
+
+Spec: `docs/superpowers/specs/2026-06-07-memory-heartbeat-profiles-design.md`.
+
 ## Persona source map
 
 For voice and persona edits, see the "Prompt source map" section in `AGENT.md`. All voice changes go through `prompts/master.md` and `src/agent/bia-lore.ts`. The orchestrator in `src/agent/orchestrator.ts` is wiring (routing, tool dispatch, conversation memory). Voice does not belong there.

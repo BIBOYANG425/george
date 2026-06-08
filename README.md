@@ -53,6 +53,16 @@ Most campus AI chatbots are GPT wrappers with a system prompt that says "You are
                            campus knowledge
 ```
 
+## Memory + heartbeat layer (Slice β)
+
+george builds and maintains a long-term memory profile for each student: 6 markdown blocks (identity, academic, interests, relationships, state, george_notes) stored in Postgres and cached via Cloudflare KV for fast loads on every turn. Profile blocks are automatically injected into each agent's system prompt.
+
+A background heartbeat scheduler fires per user every 12 hours during their active hours (default 09:00-22:00 LA). Each tick uses DeepSeek-V3 with 4 tools — `update_block`, `send_proactive_message`, `add_followup`, `heartbeat_ok` — to review recent context and decide whether anything needs attention. Most ticks return HEARTBEAT_OK (silence). Occasional ticks update a profile block or send a proactive nudge (event briefs, due followups, silence check-ins for opted-in users).
+
+Students control george's behavior via five iMessage commands (`/profile`, `/correct`, `/pause`, `/resume`, `/delete me`) or via the web settings hub at `uscbia.com/account/george`.
+
+Spec: `docs/superpowers/specs/2026-06-07-memory-heartbeat-profiles-design.md`.
+
 ## Quick start
 
 Requires Node 20+. macOS for iMessage; any OS for web chat only.
