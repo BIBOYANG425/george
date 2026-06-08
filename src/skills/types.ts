@@ -1,4 +1,4 @@
-import type { SubAgent } from '../agent/personality.js'
+export type SubAgent = 'event' | 'course' | 'housing' | 'social' | 'campus'
 
 export type SkillTier = 'orchestrator' | 'sub-agent'
 

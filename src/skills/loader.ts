@@ -8,8 +8,7 @@
 import { readFile, readdir } from 'fs/promises'
 import { basename, extname, join as pathJoin } from 'path'
 import yaml from 'js-yaml'
-import type { Skill, SkillTier } from './types.js'
-import type { SubAgent } from '../agent/personality.js'
+import type { Skill, SkillTier, SubAgent } from './types.js'
 
 const VALID_SUB_AGENTS: SubAgent[] = ['event', 'course', 'housing', 'social', 'campus']
 const FRONTMATTER_DELIMITER = /^---\r?\n/

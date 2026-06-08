@@ -1,5 +1,5 @@
-// Express server entry. Registers tools (side-effect imports — count is reported
-// at startup via getToolDefinitions().length), mounts WeChat adapter, starts
+// Express server entry. Imports ALL_TOOLS (tool count reported at startup),
+// mounts WeChat adapter, starts
 // iMessage watcher, boots 4 cron jobs (proactive match / reminders / IG + USC
 // scrapes), and loads the skill registry. Nothing routes through this file at
 // runtime — message flow lives in agent/orchestrator.ts; this is wire-up only.
@@ -20,34 +20,11 @@ import { sendPendingReminders } from './jobs/reminder-sender.js'
 import { scrapeInstagram } from './scrapers/instagram.js'
 import { scrapeUSCEvents } from './scrapers/usc-events.js'
 import { loadAllSkills, getRegistryStats } from './skills/index.js'
-import { getToolDefinitions } from './agent/tool-registry.js'
+import { ALL_TOOLS } from './tools/index.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
 import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filter.js'
 
-// Import ALL tools to register them
-import './tools/search-events.js'
-import './tools/get-event-details.js'
-import './tools/campus-knowledge.js'
-import './tools/freshman-faq.js'
-import './tools/course-tips.js'
-import './tools/lookup-student.js'
-import './tools/get-student-academic-state.js'
-import './tools/search-courses.js'
-import './tools/describe-course.js'
-import './tools/get-course-reviews.js'
-import './tools/get-rmp-ratings.js'
-import './tools/recommend-courses.js'
-import './tools/plan-schedule.js'
-import './tools/search-programs.js'
-import './tools/search-roommates.js'
-import './tools/search-sublets.js'
-import './tools/post-sublet.js'
-import './tools/set-reminder.js'
-import './tools/suggest-connection.js'
-import './tools/submit-event.js'
-import './tools/load-skill.js'
-import './tools/update-profile.js'
-import './tools/places.js'
+// ALL_TOOLS (imported above) registers all 23 tools as a side effect.
 
 // Instantiated once at module load — createSupabaseSessionStore() creates a
 // Supabase client; calling it per-request would leak connections.
@@ -82,7 +59,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     character: 'George — BIA 学长',
-    tools: getToolDefinitions().length,
+    tools: Object.keys(ALL_TOOLS).length,
   })
 })
 
@@ -372,7 +349,7 @@ process.on('SIGINT', () => {
 
 async function startServer() {
   try {
-    const toolNames = new Set(getToolDefinitions().map((t) => t.name))
+    const toolNames = new Set(Object.keys(ALL_TOOLS))
     await loadAllSkills(toolNames)
     log('info', 'skill_registry_loaded', getRegistryStats())
   } catch (err) {
@@ -383,7 +360,7 @@ async function startServer() {
   app.listen(config.port, () => {
     log('info', 'server_started', {
       port: config.port,
-      tools: getToolDefinitions().length,
+      tools: Object.keys(ALL_TOOLS).length,
       proactive: config.proactive.enabled,
       rolloutPct: config.proactive.rolloutPct,
     })

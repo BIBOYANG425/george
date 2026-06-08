@@ -1,20 +1,28 @@
 // WeChat Official Account adapter. POST /wechat receives XML → signature verify →
-// parse → dedup (60s window) → processMessage(). Access token cached with lazy refresh.
-// processMessage() returns null when the filter drops third-party noise (meeting
-// invites, OTPs, promo SMS); we silently skip the send in that case. Non-null
-// responses are split on blank-line boundaries into up to 4 chat messages with
+// parse → dedup (60s window) → runOrchestrator(). Access token cached with lazy refresh.
+// Non-text messages (voice, image, video, location) return a playful inline refusal.
+// Non-null responses are split on blank-line boundaries into up to 4 chat messages with
 // INTER_MESSAGE_DELAY_MS between parts, matching WeChat's short-burst cadence.
 // Subscribe events trigger the BIA welcome copy.
 //
-// Header last reviewed: 2026-04-18
+// Header last reviewed: 2026-06-07
 
 import { Router } from 'express'
 import { config } from '../config.js'
 import { parseIncomingXml, verifySignature, splitMessage } from './wechat-xml.js'
-import { processMessage } from '../agent/george.js'
+import { runOrchestrator } from '../agent/orchestrator.js'
 import { log } from '../observability/logger.js'
 import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS } from './split-response.js'
 import type { IncomingMessage } from './types.js'
+
+const NON_TEXT_RESPONSES: Record<string, string> = {
+  voice: '语音我这边暂时没法听，打字发过来。',
+  image: '图片我这边读不了，用文字描述一下内容？',
+  video: '视频我这边读不了，用文字说一下你想问什么？',
+  location: '定位我这边读不了，直接说地名或者想问什么。',
+  sticker: '表情包看到了 —— 你想说啥？',
+  link: '链接我这边打不开，贴里面的文字或者直接说你想问什么。',
+}
 
 let cachedToken = { token: '', expiresAt: 0 }
 
@@ -114,22 +122,29 @@ export function createWeChatRouter(): Router {
 
       res.send('success')
 
-      const msgType = (['text', 'voice', 'image', 'video', 'location'].includes(msg.msgType)
-        ? msg.msgType
-        : 'sticker') as IncomingMessage['msgType']
-
-      const incoming: IncomingMessage = {
-        userId: msg.fromUser,
-        platform: 'wechat',
-        text: msg.content || '',
-        msgType,
-        timestamp: msg.createTime,
+      // Non-text message types get an inline refusal; no LLM call needed.
+      if (msg.msgType && msg.msgType !== 'text') {
+        const refusal = NON_TEXT_RESPONSES[msg.msgType] || NON_TEXT_RESPONSES.sticker
+        await sendResponse(msg.fromUser, refusal)
+        return
       }
 
-      const response = await processMessage(incoming)
-      // null response = filtered (automated-message / meeting-invite noise).
-      // Silently drop; no reply back to the sender.
-      if (response !== null) {
+      const text = msg.content || ''
+      if (!text) return
+
+      const collectedText: string[] = []
+      for await (const event of runOrchestrator({
+        userId: msg.fromUser,
+        channel: 'web',
+        text,
+      })) {
+        if (event.type === 'text' && event.text) {
+          collectedText.push(event.text)
+        }
+      }
+      const response = collectedText.join('')
+
+      if (response) {
         const parts = splitIntoMessages(response)
         for (let i = 0; i < parts.length; i++) {
           if (i > 0) await sleep(INTER_MESSAGE_DELAY_MS)

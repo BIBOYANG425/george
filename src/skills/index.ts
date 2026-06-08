@@ -1,5 +1,4 @@
-import type { Skill } from './types.js'
-import type { SubAgent } from '../agent/personality.js'
+import type { Skill, SubAgent } from './types.js'
 import { walkSkillsDirectory } from './loader.js'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
