@@ -121,6 +121,21 @@ When you need to edit George's voice, here's where to look:
 
 Distilled founder voice source: `.claude/skills/immortals/boyang/`，`procedure.md`, `interaction.md`, `memory.md`, `personality.md`. If adding new verbatim phrases, pull from here.
 
+## Memory + heartbeat layer (Slice β)
+
+george maintains a 6-block per-user memory profile (identity, academic, interests, relationships, state, george_notes) loaded into every agent's system prompt. Blocks are stored in Postgres (`user_profiles` table) with a Cloudflare KV edge cache (5-min TTL) for fast retrieval on reactive turns.
+
+A scheduled heartbeat fires per user every 12 hours (DeepSeek-V3, 4 tools: `update_block`, `send_proactive_message`, `add_followup`, `heartbeat_ok`). The heartbeat reviews the user's recent conversation, pending followups, and standing instructions to decide whether a memory update or proactive nudge is warranted. Default outcome is `heartbeat_ok` (silence).
+
+User control commands (routed before the orchestrator):
+- `/profile` — display current profile blocks
+- `/correct <block> <content>` — overwrite one block
+- `/pause [N days]` — pause heartbeats
+- `/resume` — resume heartbeats
+- `/delete me` — clear all 6 tables for this user
+
+Web settings hub at `uscbia.com/account/george` (companion bia-roommate PR #64). Spec: `docs/superpowers/specs/2026-06-07-memory-heartbeat-profiles-design.md`.
+
 ## Not in scope
 
 - Real-time WeChat moments / 朋友圈，only group chat ingestion.
