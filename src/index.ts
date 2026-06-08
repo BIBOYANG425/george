@@ -145,7 +145,7 @@ app.post('/chat', adminAuth, async (req, res) => {
     })
 
     const collectedText: string[] = []
-    for await (const event of runOrchestrator({ userId, channel, text, sessionStore })) {
+    for await (const event of runOrchestrator({ userId, channel, text, sessionStore, profileStore: _profileStore ?? undefined })) {
       if (event.type === 'text' && event.text) {
         collectedText.push(event.text)
       }
@@ -233,7 +233,7 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
       })
 
       const collectedText: string[] = []
-      for await (const event of runOrchestrator({ userId, channel: 'imessage', text, sessionStore })) {
+      for await (const event of runOrchestrator({ userId, channel: 'imessage', text, sessionStore, profileStore: _profileStore ?? undefined })) {
         if (event.type === 'text' && event.text) {
           collectedText.push(event.text)
         }

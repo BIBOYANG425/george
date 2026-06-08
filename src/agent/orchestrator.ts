@@ -2,22 +2,43 @@
 // Orchestrator: entry point for all george conversations. Routes user messages to
 // specialist sub-agents via the Agent SDK's description-based dispatch, or responds
 // directly for small talk / refusal categories.
+//
+// Profile injection: buildOrchestratorPrompt(profile) appends a # USER PROFILE
+// section when a Profile is supplied. Sub-agents defined in agents.config.ts
+// build their prompts as ${MASTER_PROMPT}\n\n${SPECIALIZATION_PROMPT} at module
+// load time, so they do NOT automatically inherit the user profile injected here.
+// The orchestrator is expected to pass relevant profile context to sub-agents
+// through the natural language prompt it crafts when invoking them. If a future
+// slice needs sub-agents to receive the profile directly, agents.config will need
+// to become a per-invocation factory that takes a profile argument.
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS } from './agents.config.js';
 import type { SessionStore } from './session-store.js';
+import type { Profile, ProfileStore } from '../memory/profile.js';
 
 export interface RunOrchestratorArgs {
   userId: string;
   channel: 'imessage' | 'web' | 'cron';
   text: string;
   sessionStore?: SessionStore;
+  profileStore?: ProfileStore;
   mockMode?: boolean;
   maxTurns?: number;
 }
 
-export function buildOrchestratorPrompt(): string {
-  return `${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`;
+export function buildOrchestratorPrompt(profile?: Profile | null): string {
+  const base = `${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`;
+  if (!profile) return base;
+
+  const blocks = ['identity', 'academic', 'interests', 'relationships', 'state', 'george_notes'] as const;
+  const sections = blocks.map((name) => {
+    const content = profile[name];
+    const label = name.toUpperCase().replace('_', ' ');
+    return `## ${label}\n${content || '(empty)'}`;
+  });
+  const userProfileBlock = `# USER PROFILE\n\n${sections.join('\n\n')}`;
+  return `${base}\n\n${userProfileBlock}`;
 }
 
 /**
@@ -84,7 +105,11 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     return;
   }
 
-  const systemPrompt = buildOrchestratorPrompt();
+  // Load user profile early so it can be injected into the system prompt.
+  // Silently falls back to no profile when profileStore is not provided.
+  const profile = args.profileStore ? await args.profileStore.loadProfile(args.userId) : null;
+
+  const systemPrompt = buildOrchestratorPrompt(profile);
   const agentsConfig = buildAgentsConfig();
   const orchestratorTools = buildOrchestratorToolNames();
 

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { runOrchestrator, buildOrchestratorPrompt } from '../../src/agent/orchestrator.js';
+import type { Profile } from '../../src/memory/profile.js';
 
 describe('buildOrchestratorPrompt', () => {
   it('concatenates master + orchestrator prompts', () => {
@@ -8,6 +9,41 @@ describe('buildOrchestratorPrompt', () => {
     expect(prompt).toMatch(/find-people/);
     expect(prompt).toMatch(/whats-happening/);
     expect(prompt).toMatch(/know-things/);
+  });
+});
+
+describe('orchestrator profile injection', () => {
+  it('renders profile blocks into system prompt', () => {
+    const profile: Profile = {
+      identity: 'name: Alice\nyear: junior',
+      academic: '',
+      interests: 'hobbies: hiking, food',
+      relationships: '',
+      state: '',
+      george_notes: '',
+    };
+    const prompt = buildOrchestratorPrompt(profile);
+    expect(prompt).toMatch(/^# USER PROFILE$/m);
+    expect(prompt).toContain('name: Alice');
+    expect(prompt).toContain('hobbies: hiking, food');
+  });
+
+  it('handles empty profile gracefully — all blocks show (empty)', () => {
+    const emptyProfile: Profile = {
+      identity: '', academic: '', interests: '', relationships: '', state: '', george_notes: '',
+    };
+    const prompt = buildOrchestratorPrompt(emptyProfile);
+    expect(prompt).toMatch(/^# USER PROFILE$/m);
+    // All 6 blocks should render with the (empty) placeholder
+    const matches = prompt.match(/\(empty\)/g);
+    expect(matches?.length).toBe(6);
+  });
+
+  it('handles null/undefined profile (no # USER PROFILE section header)', () => {
+    const prompt = buildOrchestratorPrompt(null);
+    // The master prompt contains the phrase "USER PROFILE" in prose; the injected
+    // block adds a markdown H1 "# USER PROFILE". Check that the H1 header is absent.
+    expect(prompt).not.toMatch(/^# USER PROFILE$/m);
   });
 });
 
