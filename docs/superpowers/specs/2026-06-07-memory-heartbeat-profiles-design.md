@@ -116,11 +116,15 @@ In `~/Code/george/`:
 - `tests/jobs/heartbeat-scheduler.test.ts` — scheduler logic. Covers: due-user query correctness, active-hours boundary cases (00:00, 22:00, midnight wrap), paused user skipped, pause_until expiration auto-resumes, parallel dispatch via Promise.allSettled, 60s timeout enforced.
 - `tests/tools/user-commands.test.ts` — control command tests. Covers: /profile renders all 6 blocks, /correct updates specific block, /pause sets pause_until, /resume clears it, /delete me 2-step confirmation, /delete me clears all 5 tables for that user.
 
-In `~/Code/bia-roommate/` (web UI for heartbeat config):
+In `~/Code/bia-roommate/` (single sections-based settings hub):
 
-- `bia-roommate/app/account/heartbeat/page.tsx` — heartbeat preferences page: cadence (every 4h / 12h / 24h / off), active hours (start/end time pickers), pause toggle, "what george remembers about me" panel showing all 6 blocks read-only.
-- `bia-roommate/app/account/heartbeat/api/route.ts` — POST handler writes to `user_heartbeat_config`. Invalidates KV cache for that user.
-- `bia-roommate/app/account/profile/page.tsx` — editable view of the 6 profile blocks (markdown editor per block). Writes via /correct flow.
+- `bia-roommate/app/account/george/page.tsx` — single settings hub with 3 sections:
+  - **"What george knows about you"** — all 6 profile blocks displayed as full MD content (rendered + editable markdown editor per block). Not a `/profile` URL; lives as a section within the hub. The MD source is what shows, no paraphrasing in the web context.
+  - **"How george reaches you"** — heartbeat config: cadence (every 12h / 24h / off), active hours (start/end time pickers), pause toggle.
+  - **"Privacy & data"** — consents (proactive messages, anomaly check-in), data export, delete-me button (triggers the 2-step confirmation flow).
+- `bia-roommate/app/account/george/api/profile-block/route.ts` — PATCH handler for single-block updates. Writes to `user_profiles`, invalidates KV cache.
+- `bia-roommate/app/account/george/api/heartbeat-config/route.ts` — PUT handler for config updates. Writes to `user_heartbeat_config`, invalidates KV cache.
+- `bia-roommate/app/account/george/api/delete-me/route.ts` — POST handler for deletion. 2-step (request + confirm). Clears all 6 memory + heartbeat tables for that user.
 
 ### Files to MODIFY
 
@@ -165,7 +169,7 @@ Each block is markdown-formatted TEXT (max 2000 chars per block), stored as a co
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | user_id | text PK | - | Foreign key to `students.user_id` |
-| cadence | interval | `'4 hours'` | How often to fire heartbeat |
+| cadence | interval | `'12 hours'` | How often to fire heartbeat |
 | active_hours_start | time | `'09:00'` | Earliest local time to fire |
 | active_hours_end | time | `'22:00'` | Latest local time to fire |
 | timezone | text | `'America/Los_Angeles'` | User's timezone |
@@ -177,7 +181,7 @@ Each block is markdown-formatted TEXT (max 2000 chars per block), stored as a co
 
 **Defaults:**
 
-- *Column-level defaults* (defensive, apply if a row appears without explicit values): cadence='4 hours', paused=false, consent_proactive_messages=false, consent_anomaly_checkin=false. Defensive defaults protect against accidental enabling if someone bypasses onboarding.
+- *Column-level defaults* (defensive, apply if a row appears without explicit values): cadence='12 hours', paused=false, consent_proactive_messages=false, consent_anomaly_checkin=false. Defensive defaults protect against accidental enabling if someone bypasses onboarding.
 - *Onboarding-form defaults* (what new users typically end up with): cadence per form choice, consent_proactive_messages=true (opt-out checkbox, ON by default), consent_anomaly_checkin=false (opt-in checkbox, OFF by default). The onboarding form writes explicit values, so column defaults only kick in for non-form-driven inserts.
 
 ## Onboarding contract
@@ -263,7 +267,7 @@ INSERT INTO user_heartbeat_config (user_id, cadence, active_hours_start,
                                     last_heartbeat_at)
 VALUES (
   $userId,
-  '4 hours',
+  '12 hours',
   '09:00', '22:00',
   $detectedTimezone,
   $consentProactive,
@@ -413,7 +417,7 @@ The heartbeat agent reads this file at the start of every tick. It serves as the
 ### Event Brief delivery (special case of heartbeat)
 
 ```
-1. Wednesday 09:00-13:00 LA: heartbeat ticks for users with cadence='4 hours' will eventually pick up Sarah whose user_heartbeat_config and standing instructions imply weekly Wed brief.
+1. Wednesday 09:00-13:00 LA: heartbeat ticks for users with cadence='12 hours' will eventually pick up Sarah whose user_heartbeat_config and standing instructions imply weekly Wed brief.
 2. Heartbeat agent reads standing instructions, notices "Cadence: weekly_wed, Last brief sent: 8 days ago — DUE today".
 3. Agent calls event_brief_generator (now under src/tools/heartbeat/) with userId + 7-day window + interest tags from `interests` block.
 4. Tool returns 3-5 ranked events.
@@ -552,7 +556,7 @@ tool('heartbeat_ok', 'No action needed this tick. Preferred return when nothing 
 
 | Command | Behavior |
 |---|---|
-| `/profile` | Returns the 6 blocks rendered in plain English ("here's what I know: ..."). Routed by orchestrator to user-commands.ts; no sub-agent needed. |
+| `/profile` (iMessage) | Returns the 6 blocks rendered in plain English ("here's what I know: ..."). Conversational paraphrase, not the raw MD. For the full MD content, user is pointed to `uscbia.com/account/george`'s "What george knows about you" section. Routed by orchestrator to user-commands.ts; no sub-agent needed. |
 | `/correct <block_name> <new content>` | Updates one block directly (bypasses heartbeat). Requires user confirmation via prompt-and-confirm flow. Audit-logged. |
 | `/pause [duration]` | Sets `paused=true` and optionally `pause_until=now()+duration` (defaults to 7 days). Heartbeats skipped during pause. |
 | `/resume` | Clears pause state. Next scheduled heartbeat fires normally. |
@@ -564,13 +568,13 @@ All commands log to `admin_audit_log` for traceability.
 
 | Component | Cost driver | At 1K users |
 |---|---|---|
-| Heartbeat tick | ~3K input + ~500 output tokens on Haiku | 1K × 3/day × $0.0008 = $2.40/day ≈ $75/month |
+| Heartbeat tick | ~3K input + ~500 output on DeepSeek-V3 or Kimi K2 (~$0.27/M input, $1.10/M output) | 1K × 2/day × $0.0014 = $2.80/day ≈ $85/month |
 | Profile loads (reactive) | KV reads (~$0.50 per 1M reads) | Negligible |
 | Postgres storage | ~20 MB across new tables + indexes | <$1/month |
 | Cloudflare KV | <1 GB cached, low read volume | <$5/month |
-| Total marginal cost of memory + heartbeat layer | | ~$80/month at 1K users |
+| Total marginal cost of memory + heartbeat layer | | ~$90/month at 1K users |
 
-Compared to reactive conversation costs (Sonnet/Opus, much higher per-call), the heartbeat layer is a small fraction of total agent spend. Worth it for the relational moat.
+Compared to reactive conversation costs (Claude Sonnet/Opus, much higher per-call), the heartbeat layer is a small fraction of total agent spend. The DeepSeek/Kimi choice for heartbeats is deliberate: heartbeats are bounded-output, low-stakes reasoning where Chinese-English bilingual capability matters (most users code-switch); both DeepSeek-V3 and Kimi K2 are strong CJK + cheap + comparable in capability for this use case. Worth it for the relational moat.
 
 ## Testing strategy
 
@@ -591,7 +595,7 @@ Compared to reactive conversation costs (Sonnet/Opus, much higher per-call), the
 5. **Decompose `prompts/master.md`** to include profile injection. Write `prompts/heartbeat.md`. (1 commit)
 6. **Extend orchestrator.ts** (from Slice α) to load profile blocks alongside session state and inject them into the system prompt. Update orchestrator tests. (1 commit)
 7. **Build user-commands.ts** + routing in `src/index.ts` for the 5 commands. Add tests. (1 commit)
-8. **Build heartbeat preferences UI** in bia-roommate (`app/account/heartbeat/page.tsx`, `app/account/profile/page.tsx`). (1 commit)
+8. **Build sections-based settings hub** in bia-roommate at `app/account/george/` with 3 sections (What george knows about you, How george reaches you, Privacy & data) + 3 API routes. Profile blocks show full MD content. (1 commit)
 9. **REMOVE the standalone Event Brief cron** if it was built during Slice α. Verify heartbeat now handles brief delivery. (1 commit)
 10. **Update CLAUDE.md / README.md / AGENT.md.** Document memory + heartbeat layer. (1 commit)
 11. **Backfill: write a one-time script that initializes empty profile blocks + default heartbeat config for all existing users.** Run once. (1 commit + manual execution)
@@ -610,15 +614,15 @@ Estimated total: 1.5-2 weeks for one focused engineer. Parallelizable with Slice
 - **Heartbeat-driven payment / billing actions.** george is free for August launch.
 - **Federated profiles across schools.** Cross-school expansion is post-V2.
 
-## Open questions
+## Resolved decisions (formerly open questions, resolved during brainstorm)
 
-1. **Default cadence: 4h vs 6h vs 12h?** 4h gives more responsiveness for followups + anomaly detection. 12h reduces LLM cost ~3x. Recommend 4h to start, instrument cost, tune down if needed.
-2. **Should `/profile` rendering be visible to the user verbatim (the MD content) or paraphrased?** Verbatim is more transparent but exposes implementation details. Recommend paraphrased ("here's what I know about you..." prose) with `/profile --raw` as the admin-mode verbatim view.
-3. **What happens if Cloudflare KV is unavailable?** Fall back to Postgres direct; slower (~80ms vs 20ms) but functional. Log degradation to observability.
-4. **Should heartbeat agent use a different LLM model than reactive agents?** Recommend yes — Haiku for heartbeats (cheap, fast, lower quality OK because heartbeat decisions are bounded), Sonnet/Opus for reactive (quality matters because user is waiting).
-5. **Should there be an admin "see all heartbeats for user X" tool?** Useful for debugging. Recommend yes; expose via bia-admin at `/admin/users/[id]/heartbeats` showing the last 50 heartbeat_log rows.
-6. **Should anomaly detection be opt-in or opt-out?** Recommend OPT-IN (`consent_anomaly_checkin=false` default). Opt-in respects user agency; opt-out feels invasive.
-7. **What's the rule for when to update a block vs leave it?** Recommend heartbeat prompt instruction: "Only update a block when there is meaningful new information that changes the user's profile in a way an outsider would notice. Trivial rephrasing is not an update."
+1. **Default cadence: 12 hours.** Two heartbeats per day during active hours instead of 4h's three. Halves LLM spend, accepts slower followup detection latency (worst case: 12h gap between commitment and check-in). Override per-user via heartbeat config.
+2. **Profile visibility in web: sections-based, full MD content.** Not exposed as a `/profile` command surface. The user's account settings page has a "What george knows about you" section showing all 6 blocks as their full MD content (rendered + editable in markdown editor). The iMessage `/profile` command does paraphrased prose ("here's what I know about you...") for conversational responsiveness; the source of truth is the web section.
+3. **Cloudflare KV unavailable fallback: Postgres direct.** Slower (~80ms vs 20ms) but functional. Log degradation to observability. No user-facing impact at this latency.
+4. **Heartbeat LLM: DeepSeek-V3 or Kimi K2** (both Chinese AI labs with strong bilingual CJK/English capability + ~5-10x cheaper than Haiku). Reactive agents stay on Claude Sonnet/Opus where quality + speed matters; heartbeats accept slightly different quality for big cost savings. Implementation picks one between DeepSeek and Kimi during Slice β; A/B test possible if needed.
+5. **Admin "see all heartbeats for user X" tool: yes.** Expose via bia-admin at `/admin/users/[id]/heartbeats` showing the last 50 heartbeat_log rows with timestamps, outcomes, and actions.
+6. **Anomaly detection: opt-in.** `consent_anomaly_checkin = false` by default. Users explicitly check the box during onboarding step 4 if they want george to ping after extended silence.
+7. **Block update rule: meaningful-change only.** Heartbeat prompt instructs: "Only update a block when there is meaningful new information that changes the user's profile in a way an outsider would notice. Trivial rephrasing is not an update."
 
 ## Acceptance criteria
 
@@ -634,7 +638,7 @@ The memory + heartbeat layer is complete when:
 - The Event Brief from the orchestrator spec is now delivered via heartbeat (no standalone cron in production).
 - Heartbeat dispatch never exceeds 1 proactive message per user per tick (verified by rate-limit test).
 - Heartbeat never fires during user's pause window or outside active hours (verified by scheduler test).
-- bia-roommate's `/account/heartbeat` and `/account/profile` pages work and update Postgres + invalidate KV.
+- bia-roommate's `/account/george` settings hub works and updates Postgres + invalidates KV across all 3 sections (profile blocks, heartbeat config, privacy).
 - CLAUDE.md, README.md, AGENT.md describe the memory + heartbeat layer.
 - A real user round-trip works on staging: complete onboarding, profile is initialized, heartbeat fires within 4h, profile gets an update, user runs `/profile` and sees the update, user runs `/delete me` and all data is cleared.
 
