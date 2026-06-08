@@ -10,7 +10,7 @@ The AI agent backend for BIA. An Express server (Node 20+) that runs George Tire
 - **iMessage** (private beta, Mac-host only) via `@photon-ai/imessage-kit`
 - **WeChat Official Account** (coming next) via the XML webhook adapter
 
-The full persona, voice fingerprint, sub-agent split, and domain rules live in `AGENT.md` and `src/agent/personality.ts`. Read those before changing how George talks. Voice is the product here, not the wiring.
+The full persona, voice fingerprint, sub-agent split, and domain rules live in `AGENT.md` and `prompts/master.md`. Read those before changing how George talks. Voice is the product here, not the wiring.
 
 ## What this repo is NOT
 
@@ -31,10 +31,10 @@ BIBOYANG425/bia-roommate           uscbia.com
                 ▼
 BIBOYANG425/george                 george-api.uscbia.com (planned)
   Express + Node. Agent backend.
-  Persona, intent classifier, 5 sub-agents,
-  24 tools, Supabase memory, WeChat + iMessage
-  adapters, scrapers, cron jobs.
-  This repo.
+  Built on @anthropic-ai/claude-agent-sdk:
+  Orchestrator + 3 sub-agents, 23 tools,
+  Supabase memory, WeChat + iMessage adapters,
+  scrapers, cron jobs. This repo.
 
 BIBOYANG425/bia-admin              admin.uscbia.com
   Next.js + Vercel. Officer dashboard.
@@ -140,11 +140,26 @@ curl -X POST http://localhost:3001/chat \
 
 **Named tunnel (planned):** `cloudflared tunnel create george-api` + DNS CNAME at `george-api.uscbia.com` once the Cloudflare DNS migration finishes. Replaces the rotating quick-tunnel URL with a stable hostname.
 
+## Agent architecture (Slice α — Claude Agent SDK)
+
+george runs on `@anthropic-ai/claude-agent-sdk`. One orchestrator + three intent sub-agents.
+
+- **Orchestrator** (`src/agent/orchestrator.ts`): single `query()` call. Routes to sub-agents via Agent SDK's description-based dispatch. Holds 2 direct tools (`set_reminder`, `load_skill`) + conversation state via `sessionStore`.
+- **Find People sub-agent**: matching / squad mode (3 tools: lookup_student, update_profile, suggest_connection).
+- **What's Happening sub-agent**: events + places (4 tools: search_events, submit_event, get_event_details, travel_time).
+- **Know Things sub-agent**: USC knowledge (14 tools: courses, professors, programs, housing).
+
+All 4 agents inherit `prompts/master.md` (george's voice + anti-fabrication + refusal categories), then append a specialization prompt (`prompts/orchestrator.md`, `prompts/find-people.md`, `prompts/whats-happening.md`, `prompts/know-things.md`).
+
+Conversation state persists via `src/agent/session-store.ts` (Supabase-backed SessionStore): `messages` + `student_memories` tables.
+
+Spec: `docs/superpowers/specs/2026-06-07-orchestrator-3-intent-agents-design.md`.
+
 ## Guardrails
 
-- **Persona is the product.** The rules in `AGENT.md` are non-negotiable. Read it before editing `src/agent/personality.ts` or `src/agent/bia-lore.ts`. The founder voice was distilled from real WeChat messages. Don't smooth it out.
+- **Persona is the product.** The rules in `AGENT.md` are non-negotiable. Read it before editing `prompts/master.md` or `src/agent/bia-lore.ts`. The founder voice was distilled from real WeChat messages. Don't smooth it out.
 - **No invented facts.** Course numbers, professor names, event dates, prices. If George doesn't know, he says "戳到知识盲区了😢" and uses a tool.
-- **Tool registration is side-effect imports.** Every new tool file must be imported in `src/index.ts` to register itself with the tool registry. Forgetting this is the #1 "the tool exists but George can't call it" bug. There is no auto-discovery.
+- **Tool registration is declarative.** Every new tool file must be listed in `src/tools/index.ts` and wired into `src/agent/agents.config.ts`. The Agent SDK's dispatch is automatic; you define tools and the orchestrator routes them.
 - **Supabase service-role key has full DB access.** Use it only inside `src/db/*` helpers. Never expose via HTTP. Never log it.
 - **Rate limit on /chat.** 10 messages per minute per `userId` via the LRU cache in `src/adapters/rate-limiter.ts`. Don't bypass.
 - **Injection filter at the door.** `checkInjection()` runs on every message before anything else. Don't skip.
@@ -163,7 +178,7 @@ Changes here that require coordinated changes:
 
 ## Persona source map
 
-For voice and persona edits, see the "Prompt source map" section in `AGENT.md`. All voice changes go through `src/agent/personality.ts` and `src/agent/bia-lore.ts`. The agent harness in `src/agent/george.ts` is wiring (rate limit, injection filter, intent classifier, tool-use loop, audit log). Voice does not belong there.
+For voice and persona edits, see the "Prompt source map" section in `AGENT.md`. All voice changes go through `prompts/master.md` and `src/agent/bia-lore.ts`. The orchestrator in `src/agent/orchestrator.ts` is wiring (routing, tool dispatch, conversation memory). Voice does not belong there.
 
 ## Skill routing
 
@@ -173,7 +188,7 @@ before code touches `personality.ts`.
 
 Key routing rules:
 
-- Persona / voice changes, "George doesn't sound right" → invoke brainstorming, then edit
+- Persona / voice changes, "George doesn't sound right" → invoke brainstorming, then edit `prompts/master.md`
 - Bugs, "why isn't this tool firing", 500 errors → invoke investigate
 - New tool design → invoke office-hours first
 - Architecture or new sub-agent → invoke plan-eng-review
