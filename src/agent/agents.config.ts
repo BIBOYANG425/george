@@ -27,7 +27,7 @@ export const SUB_AGENTS = {
     description:
       'Discover events and places at USC. Reactive search for parties, club events, weekend ideas, study spots, safe places to go.',
     prompt: `${MASTER_PROMPT}\n\n${WHATS_HAPPENING_PROMPT}`,
-    tools: ['search_events', 'submit_event', 'get_event_details', 'places'],
+    tools: ['search_events', 'submit_event', 'get_event_details', 'travel_time'],
   },
   'know-things': {
     description:

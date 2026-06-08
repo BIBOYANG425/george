@@ -53,7 +53,7 @@ export const ALL_TOOLS = {
   search_events: searchEventsTool,
   submit_event: submitEventTool,
   get_event_details: getEventDetailsTool,
-  places: placesTool,
+  travel_time: placesTool,
   campus_knowledge: campusKnowledgeTool,
   freshman_faq: freshmanFaqTool,
   describe_course: describeCourseTool,
