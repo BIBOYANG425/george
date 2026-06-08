@@ -1,0 +1,200 @@
+{
+  "fixtures": [
+    {
+      "name": "quiet_user_returns_ok",
+      "description": "User with no recent activity and no due followups should return HEARTBEAT_OK.",
+      "profile": {
+        "identity": "name: Alex, year: sophomore",
+        "academic": "",
+        "interests": "",
+        "relationships": "",
+        "state": "last_active: 2026-06-06",
+        "george_notes": ""
+      },
+      "instructions": "Default: no proactive nudges in first week.",
+      "messages": [],
+      "due_followups": [],
+      "expected_outcome": "ok"
+    },
+    {
+      "name": "due_followup_sends_proactive",
+      "description": "User opted into proactive with a due followup should trigger proactive_send.",
+      "profile": {
+        "identity": "name: Sarah",
+        "academic": "BUAD 280 exam 2026-06-08",
+        "interests": "tone: casual",
+        "relationships": "",
+        "state": "stressed about exam",
+        "george_notes": "presentation_BUAD280: check-in Dec 9 evening"
+      },
+      "instructions": "Sarah opted in to proactive messages.",
+      "messages": [
+        {
+          "role": "user",
+          "content": "ugh BUAD 280 presentation tomorrow",
+          "created_at": "2026-12-08T20:00:00-08:00"
+        }
+      ],
+      "due_followups": [
+        {
+          "id": 1,
+          "content": "BUAD 280 presentation tomorrow, send encouragement",
+          "scheduled_for": "2026-12-09T21:00:00-08:00"
+        }
+      ],
+      "expected_outcome": "proactive_send"
+    },
+    {
+      "name": "new_info_triggers_block_update",
+      "description": "User declared a major change in conversation — academic block should be updated.",
+      "profile": {
+        "identity": "name: Wei, year: junior",
+        "academic": "year: junior, major: still deciding",
+        "interests": "",
+        "relationships": "",
+        "state": "",
+        "george_notes": ""
+      },
+      "instructions": "",
+      "messages": [
+        {
+          "role": "user",
+          "content": "i finally decided, i'm going with econ major",
+          "created_at": "2026-06-07T14:00:00-07:00"
+        },
+        {
+          "role": "assistant",
+          "content": "huge. when did you decide?",
+          "created_at": "2026-06-07T14:01:00-07:00"
+        },
+        {
+          "role": "user",
+          "content": "this morning, met with advisor",
+          "created_at": "2026-06-07T14:02:00-07:00"
+        }
+      ],
+      "due_followups": [],
+      "expected_outcome": "block_update",
+      "expected_block": "academic"
+    },
+    {
+      "name": "no_proactive_when_consent_false",
+      "description": "Even with a due followup, user with consent_proactive_messages=false should not get proactive — heartbeat_ok only (no proactive tool available). Outcome: ok or block_update but NOT proactive_send.",
+      "profile": {
+        "identity": "name: Marcus",
+        "academic": "",
+        "interests": "",
+        "relationships": "",
+        "state": "",
+        "george_notes": "exam reminder due"
+      },
+      "instructions": "consent_proactive_messages is false for this user. Do NOT send proactive messages.",
+      "messages": [],
+      "due_followups": [
+        {
+          "id": 5,
+          "content": "check on GESM exam",
+          "scheduled_for": "2026-06-07T10:00:00-07:00"
+        }
+      ],
+      "expected_outcome": "ok",
+      "_note": "consent false; proactive tool will throw, should fall back to ok"
+    },
+    {
+      "name": "steady_state_no_update",
+      "description": "Profile already fully filled. Recent messages are routine greetings. No change warranted — HEARTBEAT_OK.",
+      "profile": {
+        "identity": "name: Lily, year: senior, major: CS, from: Shanghai, pronouns: she/her",
+        "academic": "taking CSCI 499 capstone + WRIT 340. graduating May 2027",
+        "interests": "machine learning, boba, hiking. tone: casual, code-switch ok",
+        "relationships": "cohort senior: Bobby, squad: Kevin and Rina",
+        "state": "steady. no major stressors. semester going well",
+        "george_notes": "asked about career fair Oct 12 — reminded her"
+      },
+      "instructions": "Lily's profile is comprehensive. Only update if there is concrete new information.",
+      "messages": [
+        { "role": "user", "content": "hey", "created_at": "2026-06-06T19:00:00-07:00" },
+        { "role": "assistant", "content": "哈哈哈哈 你好", "created_at": "2026-06-06T19:00:30-07:00" }
+      ],
+      "due_followups": [],
+      "expected_outcome": "ok"
+    },
+    {
+      "name": "exam_date_mention_triggers_followup",
+      "description": "User mentions a specific upcoming exam date. George should schedule a followup.",
+      "profile": {
+        "identity": "name: Ryan, year: freshman",
+        "academic": "taking BUAD 280 this semester",
+        "interests": "",
+        "relationships": "",
+        "state": "nervous about first midterm",
+        "george_notes": ""
+      },
+      "instructions": "Track concrete commitments (exam dates, presentations) with add_followup.",
+      "messages": [
+        {
+          "role": "user",
+          "content": "my BUAD 280 midterm is next Friday June 14, so nervous",
+          "created_at": "2026-06-07T15:00:00-07:00"
+        },
+        {
+          "role": "assistant",
+          "content": "noted — BUAD 280 midterm June 14. you got this",
+          "created_at": "2026-06-07T15:00:30-07:00"
+        }
+      ],
+      "due_followups": [],
+      "expected_outcome": "followup_scheduled"
+    },
+    {
+      "name": "identity_update_from_intro",
+      "description": "User shared several pieces of identity info across messages. Identity block is empty. Should trigger update_block identity.",
+      "profile": {
+        "identity": "",
+        "academic": "",
+        "interests": "",
+        "relationships": "",
+        "state": "",
+        "george_notes": ""
+      },
+      "instructions": "Fill identity block when user provides name, year, major, or hometown.",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi, i'm Priya, sophomore, studying CS, from Bangalore",
+          "created_at": "2026-06-07T10:00:00-07:00"
+        },
+        {
+          "role": "assistant",
+          "content": "welcome Priya! CS sophomore from Bangalore, nice",
+          "created_at": "2026-06-07T10:00:45-07:00"
+        }
+      ],
+      "due_followups": [],
+      "expected_outcome": "block_update",
+      "expected_block": "identity"
+    },
+    {
+      "name": "vague_intention_no_followup",
+      "description": "User says 'maybe I'll apply to that internship' — vague, not concrete. Should return HEARTBEAT_OK, not add_followup.",
+      "profile": {
+        "identity": "name: Tom, year: junior",
+        "academic": "CS junior",
+        "interests": "interested in software internships",
+        "relationships": "",
+        "state": "",
+        "george_notes": ""
+      },
+      "instructions": "Only schedule followups for concrete commitments with specific dates, not vague intentions.",
+      "messages": [
+        {
+          "role": "user",
+          "content": "i might apply to that Google internship someday",
+          "created_at": "2026-06-07T12:00:00-07:00"
+        }
+      ],
+      "due_followups": [],
+      "expected_outcome": "ok"
+    }
+  ]
+}
