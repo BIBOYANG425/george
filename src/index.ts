@@ -25,6 +25,13 @@ import { scrapeUSCEvents } from './scrapers/usc-events.js'
 import { loadAllSkills, getRegistryStats } from './skills/index.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
+import { supabase } from './db/client.js'
+import { extractCodeFromStartMessage, runHandshake } from './onboarding/handshake.js'
+import {
+  lookupByCode,
+  lookupByImessageHandle,
+  linkImessageHandle,
+} from './onboarding/pending-users.js'
 import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filter.js'
 import { startHeartbeatScheduler } from './jobs/heartbeat-scheduler.js'
 import { runHeartbeat } from './agent/heartbeat.js'
@@ -217,6 +224,50 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
     const userId = body.sender!
     const text = body.text!
     try {
+      // Onboarding handshake: incoming text matches "<code>-START".
+      // Routes to the 9-message greeting via the imessage_outgoing queue.
+      // Handshake messages support attachments (vcf contact card + showcase
+      // PNGs) via the images/files columns added in migration
+      // 20260608000001_imessage_outgoing_attachments.
+      const handshakeCode = extractCodeFromStartMessage(text)
+      if (handshakeCode) {
+        try {
+          await runHandshake({
+            code: handshakeCode,
+            imessageHandle: userId,
+            sendImessage: async (msg) => {
+              if (msg.attachmentPath) {
+                const isImage = /\.(png|jpg|jpeg|gif|webp)$/i.test(msg.attachmentPath)
+                await enqueueOutgoing(msg.to, {
+                  text: msg.caption,
+                  images: isImage ? [msg.attachmentPath] : undefined,
+                  files: !isImage ? [msg.attachmentPath] : undefined,
+                })
+              } else if (msg.text) {
+                await enqueueOutgoing(msg.to, msg.text)
+              }
+            },
+            lookupPending: (code) => lookupByCode(supabase, code),
+            linkImessageHandle: (code, h) => linkImessageHandle(supabase, code, h),
+            profileUrlBase:
+              process.env.ONBOARDING_PROFILE_URL_BASE ?? 'https://uscbia.com/george/profile',
+          })
+        } catch (err) {
+          log('error', 'handshake_error', { error: (err as Error).message })
+        }
+        return
+      }
+
+      // Pending-user soft nudge: sender is a pending user who hasn't completed
+      // profile. We continue to the orchestrator with no profile rather than
+      // synchronously nudging — the heartbeat scheduler handles re-engagement.
+      // Look up early so future code can branch on this without an extra round
+      // trip, but for now we just observe and continue.
+      const pending = await lookupByImessageHandle(supabase, userId)
+      if (pending && pending.status === 'pending') {
+        // No synchronous nudge; heartbeat scheduler owns re-engagement.
+      }
+
       // User control commands (/profile, /correct, /pause, /resume, /delete me)
       // are handled before the orchestrator so they never incur LLM cost.
       const commandReply = await tryHandleUserCommand(userId, text)

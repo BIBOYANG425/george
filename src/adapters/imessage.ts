@@ -29,6 +29,9 @@ import { runOrchestrator } from '../agent/orchestrator.js'
 import { log } from '../observability/logger.js'
 import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS } from './split-response.js'
 import type { IncomingMessage } from './types.js'
+import { supabase } from '../db/client.js'
+import { extractCodeFromStartMessage, runHandshake } from '../onboarding/handshake.js'
+import { lookupByCode, linkImessageHandle } from '../onboarding/pending-users.js'
 
 let sdk: IMessageSDKType | null = null
 
@@ -143,6 +146,39 @@ export async function startIMessageAdapter() {
         if (msg.isFromMe) return
         if (msg.isReaction) return
         if (!msg.text || !msg.sender) return
+
+        // Onboarding handshake: incoming text matches "<code>-START".
+        // Sends the 9-message greeting via the SDK directly (Path A bypasses
+        // the imessage_outgoing queue entirely). vcf contact card goes through
+        // `files`; PNG/JPG showcase assets go through `images`.
+        const handshakeCode = extractCodeFromStartMessage(msg.text)
+        if (handshakeCode) {
+          try {
+            await runHandshake({
+              code: handshakeCode,
+              imessageHandle: msg.sender,
+              sendImessage: async (out) => {
+                if (out.attachmentPath) {
+                  const isImage = /\.(png|jpg|jpeg|gif|webp)$/i.test(out.attachmentPath)
+                  await sdk!.send(out.to, {
+                    text: out.caption,
+                    images: isImage ? [out.attachmentPath] : undefined,
+                    files: !isImage ? [out.attachmentPath] : undefined,
+                  })
+                } else if (out.text) {
+                  await sdk!.send(out.to, out.text)
+                }
+              },
+              lookupPending: (code) => lookupByCode(supabase, code),
+              linkImessageHandle: (code, h) => linkImessageHandle(supabase, code, h),
+              profileUrlBase:
+                process.env.ONBOARDING_PROFILE_URL_BASE ?? 'https://uscbia.com/george/profile',
+            })
+          } catch (err) {
+            log('error', 'handshake_error', { error: (err as Error).message })
+          }
+          return
+        }
 
         const incoming: IncomingMessage = {
           userId: msg.sender, // phone or email — stored as students.imessage_id
