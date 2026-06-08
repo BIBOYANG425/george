@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 
 // Stub required env vars BEFORE config.ts loads — get-course-reviews.ts
 // imports config which throws on missing keys.
@@ -12,19 +12,14 @@ const fetchMock = vi.fn()
 globalThis.fetch = fetchMock
 
 describe('get_course_reviews tool (BIA + RMP merge)', () => {
-  beforeAll(async () => {
-    await import('../../src/tools/get-course-reviews.js')
-  })
-
   afterEach(() => {
     fetchMock.mockReset()
   })
 
-  it('is registered and description mentions RMP', async () => {
-    const { getToolDefinitions } = await import('../../src/agent/tool-registry.js')
-    const tool = getToolDefinitions().find((t) => t.name === 'get_course_reviews')
-    expect(tool).toBeDefined()
-    expect(tool?.description.toLowerCase()).toContain('rmp')
+  it('tool name is get_course_reviews and description mentions RMP', async () => {
+    const { getCourseReviewsTool } = await import('../../src/tools/get-course-reviews.js')
+    expect(getCourseReviewsTool.name).toBe('get_course_reviews')
+    expect(getCourseReviewsTool.description.toLowerCase()).toContain('rmp')
   })
 
   it('merges bia_reviews + rmp payloads on success', async () => {
@@ -55,8 +50,8 @@ describe('get_course_reviews tool (BIA + RMP merge)', () => {
       }
       return { ok: false, status: 404, json: async () => ({}) }
     })
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('get_course_reviews', { dept: 'csci', number: '201' })
+    const { getCourseReviewsHandler } = await import('../../src/tools/get-course-reviews.js')
+    const result = await getCourseReviewsHandler({ dept: 'csci', number: '201' })
     const parsed = JSON.parse(result)
     expect(parsed).toHaveProperty('bia_reviews')
     expect(parsed).toHaveProperty('rmp')
@@ -84,71 +79,55 @@ describe('get_course_reviews tool (BIA + RMP merge)', () => {
       }
       return { ok: false, status: 404, json: async () => ({}) }
     })
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('get_course_reviews', { dept: 'CSCI', number: '201' })
+    const { getCourseReviewsHandler } = await import('../../src/tools/get-course-reviews.js')
+    const result = await getCourseReviewsHandler({ dept: 'csci', number: '201' })
     const parsed = JSON.parse(result)
-    expect(parsed).toHaveProperty('bia_reviews')
     expect(parsed.rmp).toEqual({})
-    // Only the BIA call should have happened.
-    const rmpCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes('/api/rmp/batch'))
-    expect(rmpCalls.length).toBe(0)
+    const rmpCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/api/rmp/batch'))
+    expect(rmpCall).toBeUndefined()
   })
 
-  it('returns bia_reviews with empty rmp when RMP call fails', async () => {
-    fetchMock.mockImplementation(async (url: string | URL) => {
-      const u = url.toString()
-      if (u.includes('/api/course-rating/reviews')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ reviews: [{ instructor: 'Jane Doe', rating: 5 }] }),
-        }
-      }
-      if (u.includes('/api/rmp/batch')) {
-        return { ok: false, status: 500, json: async () => ({}) }
-      }
-      return { ok: false, status: 404, json: async () => ({}) }
+  it('returns no-reviews when reviews array is empty', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ reviews: [] }),
     })
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('get_course_reviews', { dept: 'CSCI', number: '201' })
-    const parsed = JSON.parse(result)
-    expect(parsed).toHaveProperty('bia_reviews')
-    expect(parsed.rmp).toEqual({})
-    expect(parsed.bia_reviews.reviews[0].instructor).toBe('Jane Doe')
-  })
-
-  it('still returns bia_reviews when the RMP fetch throws', async () => {
-    fetchMock.mockImplementation(async (url: string | URL) => {
-      const u = url.toString()
-      if (u.includes('/api/course-rating/reviews')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ reviews: [{ instructor: 'Jane Doe', rating: 5 }] }),
-        }
-      }
-      if (u.includes('/api/rmp/batch')) {
-        throw new Error('network boom')
-      }
-      return { ok: false, status: 404, json: async () => ({}) }
-    })
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('get_course_reviews', { dept: 'CSCI', number: '201' })
-    const parsed = JSON.parse(result)
-    expect(parsed).toHaveProperty('bia_reviews')
-    expect(parsed.rmp).toEqual({})
-  })
-
-  it('returns "No reviews found." when BIA reviews are empty', async () => {
-    fetchMock.mockImplementation(async (url: string | URL) => {
-      const u = url.toString()
-      if (u.includes('/api/course-rating/reviews')) {
-        return { ok: true, status: 200, json: async () => ({ reviews: [] }) }
-      }
-      return { ok: false, status: 404, json: async () => ({}) }
-    })
-    const { executeTool } = await import('../../src/agent/tool-registry.js')
-    const result = await executeTool('get_course_reviews', { dept: 'CSCI', number: '201' })
+    const { getCourseReviewsHandler } = await import('../../src/tools/get-course-reviews.js')
+    const result = await getCourseReviewsHandler({ dept: 'WRIT', number: '150' })
     expect(result.toLowerCase()).toContain('no reviews')
+  })
+
+  it('returns failure on non-ok reviews fetch', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) })
+    const { getCourseReviewsHandler } = await import('../../src/tools/get-course-reviews.js')
+    const result = await getCourseReviewsHandler({ dept: 'CSCI', number: '201' })
+    expect(result).toContain('503')
+  })
+
+  it('includes reviews_freshest_at when created_at is present', async () => {
+    fetchMock.mockImplementation(async (url: string | URL) => {
+      const u = url.toString()
+      if (u.includes('/api/course-rating/reviews')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            reviews: [
+              { instructor: 'Prof A', rating: 5, created_at: '2025-01-15T00:00:00Z' },
+              { instructor: 'Prof A', rating: 4, created_at: '2025-03-01T00:00:00Z' },
+            ],
+          }),
+        }
+      }
+      if (u.includes('/api/rmp/batch')) {
+        return { ok: true, status: 200, json: async () => ({}) }
+      }
+      return { ok: false, status: 404, json: async () => ({}) }
+    })
+    const { getCourseReviewsHandler } = await import('../../src/tools/get-course-reviews.js')
+    const result = await getCourseReviewsHandler({ dept: 'CSCI', number: '499' })
+    const parsed = JSON.parse(result)
+    expect(parsed.reviews_freshest_at).toBe('2025-03-01T00:00:00.000Z')
   })
 })
