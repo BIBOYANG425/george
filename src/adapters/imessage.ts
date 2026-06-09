@@ -32,6 +32,23 @@ import type { IncomingMessage } from './types.js'
 import { supabase } from '../db/client.js'
 import { extractCodeFromStartMessage, runHandshake } from '../onboarding/handshake.js'
 import { lookupByCode, linkImessageHandle } from '../onboarding/pending-users.js'
+import { promises as fs } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+async function cleanupImessageTempFiles(): Promise<void> {
+  try {
+    const dir = path.join(os.homedir(), 'Pictures')
+    const entries = await fs.readdir(dir)
+    await Promise.all(
+      entries
+        .filter((e) => e.startsWith('imsg_temp_'))
+        .map((e) => fs.unlink(path.join(dir, e)).catch(() => undefined)),
+    )
+  } catch {
+    // Pictures dir unreadable — nothing to clean. Continue.
+  }
+}
 
 let sdk: IMessageSDKType | null = null
 
@@ -139,91 +156,114 @@ export async function startIMessageAdapter() {
     // never reaches this point; a top-level require would crash startup
     // because @photon-ai/imessage-kit binds to macOS frameworks.
     const { IMessageSDK } = await import('@photon-ai/imessage-kit')
-    sdk = new IMessageSDK()
+    sdk = new IMessageSDK({ debug: true })
 
-    await sdk.startWatching({
-      onDirectMessage: async (msg) => {
-        if (msg.isFromMe) return
-        if (msg.isReaction) return
-        if (!msg.text || !msg.sender) return
+    // Custom polling loop replacing sdk.startWatching(). The SDK's built-in
+    // watcher fails silently to detect new chat.db rows on this Mac (likely a
+    // better-sqlite3 mmap caching issue with the persistent readonly handle).
+    // sdk.getMessages() called fresh per tick does see new rows reliably, so
+    // we drive our own poll and reuse the SDK only for queries + sends.
+    const seenIds = new Set<string>()
+    let lastPollAt = new Date(Date.now() - 10_000)
+    const POLL_INTERVAL_MS = 2_000
 
-        // Onboarding handshake: incoming text matches "<code>-START".
-        // Sends the 9-message greeting via the SDK directly (Path A bypasses
-        // the imessage_outgoing queue entirely). vcf contact card goes through
-        // `files`; PNG/JPG showcase assets go through `images`.
-        const handshakeCode = extractCodeFromStartMessage(msg.text)
-        if (handshakeCode) {
-          try {
-            await runHandshake({
-              code: handshakeCode,
-              imessageHandle: msg.sender,
-              sendImessage: async (out) => {
-                if (out.attachmentPath) {
-                  const isImage = /\.(png|jpg|jpeg|gif|webp)$/i.test(out.attachmentPath)
-                  await sdk!.send(out.to, {
-                    text: out.caption,
-                    images: isImage ? [out.attachmentPath] : undefined,
-                    files: !isImage ? [out.attachmentPath] : undefined,
-                  })
-                } else if (out.text) {
-                  await sdk!.send(out.to, out.text)
-                }
-              },
-              lookupPending: (code) => lookupByCode(supabase, code),
-              linkImessageHandle: (code, h) => linkImessageHandle(supabase, code, h),
-              profileUrlBase:
-                process.env.ONBOARDING_PROFILE_URL_BASE ?? 'https://uscbia.com/george/profile',
-            })
-          } catch (err) {
-            log('error', 'handshake_error', { error: (err as Error).message })
-          }
-          return
-        }
+    const handleMessage = async (msg: {
+      id: string
+      text: string | null
+      sender: string | null
+      isFromMe: boolean
+      isReaction: boolean
+      date: Date
+    }) => {
+      if (msg.isFromMe) return
+      if (msg.isReaction) return
+      if (!msg.text || !msg.sender) return
 
-        const incoming: IncomingMessage = {
-          userId: msg.sender, // phone or email — stored as students.imessage_id
-          platform: 'imessage',
-          text: msg.text,
-          msgType: 'text',
-          timestamp: msg.date.getTime(),
-        }
-
+      const handshakeCode = extractCodeFromStartMessage(msg.text)
+      if (handshakeCode) {
         try {
-          // Bridge mode: forward to remote backend and use whatever it returns.
-          // Local mode: run runOrchestrator in-process.
-          let response: string | null
-          if (config.backendRelayUrl) {
-            response = await forwardToBackend(incoming)
-          } else {
-            const collectedText: string[] = []
-            for await (const event of runOrchestrator({
-              userId: incoming.userId,
-              channel: 'imessage',
-              text: incoming.text,
-            })) {
-              if (event.type === 'text' && event.text) {
-                collectedText.push(event.text)
-              }
-            }
-            response = collectedText.join('') || null
-          }
-
-          if (response !== null) {
-            const parts = splitIntoMessages(response)
-            for (let i = 0; i < parts.length; i++) {
-              if (i > 0) await sleep(INTER_MESSAGE_DELAY_MS)
-              await sdk!.send(msg.sender, parts[i])
-            }
-          }
+          await cleanupImessageTempFiles()
+          await runHandshake({
+            code: handshakeCode,
+            imessageHandle: msg.sender,
+            sendImessage: async (out) => {
+              await sdk!.send(out.to, {
+                text: out.text,
+                images: out.imagePaths && out.imagePaths.length > 0 ? out.imagePaths : undefined,
+                files: out.filePaths && out.filePaths.length > 0 ? out.filePaths : undefined,
+              })
+            },
+            lookupPending: (code) => lookupByCode(supabase, code),
+            linkImessageHandle: (code, h) => linkImessageHandle(supabase, code, h),
+            profileUrlBase:
+              process.env.ONBOARDING_PROFILE_URL_BASE ?? 'https://uscbia.com/george/profile',
+          })
         } catch (err) {
-          log('error', 'imessage_error', { error: (err as Error).message })
-          await sdk!.send(msg.sender, RELAY_GENERIC_ERROR_MSG).catch(() => {})
+          log('error', 'handshake_error', { error: (err as Error).message })
         }
-      },
-      onError: (err: Error) => {
-        log('error', 'imessage_watch_error', { error: err.message })
-      },
-    })
+        return
+      }
+
+      const incoming: IncomingMessage = {
+        userId: msg.sender,
+        platform: 'imessage',
+        text: msg.text,
+        msgType: 'text',
+        timestamp: msg.date.getTime(),
+      }
+
+      try {
+        let response: string | null
+        if (config.backendRelayUrl) {
+          response = await forwardToBackend(incoming)
+        } else {
+          const collectedText: string[] = []
+          for await (const event of runOrchestrator({
+            userId: incoming.userId,
+            channel: 'imessage',
+            text: incoming.text,
+          })) {
+            if (event.type === 'text' && event.text) {
+              collectedText.push(event.text)
+            }
+          }
+          response = collectedText.join('') || null
+        }
+
+        if (response !== null) {
+          const parts = splitIntoMessages(response)
+          for (let i = 0; i < parts.length; i++) {
+            if (i > 0) await sleep(INTER_MESSAGE_DELAY_MS)
+            await sdk!.send(msg.sender, parts[i])
+          }
+        }
+      } catch (err) {
+        log('error', 'imessage_error', { error: (err as Error).message })
+        await sdk!.send(msg.sender, RELAY_GENERIC_ERROR_MSG).catch(() => {})
+      }
+    }
+
+    const pollLoop = setInterval(async () => {
+      try {
+        const since = new Date(lastPollAt.getTime() - 1_000)
+        const result = await sdk!.getMessages({ since, excludeOwnMessages: true })
+        lastPollAt = new Date()
+        for (const msg of result.messages) {
+          if (seenIds.has(msg.id)) continue
+          seenIds.add(msg.id)
+          await handleMessage(msg)
+        }
+        if (seenIds.size > 5_000) {
+          const arr = Array.from(seenIds)
+          seenIds.clear()
+          for (const id of arr.slice(-2_500)) seenIds.add(id)
+        }
+      } catch (err) {
+        log('error', 'imessage_poll_error', { error: (err as Error).message })
+      }
+    }, POLL_INTERVAL_MS)
+
+    ;(globalThis as { __georgePollLoop?: ReturnType<typeof setInterval> }).__georgePollLoop = pollLoop
 
     log('info', 'imessage_connected', {})
   } catch (err) {

@@ -237,16 +237,11 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
             code: handshakeCode,
             imessageHandle: userId,
             sendImessage: async (msg) => {
-              if (msg.attachmentPath) {
-                const isImage = /\.(png|jpg|jpeg|gif|webp)$/i.test(msg.attachmentPath)
-                await enqueueOutgoing(msg.to, {
-                  text: msg.caption,
-                  images: isImage ? [msg.attachmentPath] : undefined,
-                  files: !isImage ? [msg.attachmentPath] : undefined,
-                })
-              } else if (msg.text) {
-                await enqueueOutgoing(msg.to, msg.text)
-              }
+              await enqueueOutgoing(msg.to, {
+                text: msg.text,
+                images: msg.imagePaths && msg.imagePaths.length > 0 ? msg.imagePaths : undefined,
+                files: msg.filePaths && msg.filePaths.length > 0 ? msg.filePaths : undefined,
+              })
             },
             lookupPending: (code) => lookupByCode(supabase, code),
             linkImessageHandle: (code, h) => linkImessageHandle(supabase, code, h),
