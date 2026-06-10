@@ -30,3 +30,20 @@ export const SHOWCASE: readonly ShowcaseItem[] = [
 ] as const;
 
 export const CONTACT_CARD_PATH = 'assets/onboarding/george.vcf';
+
+// Path B (iPhone Shortcuts) consumes the outgoing queue on a phone that
+// cannot read the backend's filesystem, so repo-relative asset paths must be
+// rewritten to public URLs before enqueueing. Returns null when no base URL
+// is configured — callers should then send text-only rather than enqueue
+// paths the Shortcut can never resolve.
+export function toPublicAssetUrls(
+  localPaths: string[],
+  baseUrl: string | undefined,
+): string[] | null {
+  if (!baseUrl) return null;
+  const base = baseUrl.replace(/\/+$/, '');
+  return localPaths.map((p) => {
+    const filename = p.split('/').pop() ?? p;
+    return `${base}/${filename}`;
+  });
+}

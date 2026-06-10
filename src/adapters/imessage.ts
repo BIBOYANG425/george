@@ -18,7 +18,12 @@
 // relay_unauthorized / relay_unreachable so config errors surface immediately
 // instead of failing silently on the first incoming message.
 //
-// Header last reviewed: 2026-06-07
+// Incoming messages arrive via a custom 2s poll loop (not sdk.startWatching,
+// which misses new chat.db rows on macOS 15). Ticks are serialized with an
+// in-flight flag, and onboarding handshake codes are routed before the
+// orchestrator (natural-format lookup misses fall through as normal chat).
+//
+// Header last reviewed: 2026-06-10
 
 // IMessageSDK is type-only at module load so the package's native binding
 // never gets required on Linux. The runtime instance is dynamic-imported
@@ -217,7 +222,8 @@ export async function startIMessageAdapter() {
     // never reaches this point; a top-level require would crash startup
     // because @photon-ai/imessage-kit binds to macOS frameworks.
     const { IMessageSDK } = await import('@photon-ai/imessage-kit')
-    sdk = new IMessageSDK({ debug: true })
+    // SDK debug logging may include message contents; keep it opt-in.
+    sdk = new IMessageSDK({ debug: process.env.IMESSAGE_SDK_DEBUG === 'true' })
 
     // Custom polling loop replacing sdk.startWatching(). The SDK's built-in
     // watcher fails silently to detect new chat.db rows on this Mac (likely a
@@ -261,18 +267,28 @@ export async function startIMessageAdapter() {
         return
       }
 
-      const handshakeCode = extractCodeFromStartMessage(msg.text)
-      if (handshakeCode) {
+      // Onboarding handshake. A natural-format code ("george (xxxxxx)") that
+      // misses the pending_users lookup is most likely a real sentence, so
+      // runHandshake returns false and the message falls through to the
+      // orchestrator below. Asset paths are repo-relative; resolve to absolute
+      // so sdk.send works regardless of the process's working directory.
+      const handshake = extractCodeFromStartMessage(msg.text)
+      if (handshake) {
         try {
           await cleanupImessageTempFiles()
-          await runHandshake({
-            code: handshakeCode,
+          const handled = await runHandshake({
+            code: handshake.code,
+            format: handshake.format,
             imessageHandle: msg.sender,
             sendImessage: async (out) => {
               await sdk!.send(out.to, {
                 text: out.text,
-                images: out.imagePaths && out.imagePaths.length > 0 ? out.imagePaths : undefined,
-                files: out.filePaths && out.filePaths.length > 0 ? out.filePaths : undefined,
+                images: out.imagePaths?.length
+                  ? out.imagePaths.map((p) => path.resolve(p))
+                  : undefined,
+                files: out.filePaths?.length
+                  ? out.filePaths.map((p) => path.resolve(p))
+                  : undefined,
               })
             },
             lookupPending: (code) => lookupByCode(supabase, code),
@@ -280,10 +296,11 @@ export async function startIMessageAdapter() {
             profileUrlBase:
               process.env.ONBOARDING_PROFILE_URL_BASE ?? 'https://uscbia.com/george/profile',
           })
+          if (handled) return
         } catch (err) {
           log('error', 'handshake_error', { error: (err as Error).message })
+          return
         }
-        return
       }
 
       const incoming: IncomingMessage = {
@@ -342,7 +359,16 @@ export async function startIMessageAdapter() {
     }
 
     let pollCount = 0
+    // Ticks are serialized via the inFlight flag: orchestrator calls run ~10s
+    // against the 2s interval, and overlapping ticks would interleave replies
+    // to the same user out of order, run unbounded concurrent orchestrator
+    // calls, and let one handshake's temp-file sweep delete another in-flight
+    // send's temp file. Skipped ticks lose nothing — the next tick's
+    // since-window still covers the gap.
+    let inFlight = false
     const pollLoop = setInterval(async () => {
+      if (inFlight) return
+      inFlight = true
       try {
         pollCount++
         const since = new Date(lastPollAt.getTime() - 1_000)
@@ -364,6 +390,8 @@ export async function startIMessageAdapter() {
         }
       } catch (err) {
         log('error', 'imessage_poll_error', { error: (err as Error).message })
+      } finally {
+        inFlight = false
       }
     }, POLL_INTERVAL_MS)
 

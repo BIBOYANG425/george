@@ -40,14 +40,13 @@ export async function linkImessageHandle(
   if (error) throw new Error(`linkImessageHandle failed: ${error.message}`);
 }
 
-export async function markCompleted(supabase: SupabaseClient, code: string): Promise<void> {
-  const { error } = await supabase
-    .from('pending_users')
-    .update({ status: 'completed' })
-    .eq('code', code);
-  if (error) throw new Error(`markCompleted failed: ${error.message}`);
-}
+// Completion (status -> 'completed') is owned by the bia-roommate profile
+// form (app/george/profile/api/submit/route.ts), which updates the row
+// directly. This repo only reads completion state via lookupByCode.
 
+// A user can mint multiple codes and handshake more than one, leaving several
+// pending rows linked to the same handle — hence limit(1) on the newest row
+// rather than maybeSingle(), which throws on multiple matches.
 export async function lookupByImessageHandle(
   supabase: SupabaseClient,
   imessageHandle: string
@@ -57,16 +56,21 @@ export async function lookupByImessageHandle(
     .select('*')
     .eq('imessage_handle', imessageHandle)
     .eq('status', 'pending')
-    .maybeSingle();
+    .order('created_at', { ascending: false })
+    .limit(1);
   if (error) throw new Error(`lookupByImessageHandle failed: ${error.message}`);
-  return data ?? null;
+  return data?.[0] ?? null;
 }
 
+// Only purges 'pending' rows. Completed rows must survive so a returning user
+// who re-sends their welcome code gets "you're already in" instead of
+// "couldn't find that code".
 export async function cleanupOld(supabase: SupabaseClient, days: number = 14): Promise<number> {
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const { data, error } = await supabase
     .from('pending_users')
     .delete()
+    .eq('status', 'pending')
     .lt('created_at', cutoff)
     .select('code');
   if (error) throw new Error(`cleanupOld failed: ${error.message}`);

@@ -1,13 +1,15 @@
 // Express server entry. Imports ALL_TOOLS (tool count reported at startup),
-// mounts WeChat adapter, starts
-// iMessage watcher, boots 4 cron jobs (proactive match / reminders / IG + USC
-// scrapes), and loads the skill registry. User control commands (/profile,
-// /correct, /pause, /resume, /delete me) are intercepted before the
-// orchestrator in both /chat and /imessage/incoming via tryHandleUserCommand.
-// Nothing else routes through this file at runtime — message flow lives in
-// agent/orchestrator.ts.
+// mounts WeChat adapter, starts iMessage watcher, boots 5 cron jobs
+// (proactive match / reminders / IG + USC scrapes / pending-users GC), and
+// loads the skill registry. User control commands (/profile, /correct,
+// /pause, /resume, /delete me) are intercepted before the orchestrator in
+// both /chat and /imessage/incoming via tryHandleUserCommand. The Path B
+// /imessage/incoming route also intercepts onboarding handshake codes
+// (legacy "<code>-START" or natural "george (<code>)"); a natural-format
+// code that misses pending_users falls through to the orchestrator. All
+// other message flow lives in agent/orchestrator.ts.
 //
-// Header last reviewed: 2026-06-07
+// Header last reviewed: 2026-06-10
 
 import express from 'express'
 import cors from 'cors'
@@ -27,11 +29,8 @@ import { ALL_TOOLS } from './tools/index.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
 import { supabase } from './db/client.js'
 import { extractCodeFromStartMessage, runHandshake } from './onboarding/handshake.js'
-import {
-  lookupByCode,
-  lookupByImessageHandle,
-  linkImessageHandle,
-} from './onboarding/pending-users.js'
+import { toPublicAssetUrls } from './onboarding/showcase.js'
+import { lookupByCode, linkImessageHandle } from './onboarding/pending-users.js'
 import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filter.js'
 import { startHeartbeatScheduler } from './jobs/heartbeat-scheduler.js'
 import { startPendingUsersCleanupCron } from './jobs/pending-users-cleanup-cron.js'
@@ -235,22 +234,39 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
     const userId = body.sender!
     const text = body.text!
     try {
-      // Onboarding handshake: incoming text matches "<code>-START".
-      // Routes to the 9-message greeting via the imessage_outgoing queue.
-      // Handshake messages support attachments (vcf contact card + showcase
-      // PNGs) via the images/files columns added in migration
-      // 20260608000001_imessage_outgoing_attachments.
-      const handshakeCode = extractCodeFromStartMessage(text)
-      if (handshakeCode) {
+      // Onboarding handshake: incoming text matches "<code>-START" (legacy)
+      // or the natural "...george (<code>)" prefill. Routes to the 3-message
+      // greeting via the imessage_outgoing queue. A natural-format code that
+      // misses the pending_users lookup is treated as a normal conversation
+      // and falls through to the orchestrator (runHandshake returns false).
+      // The Shortcut consumer runs on a phone that cannot read this host's
+      // filesystem, so attachment paths are rewritten to public URLs under
+      // ONBOARDING_ASSET_BASE_URL; if that's unset, handshake messages are
+      // queued text-only.
+      const handshake = extractCodeFromStartMessage(text)
+      if (handshake) {
         try {
-          await runHandshake({
-            code: handshakeCode,
+          const assetBaseUrl = process.env.ONBOARDING_ASSET_BASE_URL
+          if (!assetBaseUrl) {
+            log('warn', 'handshake_assets_skipped', {
+              reason: 'ONBOARDING_ASSET_BASE_URL unset; Path B handshake is text-only',
+            })
+          }
+          const handled = await runHandshake({
+            code: handshake.code,
+            format: handshake.format,
             imessageHandle: userId,
             sendImessage: async (msg) => {
+              const images = msg.imagePaths?.length
+                ? toPublicAssetUrls(msg.imagePaths, assetBaseUrl)
+                : null
+              const files = msg.filePaths?.length
+                ? toPublicAssetUrls(msg.filePaths, assetBaseUrl)
+                : null
               await enqueueOutgoing(msg.to, {
                 text: msg.text,
-                images: msg.imagePaths && msg.imagePaths.length > 0 ? msg.imagePaths : undefined,
-                files: msg.filePaths && msg.filePaths.length > 0 ? msg.filePaths : undefined,
+                images: images ?? undefined,
+                files: files ?? undefined,
               })
             },
             lookupPending: (code) => lookupByCode(supabase, code),
@@ -258,20 +274,11 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
             profileUrlBase:
               process.env.ONBOARDING_PROFILE_URL_BASE ?? 'https://uscbia.com/george/profile',
           })
+          if (handled) return
         } catch (err) {
           log('error', 'handshake_error', { error: (err as Error).message })
+          return
         }
-        return
-      }
-
-      // Pending-user soft nudge: sender is a pending user who hasn't completed
-      // profile. We continue to the orchestrator with no profile rather than
-      // synchronously nudging — the heartbeat scheduler handles re-engagement.
-      // Look up early so future code can branch on this without an extra round
-      // trip, but for now we just observe and continue.
-      const pending = await lookupByImessageHandle(supabase, userId)
-      if (pending && pending.status === 'pending') {
-        // No synchronous nudge; heartbeat scheduler owns re-engagement.
       }
 
       // User control commands (/profile, /correct, /pause, /resume, /delete me)
@@ -418,6 +425,14 @@ cron.schedule('0 6 * * *', () => {
   })
 })
 
+// Pending-users GC is an onboarding concern, gated only by its own flag.
+// (It previously sat inside the HEARTBEAT_ENABLED block, so disabling
+// heartbeats silently disabled GC — two unrelated features coupled.)
+if (process.env.ONBOARDING_ENABLED !== 'false') {
+  startPendingUsersCleanupCron(supabase)
+  console.log('[pending-cleanup] cron scheduled (daily 03:00 LA, purge pending >14 days)')
+}
+
 // ==========================================
 // HEARTBEAT SCHEDULER
 // ==========================================
@@ -460,13 +475,12 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
       if (error) throw error;
       return data ?? [];
     },
+    // Path B proactive sends go through the shared queue helper. A raw insert
+    // here previously wrote columns that don't exist on imessage_outgoing
+    // (body/created_at) and a status outside the CHECK constraint ('queued'),
+    // so every heartbeat proactive message failed at the DB.
     async sendImessage(msg: { to: string; text: string }) {
-      await supabase.from('imessage_outgoing').insert({
-        recipient: msg.to,
-        body: msg.text,
-        status: 'queued',
-        created_at: new Date().toISOString(),
-      });
+      await enqueueOutgoing(msg.to, msg.text);
     },
     async insertFollowup(row: { userId: string; content: string; scheduledFor: string }) {
       const { error } = await supabase.from('student_followups').insert({
@@ -500,11 +514,6 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
     },
   });
   console.log('[heartbeat] scheduler started, ticks every 10 minutes');
-
-  if (process.env.ONBOARDING_ENABLED !== 'false') {
-    startPendingUsersCleanupCron(supabase);
-    console.log('[pending-cleanup] cron scheduled (daily 03:00 LA, purge >14 days)');
-  }
 
   // Promote to module scope so /chat and /imessage/incoming can use them.
   _cache = cache;

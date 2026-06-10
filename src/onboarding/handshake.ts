@@ -18,17 +18,26 @@ import type { PendingUser } from './pending-users.js';
 const HANDSHAKE_RE_NATURAL = /george[^()]*\(([a-z0-9]{6})\)/i;
 const HANDSHAKE_RE_LEGACY = /^([a-z0-9]{6})-START$/i;
 
-export function extractCodeFromStartMessage(text: string): string | null {
+export interface ExtractedHandshake {
+  code: string;
+  // 'legacy' is the unambiguous "<code>-START" shape; 'natural' can
+  // false-positive on real sentences ("ask george (senior) about housing"),
+  // so a natural code that misses the pending_users lookup must fall through
+  // to the orchestrator instead of replying with a code error.
+  format: 'natural' | 'legacy';
+}
+
+export function extractCodeFromStartMessage(text: string): ExtractedHandshake | null {
   const trimmed = text.trim();
-  const natural = trimmed.match(HANDSHAKE_RE_NATURAL);
-  if (natural) {
-    const code = natural[1].toLowerCase();
-    if (isValidCodeFormat(code)) return code;
-  }
   const legacy = trimmed.match(HANDSHAKE_RE_LEGACY);
   if (legacy) {
     const code = legacy[1].toLowerCase();
-    if (isValidCodeFormat(code)) return code;
+    if (isValidCodeFormat(code)) return { code, format: 'legacy' };
+  }
+  const natural = trimmed.match(HANDSHAKE_RE_NATURAL);
+  if (natural) {
+    const code = natural[1].toLowerCase();
+    if (isValidCodeFormat(code)) return { code, format: 'natural' };
   }
   return null;
 }
@@ -42,6 +51,7 @@ export interface OutgoingMessage {
 
 export interface HandshakeOptions {
   code: string;
+  format: 'natural' | 'legacy';
   imessageHandle: string;
   sendImessage: (msg: OutgoingMessage) => Promise<void>;
   lookupPending: (code: string) => Promise<PendingUser | null>;
@@ -49,21 +59,27 @@ export interface HandshakeOptions {
   profileUrlBase: string;
 }
 
-export async function runHandshake(opts: HandshakeOptions): Promise<void> {
+// Returns true when the message was consumed by the handshake flow (greeting
+// sent, already-completed reply, or legacy code error). Returns false when a
+// natural-format code missed the lookup — the caller must fall through to the
+// orchestrator because the message is most likely a real conversation that
+// happened to contain "george (xxxxxx)".
+export async function runHandshake(opts: HandshakeOptions): Promise<boolean> {
   const pending = await opts.lookupPending(opts.code);
   if (!pending) {
+    if (opts.format === 'natural') return false;
     await opts.sendImessage({
       to: opts.imessageHandle,
       text: `couldn't find that code. did you mean to send your 6-char welcome code from uscbia.com/george?`,
     });
-    return;
+    return true;
   }
   if (pending.status === 'completed') {
     await opts.sendImessage({
       to: opts.imessageHandle,
       text: "you're already in. just say what's on your mind.",
     });
-    return;
+    return true;
   }
 
   await opts.linkImessageHandle(opts.code, opts.imessageHandle);
@@ -88,4 +104,5 @@ export async function runHandshake(opts: HandshakeOptions): Promise<void> {
     to: opts.imessageHandle,
     text: `ready to set up? takes 2 min. ${opts.profileUrlBase}?code=${opts.code}`,
   });
+  return true;
 }
