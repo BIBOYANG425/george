@@ -32,9 +32,70 @@ import type { IncomingMessage } from './types.js'
 import { supabase } from '../db/client.js'
 import { extractCodeFromStartMessage, runHandshake } from '../onboarding/handshake.js'
 import { lookupByCode, linkImessageHandle } from '../onboarding/pending-users.js'
+import { checkInjection, INJECTION_REJECTIONS } from '../security/injection-filter.js'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createRequire } from 'node:module'
+
+const requireCjs = createRequire(import.meta.url)
+const CHAT_DB_PATH = path.join(os.homedir(), 'Library/Messages/chat.db')
+
+interface PolledMessage {
+  id: string
+  text: string | null
+  sender: string | null
+  isFromMe: boolean
+  isReaction: boolean
+  date: Date
+}
+
+// Open a fresh readonly better-sqlite3 connection per call. The SDK's
+// persistent connection caches WAL state and never sees new commits on
+// macOS 15 (v3 added a WAL-based watcher specifically because of this).
+function queryNewMessagesDirect(sinceUnixSec: number): PolledMessage[] {
+  // Lazy require so non-macOS hosts don't pay the cost.
+  const BetterSqlite3 = requireCjs('better-sqlite3') as new (path: string, opts: { readonly: boolean }) => {
+    prepare: (sql: string) => { all: (...params: unknown[]) => Array<Record<string, unknown>> }
+    close: () => void
+  }
+  const db = new BetterSqlite3(CHAT_DB_PATH, { readonly: true })
+  try {
+    const rows = db
+      .prepare(
+        `SELECT
+           m.ROWID AS rowid,
+           m.guid AS guid,
+           m.text AS text,
+           h.id AS sender,
+           m.is_from_me AS isFromMe,
+           m.associated_message_type AS amType,
+           m.date AS appleDate
+         FROM message m
+         LEFT JOIN handle h ON m.handle_id = h.ROWID
+         WHERE (m.date / 1000000000) + 978307200 > ?
+           AND m.is_from_me = 0
+           AND h.id IS NOT NULL
+         ORDER BY m.date ASC
+         LIMIT 100`,
+      )
+      .all(sinceUnixSec)
+    return rows.map((r) => {
+      const appleDate = Number(r.appleDate)
+      const unixMs = (appleDate / 1_000_000_000 + 978307200) * 1000
+      return {
+        id: String(r.guid ?? r.rowid),
+        text: r.text === null ? null : String(r.text),
+        sender: r.sender === null ? null : String(r.sender),
+        isFromMe: Number(r.isFromMe) === 1,
+        isReaction: Number(r.amType) !== 0,
+        date: new Date(unixMs),
+      }
+    })
+  } finally {
+    db.close()
+  }
+}
 
 async function cleanupImessageTempFiles(): Promise<void> {
   try {
@@ -179,6 +240,27 @@ export async function startIMessageAdapter() {
       if (msg.isReaction) return
       if (!msg.text || !msg.sender) return
 
+      // Boundary injection filter. Runs BEFORE handshake routing because a
+      // well-formed handshake message contains "george" + "(<code>)" and won't
+      // match any of the INJECTION_PATTERNS. Catches host-tooling slash commands
+      // (/cost, /admin, /goal …), admin-mode roleplay, identity overrides, and
+      // PII harvesting before they reach the orchestrator.
+      const check = checkInjection(msg.text)
+      if (check.blocked) {
+        log('warn', 'injection_attempt_blocked_pathA', {
+          sender: msg.sender,
+          reason: check.reason,
+          textPreview: msg.text.slice(0, 100),
+        })
+        const rejection = INJECTION_REJECTIONS[Math.floor(Math.random() * INJECTION_REJECTIONS.length)]
+        try {
+          await sdk!.send(msg.sender, rejection)
+        } catch (err) {
+          log('error', 'injection_rejection_send_failed', { error: (err as Error).message })
+        }
+        return
+      }
+
       const handshakeCode = extractCodeFromStartMessage(msg.text)
       if (handshakeCode) {
         try {
@@ -212,43 +294,65 @@ export async function startIMessageAdapter() {
         timestamp: msg.date.getTime(),
       }
 
+      console.log(`[orchestrator IN] from ${msg.sender}: "${msg.text}"`)
       try {
         let response: string | null
         if (config.backendRelayUrl) {
           response = await forwardToBackend(incoming)
         } else {
-          const collectedText: string[] = []
+          let finalText = ''
           for await (const event of runOrchestrator({
             userId: incoming.userId,
             channel: 'imessage',
             text: incoming.text,
           })) {
-            if (event.type === 'text' && event.text) {
-              collectedText.push(event.text)
+            const e = event as {
+              type?: string
+              result?: string
+              message?: { content?: Array<{ type?: string; text?: string }> }
+            }
+            if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
+              finalText = e.result
+            } else if (e.type === 'assistant' && e.message?.content && finalText === '') {
+              const text = e.message.content
+                .filter((c) => c.type === 'text' && typeof c.text === 'string')
+                .map((c) => c.text as string)
+                .join('')
+              if (text) finalText = text
             }
           }
-          response = collectedText.join('') || null
+          response = finalText || null
         }
 
         if (response !== null) {
           const parts = splitIntoMessages(response)
+          console.log(`[send] ${parts.length} parts to ${msg.sender}`)
           for (let i = 0; i < parts.length; i++) {
             if (i > 0) await sleep(INTER_MESSAGE_DELAY_MS)
             await sdk!.send(msg.sender, parts[i])
           }
+        } else {
+          console.log(`[send] skipped: response was null/empty`)
         }
       } catch (err) {
+        console.log(`[orchestrator ERR] ${(err as Error).message}`)
         log('error', 'imessage_error', { error: (err as Error).message })
         await sdk!.send(msg.sender, RELAY_GENERIC_ERROR_MSG).catch(() => {})
       }
     }
 
+    let pollCount = 0
     const pollLoop = setInterval(async () => {
       try {
+        pollCount++
         const since = new Date(lastPollAt.getTime() - 1_000)
-        const result = await sdk!.getMessages({ since, excludeOwnMessages: true })
+        const sinceUnixSec = Math.floor(since.getTime() / 1000)
+        const messages = queryNewMessagesDirect(sinceUnixSec)
         lastPollAt = new Date()
-        for (const msg of result.messages) {
+        if (pollCount % 15 === 0 || messages.length > 0) {
+          console.log(`[poll #${pollCount}] since=${since.toISOString()} got ${messages.length} messages`)
+        }
+        for (const msg of messages) {
           if (seenIds.has(msg.id)) continue
           seenIds.add(msg.id)
           await handleMessage(msg)

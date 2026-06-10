@@ -18,18 +18,26 @@ const FIND_PEOPLE_PROMPT = readPrompt('find-people');
 const WHATS_HAPPENING_PROMPT = readPrompt('whats-happening');
 const KNOW_THINGS_PROMPT = readPrompt('know-things');
 
+// Sub-agents pinned to Haiku 4.5. They never use Opus — even the smartest of
+// them only does single-domain lookup + voice-styled relay, which is exactly
+// where Haiku is fast and good enough. The orchestrator does routing and
+// (when it answers directly) small-talk; its model is set in orchestrator.ts.
+const SUB_AGENT_MODEL = 'claude-haiku-4-5-20251001';
+
 export const SUB_AGENTS = {
   'find-people': {
     description:
       'Match students for activities (squad mode). Reactive only. Use for messages about finding hike buddies, study groups, hotpot crew, jam sessions.',
     prompt: `${MASTER_PROMPT}\n\n${FIND_PEOPLE_PROMPT}`,
     tools: ['lookup_student', 'update_profile', 'suggest_connection'],
+    model: SUB_AGENT_MODEL,
   },
   'whats-happening': {
     description:
       'Discover events and places at USC. Reactive search for parties, club events, weekend ideas, study spots, safe places to go.',
     prompt: `${MASTER_PROMPT}\n\n${WHATS_HAPPENING_PROMPT}`,
     tools: ['search_events', 'submit_event', 'get_event_details', 'travel_time'],
+    model: SUB_AGENT_MODEL,
   },
   'know-things': {
     description:
@@ -51,6 +59,7 @@ export const SUB_AGENTS = {
       'search_sublets',
       'post_sublet',
     ],
+    model: SUB_AGENT_MODEL,
   },
 } as const;
 

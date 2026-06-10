@@ -1,9 +1,10 @@
 // Prompt injection + identity-override detection. Regex patterns for EN + 中文 jailbreaks,
-// system-prompt exposure, and PII harvesting. Called at the HTTP boundary (index.ts)
-// before the orchestrator. Blocked input short-circuits to a playful refusal;
-// sanitize() strips <script>, event handlers, and javascript: URIs.
+// system-prompt exposure, PII harvesting, host-tooling slash commands, and admin-mode
+// roleplay. Called at BOTH the HTTP boundary (index.ts) and the Mac adapter's poll loop
+// (adapters/imessage.ts) before the orchestrator. Blocked input short-circuits to a
+// playful refusal; sanitize() strips <script>, event handlers, and javascript: URIs.
 //
-// Header last reviewed: 2026-06-07
+// Header last reviewed: 2026-06-09
 
 import { log } from '../observability/logger.js'
 
@@ -32,6 +33,22 @@ const INJECTION_PATTERNS = [
   /show\s+me\s+your\s+(system\s+)?prompt/i,
   /repeat\s+your\s+(system\s+)?prompt/i,
   /你的(系统)?prompt/,
+  // Admin / role-elevation roleplay (en + zh)
+  /\badmin[\s:：]*mode\b/i,
+  /\bsuper(\s|-)?admin\b/i,
+  /\benable\s+(developer|debug|dev)\s+mode\b/i,
+  /\b(dan|do\s+anything\s+now)\s+mode\b/i,
+  /管理员(模式|权限|身份)/,
+  /开发者模式/,
+  /调试模式/,
+  /请你回复[\s\S]{1,30}$/,
+  /you\s+must\s+(reply|respond|say)\s+/i,
+  // Slash commands at the start of a message — host-tooling leak vector. george's
+  // user commands (/profile, /correct, /pause, /resume, /delete me) are matched
+  // explicitly before this filter runs in the HTTP path; here we reject everything
+  // else to keep Claude Code / Cursor / Codex slash commands from short-circuiting
+  // the orchestrator. To allow a new user command, route it before checkInjection.
+  /^\/(?!profile|correct|pause|resume|delete\b)[a-zA-Z][\w-]*(\s|$)/,
 ]
 
 function sanitizeXSS(text: string): string {
@@ -57,7 +74,7 @@ export function checkInjection(text: string): FilterResult {
 
 export const INJECTION_REJECTIONS = [
   '这条我就不跟了。你真正想问的是啥？活动、选课、房源、找人？',
-  '换马甲套不到我 —— 你想聊 USC 相关的正事，我在。',
-  '不玩这种。回来聊正事 —— 你是哪个 major？在找啥？',
+  '换马甲套不到我。你想聊 USC 相关的正事，我在。',
+  '不玩这种。回来聊正事，你是哪个 major？在找啥？',
   '这不是我能帮的方向。你如果是要找活动 / 课 / 房 / 人，直接说。',
 ]

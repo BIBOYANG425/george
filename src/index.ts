@@ -152,13 +152,23 @@ app.post('/chat', adminAuth, async (req, res) => {
       systemContext: {},
     })
 
-    const collectedText: string[] = []
+    let response = ''
     for await (const event of runOrchestrator({ userId, channel, text, sessionStore, profileStore: _profileStore ?? undefined })) {
-      if (event.type === 'text' && event.text) {
-        collectedText.push(event.text)
+      const e = event as {
+        type?: string
+        result?: string
+        message?: { content?: Array<{ type?: string; text?: string }> }
+      }
+      if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
+        response = e.result
+      } else if (e.type === 'assistant' && e.message?.content && response === '') {
+        const text = e.message.content
+          .filter((c) => c.type === 'text' && typeof c.text === 'string')
+          .map((c) => c.text as string)
+          .join('')
+        if (text) response = text
       }
     }
-    const response = collectedText.join('')
 
     // Save assistant turn.
     await sessionStore.save(userId, {
@@ -279,13 +289,23 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
         systemContext: {},
       })
 
-      const collectedText: string[] = []
+      let reply = ''
       for await (const event of runOrchestrator({ userId, channel: 'imessage', text, sessionStore, profileStore: _profileStore ?? undefined })) {
-        if (event.type === 'text' && event.text) {
-          collectedText.push(event.text)
+        const e = event as {
+          type?: string
+          result?: string
+          message?: { content?: Array<{ type?: string; text?: string }> }
+        }
+        if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
+          reply = e.result
+        } else if (e.type === 'assistant' && e.message?.content && reply === '') {
+          const text = e.message.content
+            .filter((c) => c.type === 'text' && typeof c.text === 'string')
+            .map((c) => c.text as string)
+            .join('')
+          if (text) reply = text
         }
       }
-      const reply = collectedText.join('')
 
       if (!reply) return // filtered as automated-message noise
 

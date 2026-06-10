@@ -126,6 +126,14 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
       tools: orchestratorTools,
       agents: agentsConfig,
       maxTurns: args.maxTurns ?? 12,
+      // CRITICAL: isolation mode. Without this, the SDK inherits the host's
+      // ~/.claude/settings.json, project .claude/settings.json, MCP servers,
+      // hooks, AND slash commands. A USC freshman texting "/cost" or "/model"
+      // would get Claude Code's literal slash-command response, "/goal plz
+      // fuck me" would invoke Claude Code's /goal handler. settingSources:[]
+      // turns ALL of that off — george runs with only the tools we explicitly
+      // list and the prompt we explicitly write.
+      settingSources: [],
       // Session persistence is not needed — george is stateless at the SDK level.
       // Our SessionStore handles conversation memory via history injection above.
       persistSession: false,
