@@ -21,6 +21,9 @@ export { searchSubletsTool } from './search-sublets.js'
 export { postSubletTool } from './post-sublet.js'
 export { setReminderTool } from './set-reminder.js'
 export { loadSkillTool } from './load-skill.js'
+export { dpsZoneCheckTool } from './dps-zone-check.js'
+export { distanceCompareTool } from './distance-compare.js'
+export { safeRouteTool } from './safe-route.js'
 
 import { lookupStudentTool } from './lookup-student.js'
 import { updateProfileTool } from './update-profile.js'
@@ -45,6 +48,9 @@ import { searchSubletsTool } from './search-sublets.js'
 import { postSubletTool } from './post-sublet.js'
 import { setReminderTool } from './set-reminder.js'
 import { loadSkillTool } from './load-skill.js'
+import { dpsZoneCheckTool } from './dps-zone-check.js'
+import { distanceCompareTool } from './distance-compare.js'
+import { safeRouteTool } from './safe-route.js'
 
 export const ALL_TOOLS = {
   lookup_student: lookupStudentTool,
@@ -70,4 +76,7 @@ export const ALL_TOOLS = {
   post_sublet: postSubletTool,
   set_reminder: setReminderTool,
   load_skill: loadSkillTool,
+  dps_zone_check: dpsZoneCheckTool,
+  distance_compare: distanceCompareTool,
+  safe_route: safeRouteTool,
 }

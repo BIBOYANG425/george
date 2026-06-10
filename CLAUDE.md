@@ -155,6 +155,14 @@ Conversation state persists via `src/agent/session-store.ts` (Supabase-backed Se
 
 Spec: `docs/superpowers/specs/2026-06-07-orchestrator-3-intent-agents-design.md`.
 
+## Spatial reasoning layer (Slice A)
+
+Three tools answer location-safety questions with math over verified data, never guesses. `distance_compare` ranks places by distance from an origin (alias-table hits cost zero Google calls). `safe_route` returns walkability facts for "is X safe to walk to at 11pm" (walk estimate, DPS share-Lyft hours 20:00-03:00 LA, zone membership). `dps_zone_check` reports which DPS patrol zone contains a place.
+
+The math lives in `src/services/spatial.ts` (pure TS — no PostGIS, see the deviation note in the plan doc). Coordinates come from `src/services/usc-aliases.ts`. Zone polygons come from `data/dps-zones-v1.geojson`, hand-compiled from the official DPS map; until that file ships, zone tools return `zone_data_unavailable` and george must say he doesn't have the zone map rather than guess. Walk times from these tools are straight-line estimates — exact routed claims still go through `travel_time`.
+
+Plan: `docs/superpowers/plans/2026-06-10-slice-a-spatial.md`.
+
 ## Guardrails
 
 - **Persona is the product.** The rules in `AGENT.md` are non-negotiable. Read it before editing `prompts/master.md` or `src/agent/bia-lore.ts`. The founder voice was distilled from real WeChat messages. Don't smooth it out.
