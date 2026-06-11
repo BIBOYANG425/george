@@ -68,3 +68,22 @@ export const config = {
     rolloutPct: parseInt(process.env.PROACTIVE_ROLLOUT_PCT || '10'),
   },
 }
+
+export type TransportMode = 'spectrum' | 'legacy'
+
+// Selects the iMessage transport. Defaults to 'legacy' (the self-hosted
+// dual-path) so a missing var never silently cuts over. Set TRANSPORT=spectrum
+// to use the Photon Spectrum adapter.
+export function loadTransportConfig() {
+  const transport: TransportMode =
+    process.env.TRANSPORT === 'spectrum' ? 'spectrum' : 'legacy'
+  return {
+    transport,
+    spectrum: {
+      projectId: process.env.SPECTRUM_PROJECT_ID || '',
+      projectSecret: process.env.SPECTRUM_PROJECT_SECRET || '',
+      imessageAddress: process.env.SPECTRUM_IMESSAGE_ADDRESS || '',
+      imessageToken: process.env.IMESSAGE_TOKEN || '',
+    },
+  }
+}
