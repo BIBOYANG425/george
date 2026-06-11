@@ -34,9 +34,17 @@ export const SUB_AGENTS = {
   },
   'whats-happening': {
     description:
-      'Discover events and places at USC. Reactive search for parties, club events, weekend ideas, study spots, safe places to go.',
+      'Discover events and places at USC. Reactive search for parties, club events, weekend ideas, study spots, safe places to go, late-night walkability and DPS-zone safety questions.',
     prompt: `${MASTER_PROMPT}\n\n${WHATS_HAPPENING_PROMPT}`,
-    tools: ['search_events', 'submit_event', 'get_event_details', 'travel_time'],
+    tools: [
+      'search_events',
+      'submit_event',
+      'get_event_details',
+      'travel_time',
+      'distance_compare',
+      'safe_route',
+      'dps_zone_check',
+    ],
     model: SUB_AGENT_MODEL,
   },
   'know-things': {
@@ -58,6 +66,7 @@ export const SUB_AGENTS = {
       'search_roommates',
       'search_sublets',
       'post_sublet',
+      'dps_zone_check',
     ],
     model: SUB_AGENT_MODEL,
   },

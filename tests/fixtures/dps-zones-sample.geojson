@@ -1,0 +1,37 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-118.295, 34.015],
+            [-118.275, 34.015],
+            [-118.275, 34.030],
+            [-118.295, 34.030],
+            [-118.295, 34.015]
+          ]
+        ]
+      },
+      "properties": { "name": "Test Zone Campus", "risk": "green" }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-118.300, 34.030],
+            [-118.275, 34.030],
+            [-118.275, 34.040],
+            [-118.300, 34.040],
+            [-118.300, 34.030]
+          ]
+        ]
+      },
+      "properties": { "name": "Test Zone North", "risk": "yellow" }
+    }
+  ]
+}

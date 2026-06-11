@@ -1,8 +1,10 @@
 // Geo tools: travel_time (Phase 1) + find_places_near (Phase 2, TODO).
 // All tool outputs are JSON-stringified for the agent. Errors surface as
-// { error: ... } objects, never thrown.
+// { error: ... } objects, never thrown. resolveOrigin (alias table → fail-
+// closed acronym check → geocoder) is exported for the Slice A spatial
+// tools (distance_compare, safe_route, dps_zone_check).
 //
-// Header last reviewed: 2026-04-21
+// Header last reviewed: 2026-06-10
 
 import { z } from 'zod'
 import { resolveAlias } from '../services/usc-aliases.js'
@@ -29,7 +31,7 @@ type GeoToolError =
 // Google's index.
 const SHORT_ACRONYM_RX = /^[a-z]{2,5}$/i
 
-async function resolveOrigin(
+export async function resolveOrigin(
   input: string,
 ): Promise<
   | LatLng
