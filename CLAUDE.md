@@ -91,6 +91,20 @@ Switch between the two by what's running on the China side:
 
 The Container always exposes both endpoint sets, so swapping doesn't require redeploying the backend.
 
+### Spectrum migration (in progress — legacy is still the default)
+
+george is migrating iMessage to Spectrum by Photon (`spectrum-ts`). The adapter is `src/adapters/spectrum.ts`. No Mac required; Spectrum handles iMessage cloud-side.
+
+**Transport flag:** `TRANSPORT=spectrum` activates the Spectrum adapter; `TRANSPORT=legacy` (or unset) keeps the existing dual-path. Legacy stays the rollback path through a burn-in window; Task 14 deletes it after cutover.
+
+**Number model:** shared line pool. Students reach a pool number; the onboarding handshake code binds identity, so no fixed per-user number is needed.
+
+**Find My location:** deferred to Phase 2. The low-level `createClient({ address, token })` requires a dedicated-line gRPC address + token that the shared pool does not expose. `SPECTRUM_IMESSAGE_ADDRESS` and `IMESSAGE_TOKEN` are reserved for Phase 2 and should be left blank until a dedicated line is provisioned.
+
+**Env vars:** `TRANSPORT`, `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET` (required for Spectrum mode); `SPECTRUM_IMESSAGE_ADDRESS`, `IMESSAGE_TOKEN` (Phase 2 only).
+
+Spec: `docs/superpowers/specs/2026-06-11-spectrum-imessage-migration-design.md`. Plan: `docs/superpowers/plans/2026-06-11-spectrum-imessage-migration.md`.
+
 ## How to run locally
 
 ```bash
