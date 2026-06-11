@@ -48,4 +48,15 @@ describe('runSpectrumLoop', () => {
     await runSpectrumLoop(client, { handleText: async () => null, handleLocation: vi.fn() })
     expect(sent).toEqual([])
   })
+
+  it('debounces a burst from one sender into a single handler call', async () => {
+    const { client } = fakeClient([
+      msg({ messageId: 'a', text: 'first' }),
+      msg({ messageId: 'b', text: 'second' }),
+    ])
+    const handle = vi.fn(async () => null)
+    await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() }, { debounceMs: 0 })
+    expect(handle).toHaveBeenCalledTimes(1)
+    expect(handle.mock.calls[0][1]).toBe('first\nsecond')
+  })
 })
