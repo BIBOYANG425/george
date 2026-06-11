@@ -4,10 +4,16 @@
 // locations client. EXACT SDK names/signatures come from the Task 0 spike
 // (docs/superpowers/notes/2026-spectrum-spike.md).
 //
+// Dynamic-import pattern: top-level value imports of spectrum-ts are
+// intentionally absent. spectrum-ts transitively depends on
+// @photon-ai/imessage-kit (macOS-native bindings), so a top-level require
+// crashes startup on Linux (the Cloudflare Container deploy target). The
+// runtime imports live INSIDE createSpectrumClient(), matching the same guard
+// pattern used by src/adapters/imessage.ts for @photon-ai/imessage-kit.
+// Merely importing this module (for its exported interfaces/types) is safe on
+// all platforms.
+//
 // Header last reviewed: 2026-06-11
-
-import { Spectrum, attachment } from 'spectrum-ts'
-import { imessage } from 'spectrum-ts/providers/imessage'
 
 // Mirrors @photon-ai/advanced-imessage SharedFriendLocation (fields we use).
 // Lives here (not imported) because the location-normalize module is Phase 2.
@@ -50,7 +56,11 @@ export interface SpectrumCredentials {
 // Real factory — wires spectrum-ts to the seam interfaces.
 // imessage.config() uses the Spectrum cloud-managed pool (local: false, no
 // dedicated-line address/token needed until Phase 2).
+// SDK is dynamic-imported here so the native chain is never loaded on Linux.
 export async function createSpectrumClient(creds: SpectrumCredentials): Promise<SpectrumClient> {
+  const { Spectrum, attachment } = await import('spectrum-ts')
+  const { imessage } = await import('spectrum-ts/providers/imessage')
+
   const app = await Spectrum({
     projectId: creds.projectId,
     projectSecret: creds.projectSecret,
@@ -70,7 +80,7 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
           senderId: message.sender?.id ?? '',
           // message.content is a Content discriminated union; narrow to text
           contentType: message.content.type,
-          text: message.content.type === 'text' ? (message.content as { type: 'text'; text: string }).text : '',
+          text: message.content.type === 'text' ? message.content.text : '',
           // message.id is the stable SDK-assigned guid
           messageId: message.id,
         }

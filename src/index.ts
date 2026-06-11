@@ -9,12 +9,17 @@
 // code that misses pending_users falls through to the orchestrator. All
 // other message flow lives in agent/orchestrator.ts.
 //
-// Header last reviewed: 2026-06-10
+// Transport selection: startServer() branches on loadTransportConfig().transport.
+// TRANSPORT=spectrum → dynamic-imports and starts startSpectrumAdapter (never
+// loads spectrum-ts on the legacy path). Unset/legacy → original
+// startIMessageAdapter() call, unchanged.
+//
+// Header last reviewed: 2026-06-11
 
 import express from 'express'
 import cors from 'cors'
 import cron from 'node-cron'
-import { config } from './config.js'
+import { config, loadTransportConfig } from './config.js'
 import { createWeChatRouter } from './adapters/wechat.js'
 import { startIMessageAdapter, stopIMessageAdapter } from './adapters/imessage.js'
 import { runOrchestrator } from './agent/orchestrator.js'
@@ -479,6 +484,11 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
     // here previously wrote columns that don't exist on imessage_outgoing
     // (body/created_at) and a status outside the CHECK constraint ('queued'),
     // so every heartbeat proactive message failed at the DB.
+    //
+    // NOTE: proactive sends still use the legacy queue (enqueueOutgoing) regardless
+    // of the TRANSPORT setting. Spectrum proactive-send requires creating a
+    // conversation space to an arbitrary handle — out of scope here. Wiring
+    // heartbeat proactive sends through Spectrum is pending the live-cutover phase.
     async sendImessage(msg: { to: string; text: string }) {
       await enqueueOutgoing(msg.to, msg.text);
     },
@@ -651,10 +661,24 @@ async function startServer() {
     console.log(`  Admin  : POST /admin/scrape-instagram, /admin/scrape-usc\n`)
   })
 
-  startIMessageAdapter().catch((err) => {
-    log('warn', 'imessage_start_failed', { error: err.message })
-    console.warn('iMessage adapter failed to start, falling back to WeChat only.')
-  })
+  // Transport selection: TRANSPORT=spectrum routes to the Photon Spectrum
+  // adapter; any other value (or unset) keeps the legacy dual-path unchanged.
+  // The Spectrum adapter is dynamic-imported here so the legacy default path
+  // never touches spectrum-ts at all.
+  const transportCfg = loadTransportConfig()
+  if (transportCfg.transport === 'spectrum') {
+    const { startSpectrumAdapter } = await import('./adapters/spectrum.js')
+    startSpectrumAdapter(transportCfg.spectrum).catch((err) => {
+      log('warn', 'spectrum_start_failed', { error: (err as Error).message })
+      console.warn('Spectrum adapter failed to start.')
+    })
+  } else {
+    // Legacy path (TRANSPORT=legacy or unset) — behavior identical to before.
+    startIMessageAdapter().catch((err) => {
+      log('warn', 'imessage_start_failed', { error: err.message })
+      console.warn('iMessage adapter failed to start, falling back to WeChat only.')
+    })
+  }
 }
 
 startServer().catch((err) => {
