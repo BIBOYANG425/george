@@ -5,8 +5,18 @@
 //
 // Header last reviewed: 2026-06-11
 
+import path from 'node:path'
 import type { SpectrumClient, ReplyHandle } from './spectrum-client.js'
+import type { SpectrumCredentials } from './spectrum-client.js'
+import { createSpectrumClient } from './spectrum-client.js'
 import { log } from '../observability/logger.js'
+import { runOrchestrator } from '../agent/orchestrator.js'
+import { supabase } from '../db/client.js'
+import { extractCodeFromStartMessage, runHandshake } from '../onboarding/handshake.js'
+import { lookupByCode, linkImessageHandle } from '../onboarding/pending-users.js'
+import { checkInjection, INJECTION_REJECTIONS } from '../security/injection-filter.js'
+import { normalizeHandle } from '../services/phone-handle.js'
+import { tryHandleUserCommand } from '../index.js'
 
 export interface SpectrumHandlers {
   // Returns the reply text, or null to send nothing (filtered/handshake-consumed).
@@ -85,4 +95,69 @@ export function buildTextHandler(deps: TextHandlerDeps) {
     const out = await deps.runOrchestratorText(userId, text)
     return out || null
   }
+}
+
+// startSpectrumAdapter wires the real spectrum-ts SDK behind the seam and
+// drives the downstream pipeline (injection filter → handshake → user commands
+// → orchestrator). Mirrors startIMessageAdapter from adapters/imessage.ts but
+// without the Mac-only polling loop — Spectrum pushes inbound via app.messages.
+export async function startSpectrumAdapter(creds: SpectrumCredentials): Promise<void> {
+  const client = await createSpectrumClient(creds)
+
+  const handleText = buildTextHandler({
+    checkInjection,
+    pickRejection: () => INJECTION_REJECTIONS[Math.floor(Math.random() * INJECTION_REJECTIONS.length)],
+
+    tryHandshake: async (userId: string, text: string, reply: ReplyHandle): Promise<boolean> => {
+      const parsed = extractCodeFromStartMessage(text)
+      if (!parsed) return false
+      return runHandshake({
+        code: parsed.code,
+        format: parsed.format,
+        imessageHandle: userId,
+        sendImessage: async (out) => {
+          if (out.text) await reply.sendText(out.text)
+          for (const p of out.imagePaths ?? []) await reply.sendAttachment(path.resolve(p))
+          for (const f of out.filePaths ?? []) await reply.sendAttachment(path.resolve(f))
+        },
+        lookupPending: (c) => lookupByCode(supabase, c),
+        linkImessageHandle: (c, h) => linkImessageHandle(supabase, c, h),
+        profileUrlBase: process.env.ONBOARDING_PROFILE_URL_BASE ?? 'https://uscbia.com/george/profile',
+      })
+    },
+
+    tryUserCommand: (userId: string, text: string) => tryHandleUserCommand(userId, text),
+
+    runOrchestratorText: async (userId: string, text: string): Promise<string> => {
+      let finalText = ''
+      for await (const event of runOrchestrator({
+        userId,
+        channel: 'imessage',
+        text,
+      })) {
+        const e = event as {
+          type?: string
+          result?: string
+          message?: { content?: Array<{ type?: string; text?: string }> }
+        }
+        if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
+          finalText = e.result
+        } else if (e.type === 'assistant' && e.message?.content && finalText === '') {
+          const t = e.message.content
+            .filter((c) => c.type === 'text' && typeof c.text === 'string')
+            .map((c) => c.text as string)
+            .join('')
+          if (t) finalText = t
+        }
+      }
+      return finalText
+    },
+
+    normalizeHandle,
+  })
+
+  // Phase 2: getLocation returns null, so handleLocation is a no-op.
+  const handleLocation = async (_userId: string): Promise<void> => {}
+
+  await runSpectrumLoop(client, { handleText, handleLocation })
 }

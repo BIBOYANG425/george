@@ -583,7 +583,7 @@ function buildUserCommandDeps(): UserCommandDeps | null {
  * Returns the reply string if handled, or null if not a command (or memory
  * layer is uninitialised).
  */
-async function tryHandleUserCommand(
+export async function tryHandleUserCommand(
   userId: string,
   text: string,
 ): Promise<string | null> {

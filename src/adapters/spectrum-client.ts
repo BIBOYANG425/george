@@ -6,6 +6,9 @@
 //
 // Header last reviewed: 2026-06-11
 
+import { Spectrum, attachment } from 'spectrum-ts'
+import { imessage } from 'spectrum-ts/providers/imessage'
+
 // Mirrors @photon-ai/advanced-imessage SharedFriendLocation (fields we use).
 // Lives here (not imported) because the location-normalize module is Phase 2.
 export interface RawSpectrumLocation {
@@ -44,9 +47,45 @@ export interface SpectrumCredentials {
   imessageToken: string
 }
 
-// Real factory. Filled during the integration task once the live SDK + creds
-// exist. Throws until then so accidental use in 'legacy' mode is obvious.
+// Real factory — wires spectrum-ts to the seam interfaces.
+// imessage.config() uses the Spectrum cloud-managed pool (local: false, no
+// dedicated-line address/token needed until Phase 2).
 export async function createSpectrumClient(creds: SpectrumCredentials): Promise<SpectrumClient> {
-  void creds
-  throw new Error('createSpectrumClient not yet wired — integration task pending')
+  const app = await Spectrum({
+    projectId: creds.projectId,
+    projectSecret: creds.projectSecret,
+    providers: [imessage.config()],
+  })
+
+  return {
+    async *messages() {
+      for await (const [space, message] of app.messages) {
+        const replyHandle: ReplyHandle = {
+          sendText: async (text: string) => { await space.send(text) },
+          sendAttachment: async (localPath: string) => { await space.send(attachment(localPath)) },
+        }
+        const inbound: InboundMessage = {
+          platform: message.platform,
+          // message.sender is User | undefined; User.id is the phone/email handle
+          senderId: message.sender?.id ?? '',
+          // message.content is a Content discriminated union; narrow to text
+          contentType: message.content.type,
+          text: message.content.type === 'text' ? (message.content as { type: 'text'; text: string }).text : '',
+          // message.id is the stable SDK-assigned guid
+          messageId: message.id,
+        }
+        yield [replyHandle, inbound] as const
+      }
+    },
+
+    // Phase 2: Find My location via @photon-ai/advanced-imessage dedicated line.
+    // Returns null until a dedicated-line gRPC address + token is provisioned.
+    async getLocation(_handle: string): Promise<RawSpectrumLocation | null> {
+      return null
+    },
+
+    async close(): Promise<void> {
+      await app.stop()
+    },
+  }
 }
