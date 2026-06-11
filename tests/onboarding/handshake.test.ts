@@ -1,0 +1,116 @@
+// tests/onboarding/handshake.test.ts
+import { describe, it, expect, vi } from 'vitest';
+import { extractCodeFromStartMessage, runHandshake } from '../../src/onboarding/handshake.js';
+
+describe('extractCodeFromStartMessage', () => {
+  it('extracts code from natural prefill "i\'m ready to try george (g7k2m4)"', () => {
+    expect(extractCodeFromStartMessage("i'm ready to try george (g7k2m4)")).toEqual({
+      code: 'g7k2m4',
+      format: 'natural',
+    });
+  });
+  it('extracts code from legacy "g7k2m4-START"', () => {
+    expect(extractCodeFromStartMessage('g7k2m4-START')).toEqual({
+      code: 'g7k2m4',
+      format: 'legacy',
+    });
+  });
+  it('trims whitespace', () => {
+    expect(extractCodeFromStartMessage('  g7k2m4-START\n')).toEqual({
+      code: 'g7k2m4',
+      format: 'legacy',
+    });
+  });
+  it('returns null when no handshake pattern', () => {
+    expect(extractCodeFromStartMessage('hello')).toBeNull();
+  });
+  it('returns null for casual message with parens but no "george"', () => {
+    expect(extractCodeFromStartMessage('check out (g7k2m4) it is cool')).toBeNull();
+  });
+  it('returns null for malformed legacy code', () => {
+    expect(extractCodeFromStartMessage('SHORT-START')).toBeNull();
+  });
+  it('flags conversational sentences with parenthesized words as natural format', () => {
+    // "senior" is 6 alphanumeric chars, so this matches the natural regex.
+    // It must surface as format:'natural' so the caller can fall through to
+    // the orchestrator when the lookup misses.
+    expect(extractCodeFromStartMessage('can you ask george (senior) about housing')).toEqual({
+      code: 'senior',
+      format: 'natural',
+    });
+  });
+});
+
+describe('runHandshake', () => {
+  const baseOpts = {
+    imessageHandle: '+15551234567',
+    profileUrlBase: 'https://uscbia.com/george/profile',
+  };
+
+  it('sends 3 messages (greeting+vcf, intro+carousel, profile link) and returns true', async () => {
+    const sent: any[] = [];
+    const send = vi.fn(async (msg: any) => { sent.push(msg); });
+    const lookup = vi.fn(async () => ({ code: 'g7k2m4', status: 'pending' }));
+    const linkHandle = vi.fn(async () => {});
+    const handled = await runHandshake({
+      ...baseOpts,
+      code: 'g7k2m4',
+      format: 'natural',
+      sendImessage: send,
+      lookupPending: lookup as any,
+      linkImessageHandle: linkHandle,
+    });
+    expect(handled).toBe(true);
+    expect(sent.length).toBe(3);
+    expect(sent[0].filePaths).toHaveLength(1); // vcf
+    expect(sent[1].imagePaths).toHaveLength(5); // showcase carousel
+    expect(sent[2].text).toMatch(/ready to set up/i); // profile link
+    expect(linkHandle).toHaveBeenCalledWith('g7k2m4', '+15551234567');
+  });
+
+  it('refuses unknown legacy code with an error reply', async () => {
+    const sent: any[] = [];
+    const send = vi.fn(async (msg: any) => { sent.push(msg); });
+    const handled = await runHandshake({
+      ...baseOpts,
+      code: 'badcod',
+      format: 'legacy',
+      sendImessage: send,
+      lookupPending: vi.fn(async () => null),
+      linkImessageHandle: vi.fn(),
+    });
+    expect(handled).toBe(true);
+    expect(sent.length).toBe(1);
+    expect(sent[0].text).toMatch(/couldn't find/i);
+  });
+
+  it('returns false silently on unknown natural code so the caller falls through to the orchestrator', async () => {
+    const send = vi.fn();
+    const handled = await runHandshake({
+      ...baseOpts,
+      code: 'senior',
+      format: 'natural',
+      sendImessage: send,
+      lookupPending: vi.fn(async () => null),
+      linkImessageHandle: vi.fn(),
+    });
+    expect(handled).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('replies "already in" for completed codes and returns true', async () => {
+    const sent: any[] = [];
+    const send = vi.fn(async (msg: any) => { sent.push(msg); });
+    const handled = await runHandshake({
+      ...baseOpts,
+      code: 'g7k2m4',
+      format: 'natural',
+      sendImessage: send,
+      lookupPending: vi.fn(async () => ({ code: 'g7k2m4', status: 'completed' })) as any,
+      linkImessageHandle: vi.fn(),
+    });
+    expect(handled).toBe(true);
+    expect(sent.length).toBe(1);
+    expect(sent[0].text).toMatch(/already in/i);
+  });
+});

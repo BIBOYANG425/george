@@ -8,19 +8,49 @@
 // In Path A (Mac mini bridge mode) this table is unused — replies travel
 // back to the bridge inline over the /chat HTTP response.
 //
-// Header last reviewed: 2026-05-28
+// ATTACHMENTS — added 2026-06-08 for Slice B onboarding handshake.
+// Each row may now carry `text`, `images` (PNG/JPG paths), and/or `files`
+// (other attachments like .vcf contact cards). Migration
+// 20260608000001_imessage_outgoing_attachments adds those columns and
+// drops the NOT NULL on text. At least one of the three must be non-empty
+// per row (DB check constraint imessage_outgoing_has_content).
+//
+// IPHONE SHORTCUT — the deployed Shortcut that polls /imessage/outgoing
+// needs a parallel update: read `images` and `files` from each row and
+// include them as Messages.app attachments alongside the text body when
+// sending. The Shortcut update is a Bobby ops task; the codebase here
+// only writes the rows.
+//
+// Header last reviewed: 2026-06-08
 
 import { supabase } from './client.js'
 
 export interface OutgoingRow {
   id: string
   recipient: string
-  text: string
+  text: string | null
+  images: string[]
+  files: string[]
   queued_at: string
 }
 
-export async function enqueueOutgoing(recipient: string, text: string): Promise<void> {
-  const { error } = await supabase.from('imessage_outgoing').insert({ recipient, text })
+export interface OutgoingPayload {
+  text?: string
+  images?: string[]
+  files?: string[]
+}
+
+export async function enqueueOutgoing(
+  recipient: string,
+  payload: string | OutgoingPayload,
+): Promise<void> {
+  const body: OutgoingPayload =
+    typeof payload === 'string' ? { text: payload } : payload
+  const row: Record<string, unknown> = { recipient }
+  if (body.text !== undefined) row.text = body.text
+  if (body.images && body.images.length > 0) row.images = body.images
+  if (body.files && body.files.length > 0) row.files = body.files
+  const { error } = await supabase.from('imessage_outgoing').insert(row)
   if (error) throw new Error(`enqueueOutgoing failed: ${error.message}`)
 }
 
@@ -48,7 +78,7 @@ export async function enqueueOutgoing(recipient: string, text: string): Promise<
 export async function fetchPending(afterISO?: string, limit = 10): Promise<OutgoingRow[]> {
   let q = supabase
     .from('imessage_outgoing')
-    .select('id, recipient, text, queued_at')
+    .select('id, recipient, text, images, files, queued_at')
     .eq('status', 'pending')
     .order('queued_at', { ascending: true })
     .limit(limit)
