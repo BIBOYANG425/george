@@ -57,3 +57,27 @@ export async function runSpectrumLoop(
   // Drain any pending buffers when the stream ends.
   await Promise.all(Array.from(buffers.keys()).map(flush))
 }
+
+export interface TextHandlerDeps {
+  checkInjection: (text: string) => { blocked: boolean; reason?: string }
+  pickRejection: () => string
+  // Returns true if the handshake consumed the message (send nothing further).
+  tryHandshake: (userId: string, text: string, reply: ReplyHandle) => Promise<boolean>
+  // Returns a command reply string, or null if not a command.
+  tryUserCommand: (userId: string, text: string) => Promise<string | null>
+  // Runs the orchestrator and returns the final reply text (or '').
+  runOrchestratorText: (userId: string, text: string) => Promise<string>
+  normalizeHandle: (raw: string) => string
+}
+
+export function buildTextHandler(deps: TextHandlerDeps) {
+  return async (rawUserId: string, text: string, reply: ReplyHandle): Promise<string | null> => {
+    const userId = deps.normalizeHandle(rawUserId)
+    if (deps.checkInjection(text).blocked) return deps.pickRejection()
+    if (await deps.tryHandshake(userId, text, reply)) return null
+    const cmd = await deps.tryUserCommand(userId, text)
+    if (cmd !== null) return cmd
+    const out = await deps.runOrchestratorText(userId, text)
+    return out || null
+  }
+}
