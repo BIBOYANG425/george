@@ -6,6 +6,7 @@
 // Header last reviewed: 2026-06-11
 
 import type { SpectrumClient, ReplyHandle } from './spectrum-client.js'
+import { log } from '../observability/logger.js'
 
 export interface SpectrumHandlers {
   // Returns the reply text, or null to send nothing (filtered/handshake-consumed).
@@ -34,7 +35,9 @@ export async function runSpectrumLoop(
     try {
       const out = await handlers.handleText(senderId, buf.texts.join('\n'), buf.reply)
       if (out) await buf.reply.sendText(out)
-    } catch { /* per-turn isolation */ }
+    } catch (err) {
+      log('error', 'spectrum_turn_error', { senderId, error: (err as Error).message })
+    }
   }
 
   for await (const [reply, message] of client.messages()) {
@@ -50,6 +53,8 @@ export async function runSpectrumLoop(
       clearTimeout(existing.timer)
       existing.timer = setTimeout(() => void flush(message.senderId), debounceMs)
     } else {
+      // All messages in a per-sender burst share one conversation; the first
+      // message's reply handle is representative for the coalesced turn.
       const entry = { texts: [message.text], reply, timer: setTimeout(() => void flush(message.senderId), debounceMs) }
       buffers.set(message.senderId, entry)
     }
