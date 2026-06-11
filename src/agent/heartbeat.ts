@@ -1,6 +1,7 @@
 // src/agent/heartbeat.ts
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ProfileStore, BlockName } from '../memory/profile.js';
 import { InstructionsStore } from '../memory/instructions.js';
 import { LLMClient } from './llm-clients.js';
@@ -54,6 +55,7 @@ export interface HeartbeatDeps {
   callLLM: LLMClient['call'];
 }
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HEARTBEAT_PROMPT = fs.readFileSync(
   path.resolve(__dirname, '../../prompts/heartbeat.md'),
   'utf-8'

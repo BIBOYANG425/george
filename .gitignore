@@ -3,3 +3,6 @@ dist/
 .env
 .DS_Store
 data/ingest/
+
+# R session history junk
+.Rhistory

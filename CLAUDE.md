@@ -198,6 +198,21 @@ User control commands (iMessage): `/profile`, `/correct <block> <content>`, `/pa
 
 Spec: `docs/superpowers/specs/2026-06-07-memory-heartbeat-profiles-design.md`.
 
+## Onboarding handshake (Slice B)
+
+The web landing (uscbia.com/george) mints a 6-char code into `pending_users` and prefills an `sms:` message. When that message arrives, george intercepts it before the orchestrator on both iMessage paths and replies with a 3-message greeting (greeting + vcf contact card, intro + 5-image showcase, profile link).
+
+Two accepted formats, with different miss behavior:
+
+- **Legacy** `<code>-START`: unambiguous. A lookup miss replies "couldn't find that code".
+- **Natural** `...george (<code>)...`: can false-positive on real sentences ("ask george (senior) about housing"). A lookup miss falls through to the orchestrator silently. Never reply with a code error for this format.
+
+Attachments differ per path. Path A (Mac bridge) sends local file paths via `sdk.send`, resolved to absolute. Path B (iPhone Shortcuts) cannot read this host's filesystem, so paths are rewritten to public URLs under `ONBOARDING_ASSET_BASE_URL` before enqueueing; if that var is unset, Path B handshakes go out text-only. The assets (5 showcase PNGs + `george.vcf` from `assets/onboarding/`) must be hosted at that URL base (bia-roommate `public/` or Supabase Storage).
+
+Profile completion is owned by bia-roommate's form (`app/george/profile/api/submit/route.ts`), which flips `pending_users.status` to `completed`. A daily cron (03:00 LA, gated by `ONBOARDING_ENABLED`) purges rows still in `pending` status after 14 days; completed rows are kept so returning users get "you're already in".
+
+Env vars: `ONBOARDING_PROFILE_URL_BASE`, `ONBOARDING_ASSET_BASE_URL`, `ONBOARDING_ENABLED`, `GEORGE_IMESSAGE_PHONE` (see `.env.example`). Cross-repo: the queue's attachment columns live in bia-admin migration `20260608000001_imessage_outgoing_attachments`, and the deployed iPhone Shortcut must be updated to read `images`/`files` URLs from `/imessage/outgoing` rows.
+
 ## Persona source map
 
 For voice and persona edits, see the "Prompt source map" section in `AGENT.md`. All voice changes go through `prompts/master.md` and `src/agent/bia-lore.ts`. The orchestrator in `src/agent/orchestrator.ts` is wiring (routing, tool dispatch, conversation memory). Voice does not belong there.
