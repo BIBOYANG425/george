@@ -80,8 +80,11 @@ export function loadTransportConfig() {
   return {
     transport,
     spectrum: {
-      projectId: process.env.SPECTRUM_PROJECT_ID || '',
-      projectSecret: process.env.SPECTRUM_PROJECT_SECRET || '',
+      // Accept the namespaced SPECTRUM_* names (preferred in george's shared
+      // .env) OR the bare PROJECT_ID/PROJECT_SECRET that `bun create
+      // spectrum-project` scaffolds, so a scaffolded .env works unchanged.
+      projectId: process.env.SPECTRUM_PROJECT_ID || process.env.PROJECT_ID || '',
+      projectSecret: process.env.SPECTRUM_PROJECT_SECRET || process.env.PROJECT_SECRET || '',
       imessageAddress: process.env.SPECTRUM_IMESSAGE_ADDRESS || '',
       imessageToken: process.env.IMESSAGE_TOKEN || '',
     },
