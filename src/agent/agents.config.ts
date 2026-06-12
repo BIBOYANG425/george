@@ -58,6 +58,7 @@ export const SUB_AGENTS = {
       'recommend_courses',
       'get_rmp_ratings',
       'search_courses',
+      'search_ge_courses',
       'search_programs',
       'plan_schedule',
       'get_student_academic_state',
