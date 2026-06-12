@@ -112,16 +112,9 @@ export function buildTextHandler(deps: TextHandlerDeps) {
   }
 }
 
-// startSpectrumAdapter wires the real spectrum-ts SDK behind the seam and
-// drives the downstream pipeline (injection filter → handshake → user commands
-// → orchestrator). Mirrors startIMessageAdapter from adapters/imessage.ts but
-// without the Mac-only polling loop — Spectrum pushes inbound via app.messages.
-export async function startSpectrumAdapter(
-  creds: SpectrumCredentials,
-  deps: SpectrumAdapterDeps = {},
-): Promise<void> {
-  const client = await createSpectrumClient(creds)
-
+// Build the downstream pipeline handlers (injection → handshake → user
+// commands → orchestrator). Pure of any connection — reused across reconnects.
+function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
   const handleText = buildTextHandler({
     checkInjection,
     pickRejection: () => INJECTION_REJECTIONS[Math.floor(Math.random() * INJECTION_REJECTIONS.length)],
@@ -197,5 +190,59 @@ export async function startSpectrumAdapter(
   // Phase 2: getLocation returns null, so handleLocation is a no-op.
   const handleLocation = async (_userId: string): Promise<void> => {}
 
-  await runSpectrumLoop(client, { handleText, handleLocation })
+  return { handleText, handleLocation }
+}
+
+// ── Connection lifecycle: clean shutdown + auto-reconnect ──────────────
+// Each Spectrum connection must be closed on shutdown, else it dangles on
+// Photon's side and the shared-pool routing sends inbound to a dead socket.
+// And a dropped stream must reconnect, else george goes silently deaf.
+let spectrumStopping = false
+let activeSpectrumClient: SpectrumClient | null = null
+
+// startSpectrumAdapter connects to Spectrum and drives the downstream pipeline.
+// Runs until stopSpectrumAdapter() is called: if the message stream ends or
+// throws (transient drop), it reconnects with exponential backoff. Mirrors
+// startIMessageAdapter but for Spectrum's pushed app.messages stream.
+export async function startSpectrumAdapter(
+  creds: SpectrumCredentials,
+  deps: SpectrumAdapterDeps = {},
+): Promise<void> {
+  spectrumStopping = false
+  const handlers = buildSpectrumHandlers(deps)
+  let backoffMs = 1_000
+
+  while (!spectrumStopping) {
+    try {
+      const client = await createSpectrumClient(creds)
+      activeSpectrumClient = client
+      backoffMs = 1_000 // reset after a successful connect
+      log('info', 'spectrum_connected', {})
+      await runSpectrumLoop(client, handlers)
+      // runSpectrumLoop returning means the stream ended (not an error).
+      log('warn', 'spectrum_stream_ended', {})
+    } catch (err) {
+      log('error', 'spectrum_stream_error', { error: (err as Error).message })
+    } finally {
+      if (activeSpectrumClient) {
+        await activeSpectrumClient.close().catch(() => {})
+        activeSpectrumClient = null
+      }
+    }
+    if (spectrumStopping) break
+    await new Promise((r) => setTimeout(r, backoffMs))
+    backoffMs = Math.min(backoffMs * 2, 30_000)
+    log('warn', 'spectrum_reconnecting', { backoffMs })
+  }
+  log('info', 'spectrum_adapter_stopped', {})
+}
+
+// Close the live Spectrum connection cleanly and stop the reconnect loop.
+// Called from the process shutdown handler so a restart never orphans a
+// connection on Photon's side.
+export async function stopSpectrumAdapter(): Promise<void> {
+  spectrumStopping = true
+  const client = activeSpectrumClient
+  activeSpectrumClient = null
+  if (client) await client.close().catch(() => {})
 }

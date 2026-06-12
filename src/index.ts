@@ -619,8 +619,18 @@ process.on('unhandledRejection', (reason) => {
   log('error', 'unhandled_rejection', { reason: String(reason) })
 })
 
+// Set when the Spectrum adapter is started (spectrum transport only) so the
+// shutdown handler can close the connection cleanly instead of orphaning it
+// on Photon's side (a dangling connection breaks shared-pool inbound routing).
+let stopSpectrum: (() => Promise<void>) | null = null
+
 async function shutdown(signal: string) {
   log('info', 'shutdown', { signal })
+  if (stopSpectrum) {
+    await stopSpectrum().catch((err) =>
+      log('error', 'spectrum_stop_failed', { error: (err as Error).message }),
+    )
+  }
   await stopIMessageAdapter().catch((err) =>
     log('error', 'imessage_stop_failed', { error: (err as Error).message }),
   )
@@ -667,7 +677,8 @@ async function startServer() {
   // never touches spectrum-ts at all.
   const transportCfg = loadTransportConfig()
   if (transportCfg.transport === 'spectrum') {
-    const { startSpectrumAdapter } = await import('./adapters/spectrum.js')
+    const { startSpectrumAdapter, stopSpectrumAdapter } = await import('./adapters/spectrum.js')
+    stopSpectrum = stopSpectrumAdapter // let shutdown() close the connection cleanly
     // Pass the session + profile stores so the orchestrator loads conversation
     // history (same memory wiring as POST /chat); without these george would
     // treat every message in isolation.
