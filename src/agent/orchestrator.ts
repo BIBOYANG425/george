@@ -45,18 +45,25 @@ export interface RunOrchestratorArgs {
   maxTurns?: number;
 }
 
-export function buildOrchestratorPrompt(profile?: Profile | null): string {
-  const base = `${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`;
-  if (!profile) return base;
-
+// The 6 memory blocks rendered as a system-prompt section. Empty string when
+// no profile, so callers can append unconditionally. Shared by the orchestrator
+// AND the sub-agents so specialists (e.g. know-things for course recs) can
+// personalize off the student's actual major/year/interests.
+function buildUserProfileBlock(profile?: Profile | null): string {
+  if (!profile) return '';
   const blocks = ['identity', 'academic', 'interests', 'relationships', 'state', 'george_notes'] as const;
   const sections = blocks.map((name) => {
     const content = profile[name];
     const label = name.toUpperCase().replace('_', ' ');
     return `## ${label}\n${content || '(empty)'}`;
   });
-  const userProfileBlock = `# USER PROFILE\n\n${sections.join('\n\n')}`;
-  return `${base}\n\n${userProfileBlock}`;
+  return `# USER PROFILE\n\n${sections.join('\n\n')}`;
+}
+
+export function buildOrchestratorPrompt(profile?: Profile | null): string {
+  const base = `${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`;
+  const userProfileBlock = buildUserProfileBlock(profile);
+  return userProfileBlock ? `${base}\n\n${userProfileBlock}` : base;
 }
 
 /**
@@ -66,12 +73,18 @@ export function buildOrchestratorPrompt(profile?: Profile | null): string {
  * string[] (tool names, not tool objects). The SDK resolves the tool objects
  * internally — we just list the names.
  */
-function buildAgentsConfig(): Record<string, { description: string; prompt: string; tools: string[] }> {
+function buildAgentsConfig(
+  profile?: Profile | null,
+): Record<string, { description: string; prompt: string; tools: string[] }> {
+  // Inject the user profile into each sub-agent so it doesn't have to be
+  // re-stated through the dispatch prompt (it often wasn't). Now know-things
+  // always knows the student's major/year/interests and can personalize.
+  const userProfileBlock = buildUserProfileBlock(profile);
   const config: Record<string, { description: string; prompt: string; tools: string[] }> = {};
   for (const [name, def] of Object.entries(SUB_AGENTS)) {
     config[name] = {
       description: def.description,
-      prompt: def.prompt,
+      prompt: userProfileBlock ? `${def.prompt}\n\n${userProfileBlock}` : def.prompt,
       // Namespace each tool to its MCP name so the sub-agent can actually call
       // the registered implementation (inherits the parent's mcpServers).
       tools: def.tools.map(nsTool),
@@ -136,7 +149,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   const profile = args.profileStore ? await args.profileStore.loadProfile(args.userId) : null;
 
   const systemPrompt = buildOrchestratorPrompt(profile);
-  const agentsConfig = buildAgentsConfig();
+  const agentsConfig = buildAgentsConfig(profile);
   const orchestratorTools = buildOrchestratorToolNames();
 
   // Load conversation history from our custom SessionStore and prepend as context.

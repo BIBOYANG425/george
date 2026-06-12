@@ -38,7 +38,18 @@ export interface SpectrumHandlers {
 
 const DEDUP_CAP = 2000
 
-export interface LoopOptions { debounceMs?: number }
+// Sent once if the orchestrator turn runs long (e.g. the course recommender
+// agent ~30s), so the user knows george is working rather than dead. Short,
+// in-voice. The real reply follows when ready.
+const STILL_THINKING = ['等我一下哈，还在翻 🔍', 'gimme a sec, still digging on this', '稍等，马上给你']
+const pickStillThinking = (): string =>
+  STILL_THINKING[Math.floor(Math.random() * STILL_THINKING.length)]
+
+export interface LoopOptions {
+  debounceMs?: number
+  // Send a "still thinking" nudge if the turn exceeds this. Default 9s.
+  interimDelayMs?: number
+}
 
 export async function runSpectrumLoop(
   client: SpectrumClient,
@@ -46,6 +57,7 @@ export async function runSpectrumLoop(
   opts: LoopOptions = {},
 ): Promise<void> {
   const debounceMs = opts.debounceMs ?? 1500
+  const interimDelayMs = opts.interimDelayMs ?? 9000
   const seen = new Set<string>()
   const buffers = new Map<string, { texts: string[]; reply: ReplyHandle; timer: ReturnType<typeof setTimeout> }>()
 
@@ -56,8 +68,14 @@ export async function runSpectrumLoop(
     // Show the "…" typing bubble while the (slow) orchestrator turn runs.
     // Best-effort: a failed typing signal must never block or fail the reply.
     await buf.reply.startTyping().catch(() => {})
+    // If the turn runs long, send one "still thinking" nudge so the user isn't
+    // left staring at a typing bubble. Cleared as soon as the reply is ready.
+    const interimTimer = setTimeout(() => {
+      void buf.reply.sendText(pickStillThinking()).catch(() => {})
+    }, interimDelayMs)
     try {
       const out = await handlers.handleText(senderId, buf.texts.join('\n'), buf.reply)
+      clearTimeout(interimTimer)
       // One idea per bubble: split on blank-line boundaries and send each as a
       // separate iMessage with a pause, matching george's short-burst cadence
       // (same as the legacy adapter). A single-paragraph reply stays one bubble.
@@ -71,6 +89,7 @@ export async function runSpectrumLoop(
     } catch (err) {
       log('error', 'spectrum_turn_error', { senderId, error: (err as Error).message })
     } finally {
+      clearTimeout(interimTimer)
       await buf.reply.stopTyping().catch(() => {})
     }
   }

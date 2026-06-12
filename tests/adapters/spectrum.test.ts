@@ -82,6 +82,33 @@ describe('runSpectrumLoop', () => {
     expect(typing).toEqual(['start', 'stop'])
   })
 
+  it('sends a "still thinking" nudge before the reply when the turn runs long', async () => {
+    const { client, sent } = fakeClient([msg()])
+    await runSpectrumLoop(
+      client,
+      {
+        handleText: async () => {
+          await new Promise((r) => setTimeout(r, 30))
+          return 'real reply'
+        },
+        handleLocation: vi.fn(),
+      },
+      { interimDelayMs: 0 }, // fire the nudge immediately
+    )
+    expect(sent).toHaveLength(2)
+    expect(sent[0]).toBeTruthy() // the interim nudge
+    expect(sent[1]).toBe('real reply')
+  })
+
+  it('does NOT send a nudge for a fast turn', async () => {
+    const { client, sent } = fakeClient([msg()])
+    await runSpectrumLoop(client, {
+      handleText: async () => 'quick',
+      handleLocation: vi.fn(),
+    }) // default 9s interim — instant handler resolves first
+    expect(sent).toEqual(['quick'])
+  })
+
   it('stops typing even when the handler returns null or throws', async () => {
     const a = fakeClient([msg()])
     await runSpectrumLoop(a.client, { handleText: async () => null, handleLocation: vi.fn() })
