@@ -68,7 +68,14 @@ function buildAgentsConfig(): Record<string, { description: string; prompt: stri
  * We pass just the names for the orchestrator's direct tools.
  */
 function buildOrchestratorToolNames(): string[] {
-  return [...ORCHESTRATOR_DIRECT_TOOLS];
+  // The `tools` option is a RESTRICTION allowlist (SDK: "to restrict which
+  // tools are available, use the tools option"). Without the sub-agent
+  // dispatch tool here, the orchestrator can only call its 2 direct tools and
+  // the model NARRATES the dispatch as text ("Agent('know-things', ...)")
+  // instead of actually invoking a sub-agent. The SDK names the dispatch tool
+  // both "Task" and "Agent" — include both so whichever the runtime exposes
+  // is permitted.
+  return ['Task', 'Agent', ...ORCHESTRATOR_DIRECT_TOOLS];
 }
 
 /**

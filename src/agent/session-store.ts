@@ -45,25 +45,21 @@ export class SupabaseSessionStore implements SessionStore {
   constructor(private supabase: SupabaseClient) {}
 
   async load(sessionId: string): Promise<Session | null> {
-    const [messagesRes, memoriesRes] = await Promise.all([
-      this.supabase
-        .from('messages')
-        .select('role, content, created_at')
-        .eq('user_id', sessionId)
-        .order('created_at', { ascending: false })
-        .limit(RECENT_MESSAGES_LIMIT),
-      this.supabase
-        .from('student_memories')
-        .select('memory_type, content')
-        .eq('user_id', sessionId),
-    ]);
+    // Conversation history only. The long-term memory layer lives in
+    // user_profiles (loaded separately via ProfileStore in the orchestrator);
+    // the old student_memories enrichment here queried columns that don't
+    // exist (memory_type/content/user_id) and nothing consumed its output, so
+    // it's removed rather than kept as a perpetually-failing query.
+    const messagesRes = await this.supabase
+      .from('messages')
+      .select('role, content, created_at')
+      .eq('user_id', sessionId)
+      .order('created_at', { ascending: false })
+      .limit(RECENT_MESSAGES_LIMIT);
 
     if (messagesRes.error) {
       console.error('[sessionStore] messages load failed:', messagesRes.error.message);
       return null;
-    }
-    if (memoriesRes.error) {
-      console.error('[sessionStore] memories load failed:', memoriesRes.error.message);
     }
 
     const messages: Message[] = (messagesRes.data ?? [])
@@ -73,12 +69,10 @@ export class SupabaseSessionStore implements SessionStore {
         content: m.content as string,
       }));
 
-    const memories = (memoriesRes.data ?? []).map((m) => `${m.memory_type}: ${m.content}`);
-
     return {
       sessionId,
       messages,
-      systemContext: { memories },
+      systemContext: {},
     };
   }
 
