@@ -9,12 +9,17 @@
 // code that misses pending_users falls through to the orchestrator. All
 // other message flow lives in agent/orchestrator.ts.
 //
-// Header last reviewed: 2026-06-10
+// Transport selection: startServer() branches on loadTransportConfig().transport.
+// TRANSPORT=spectrum → dynamic-imports and starts startSpectrumAdapter (never
+// loads spectrum-ts on the legacy path). Unset/legacy → original
+// startIMessageAdapter() call, unchanged.
+//
+// Header last reviewed: 2026-06-11
 
 import express from 'express'
 import cors from 'cors'
 import cron from 'node-cron'
-import { config } from './config.js'
+import { config, loadTransportConfig } from './config.js'
 import { createWeChatRouter } from './adapters/wechat.js'
 import { startIMessageAdapter, stopIMessageAdapter } from './adapters/imessage.js'
 import { runOrchestrator } from './agent/orchestrator.js'
@@ -37,11 +42,10 @@ import { startPendingUsersCleanupCron } from './jobs/pending-users-cleanup-cron.
 import { runHeartbeat } from './agent/heartbeat.js'
 import { ProfileStore, createSupabaseProfileDB } from './memory/profile.js'
 import { InstructionsStore, createSupabaseInstructionsDB } from './memory/instructions.js'
-import { getKVCache, KVCache } from './memory/kv-cache.js'
+import { getKVCache } from './memory/kv-cache.js'
 import { createDeepSeekClient } from './agent/llm-clients.js'
 import { createServiceRoleClient } from './memory/supabase-client.js'
-import { parseAndRouteUserCommand, executeUserCommand, UserCommandDeps } from './tools/user-commands.js'
-import type { SupabaseClient } from '@supabase/supabase-js'
+import { tryHandleUserCommand, setUserCommandRuntime } from './agent/user-command-router.js'
 
 // ALL_TOOLS (imported above) registers all 23 tools as a side effect.
 
@@ -49,13 +53,11 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 // Supabase client; calling it per-request would leak connections.
 const sessionStore = createSupabaseSessionStore()
 
-// Module-level handles for memory + user-command deps, populated once the
-// heartbeat block initializes below. Both /chat and /imessage/incoming check
-// these before dispatching to the orchestrator.
-let _cache: KVCache | null = null
+// Module-level profile-store handle, populated once the heartbeat block
+// initializes below. Both /chat and /imessage/incoming pass it to the
+// orchestrator. The user-command runtime (cache + supabase + sender) is
+// injected into ./agent/user-command-router via setUserCommandRuntime() there.
 let _profileStore: ProfileStore | null = null
-let _supabase: SupabaseClient | null = null
-let _sendImessage: ((msg: { to: string; text: string }) => Promise<void>) | null = null
 
 const app = express()
 
@@ -479,6 +481,11 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
     // here previously wrote columns that don't exist on imessage_outgoing
     // (body/created_at) and a status outside the CHECK constraint ('queued'),
     // so every heartbeat proactive message failed at the DB.
+    //
+    // NOTE: proactive sends still use the legacy queue (enqueueOutgoing) regardless
+    // of the TRANSPORT setting. Spectrum proactive-send requires creating a
+    // conversation space to an arbitrary handle — out of scope here. Wiring
+    // heartbeat proactive sends through Spectrum is pending the live-cutover phase.
     async sendImessage(msg: { to: string; text: string }) {
       await enqueueOutgoing(msg.to, msg.text);
     },
@@ -515,87 +522,23 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
   });
   console.log('[heartbeat] scheduler started, ticks every 10 minutes');
 
-  // Promote to module scope so /chat and /imessage/incoming can use them.
-  _cache = cache;
+  // Promote the profile store to module scope so /chat and /imessage/incoming
+  // can pass it to the orchestrator, and inject the user-command runtime into
+  // the router so tryHandleUserCommand can act on commands.
   _profileStore = profileStore;
-  _supabase = supabase;
-  _sendImessage = heartbeatDeps.sendImessage.bind(heartbeatDeps);
-}
-
-// ==========================================
-// USER COMMAND ROUTING (shared helper)
-// ==========================================
-//
-// Builds the full UserCommandDeps object from the module-level singletons.
-// Returns null when the memory layer hasn't been initialised (HEARTBEAT_ENABLED=false).
-function buildUserCommandDeps(): UserCommandDeps | null {
-  if (!_cache || !_profileStore || !_supabase || !_sendImessage) return null;
-  const cache = _cache;
-  const profileStore = _profileStore;
-  const supabase = _supabase;
-  const sendImessage = _sendImessage;
-  return {
+  setUserCommandRuntime({
+    cache,
     profileStore,
-    async setPaused(userId: string, until: Date | null) {
-      await supabase
-        .from('user_heartbeat_config')
-        .update({ paused: until !== null, pause_until: until?.toISOString() ?? null })
-        .eq('user_id', userId);
-      await cache.delete(`user:${userId}:profile`);
-    },
-    async deleteUserData(userId: string) {
-      await Promise.all([
-        supabase.from('user_profiles').delete().eq('user_id', userId),
-        supabase.from('user_heartbeat_config').delete().eq('user_id', userId),
-        supabase.from('user_heartbeat_instructions').delete().eq('user_id', userId),
-        supabase.from('heartbeat_log').delete().eq('user_id', userId),
-        supabase.from('student_followups').delete().eq('user_id', userId),
-        supabase.from('messages').delete().eq('user_id', userId),
-      ]);
-      await cache.delete(`user:${userId}:profile`);
-      await cache.delete(`user:${userId}:instructions`);
-    },
-    sendImessage,
-    async setDeleteConfirmPending(userId: string, pending: boolean) {
-      await cache.set(`user:${userId}:delete_pending`, pending ? '1' : '0', 300);
-    },
-    async getDeleteConfirmPending(userId: string) {
-      return (await cache.get(`user:${userId}:delete_pending`)) === '1';
-    },
-    async writeAudit(entry: { userId: string; action: string; payload: Record<string, unknown> }) {
-      try {
-        await supabase.from('admin_audit_log').insert({
-          actor_email: 'system@george',
-          action: entry.action,
-          entity_type: 'user',
-          entity_id: entry.userId,
-          payload: entry.payload,
-        });
-      } catch {
-        // admin_audit_log may not exist yet; swallow so commands don't fail
-      }
-    },
-  };
+    supabase,
+    sendImessage: heartbeatDeps.sendImessage.bind(heartbeatDeps),
+  });
 }
 
-/**
- * Attempt to handle a user command message before the orchestrator sees it.
- * Returns the reply string if handled, or null if not a command (or memory
- * layer is uninitialised).
- */
-async function tryHandleUserCommand(
-  userId: string,
-  text: string,
-): Promise<string | null> {
-  const parsed = parseAndRouteUserCommand(text);
-  if (parsed === null) return null;
-  const deps = buildUserCommandDeps();
-  if (deps === null) {
-    // Memory layer off — fall through to orchestrator
-    return null;
-  }
-  return executeUserCommand(userId, parsed, deps, text);
-}
+// User-command routing (/profile, /correct, /pause, /resume, /delete me) now
+// lives in ./agent/user-command-router. tryHandleUserCommand is imported above;
+// the runtime it needs is injected via setUserCommandRuntime() in the heartbeat
+// init block. Kept out of this module so transports can import the router
+// without triggering index.ts's server-start side effects.
 
 // ==========================================
 // PROCESS RESILIENCE
@@ -609,8 +552,18 @@ process.on('unhandledRejection', (reason) => {
   log('error', 'unhandled_rejection', { reason: String(reason) })
 })
 
+// Set when the Spectrum adapter is started (spectrum transport only) so the
+// shutdown handler can close the connection cleanly instead of orphaning it
+// on Photon's side (a dangling connection breaks shared-pool inbound routing).
+let stopSpectrum: (() => Promise<void>) | null = null
+
 async function shutdown(signal: string) {
   log('info', 'shutdown', { signal })
+  if (stopSpectrum) {
+    await stopSpectrum().catch((err) =>
+      log('error', 'spectrum_stop_failed', { error: (err as Error).message }),
+    )
+  }
   await stopIMessageAdapter().catch((err) =>
     log('error', 'imessage_stop_failed', { error: (err as Error).message }),
   )
@@ -651,10 +604,31 @@ async function startServer() {
     console.log(`  Admin  : POST /admin/scrape-instagram, /admin/scrape-usc\n`)
   })
 
-  startIMessageAdapter().catch((err) => {
-    log('warn', 'imessage_start_failed', { error: err.message })
-    console.warn('iMessage adapter failed to start, falling back to WeChat only.')
-  })
+  // Transport selection: TRANSPORT=spectrum routes to the Photon Spectrum
+  // adapter; any other value (or unset) keeps the legacy dual-path unchanged.
+  // The Spectrum adapter is dynamic-imported here so the legacy default path
+  // never touches spectrum-ts at all.
+  const transportCfg = loadTransportConfig()
+  if (transportCfg.transport === 'spectrum') {
+    const { startSpectrumAdapter, stopSpectrumAdapter } = await import('./adapters/spectrum.js')
+    stopSpectrum = stopSpectrumAdapter // let shutdown() close the connection cleanly
+    // Pass the session + profile stores so the orchestrator loads conversation
+    // history (same memory wiring as POST /chat); without these george would
+    // treat every message in isolation.
+    startSpectrumAdapter(transportCfg.spectrum, {
+      sessionStore,
+      profileStore: _profileStore ?? undefined,
+    }).catch((err) => {
+      log('warn', 'spectrum_start_failed', { error: (err as Error).message })
+      console.warn('Spectrum adapter failed to start.')
+    })
+  } else {
+    // Legacy path (TRANSPORT=legacy or unset) — behavior identical to before.
+    startIMessageAdapter().catch((err) => {
+      log('warn', 'imessage_start_failed', { error: err.message })
+      console.warn('iMessage adapter failed to start, falling back to WeChat only.')
+    })
+  }
 }
 
 startServer().catch((err) => {

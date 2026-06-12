@@ -11,6 +11,7 @@ export { describeCourseTool } from './describe-course.js'
 export { recommendCoursesTool } from './recommend-courses.js'
 export { getRmpRatingsTool } from './get-rmp-ratings.js'
 export { searchCoursesTool } from './search-courses.js'
+export { searchGeCoursesTool } from './search-ge-courses.js'
 export { searchProgramsTool } from './search-programs.js'
 export { planScheduleTool } from './plan-schedule.js'
 export { getStudentAcademicStateTool } from './get-student-academic-state.js'
@@ -38,6 +39,7 @@ import { describeCourseTool } from './describe-course.js'
 import { recommendCoursesTool } from './recommend-courses.js'
 import { getRmpRatingsTool } from './get-rmp-ratings.js'
 import { searchCoursesTool } from './search-courses.js'
+import { searchGeCoursesTool } from './search-ge-courses.js'
 import { searchProgramsTool } from './search-programs.js'
 import { planScheduleTool } from './plan-schedule.js'
 import { getStudentAcademicStateTool } from './get-student-academic-state.js'
@@ -66,6 +68,7 @@ export const ALL_TOOLS = {
   recommend_courses: recommendCoursesTool,
   get_rmp_ratings: getRmpRatingsTool,
   search_courses: searchCoursesTool,
+  search_ge_courses: searchGeCoursesTool,
   search_programs: searchProgramsTool,
   plan_schedule: planScheduleTool,
   get_student_academic_state: getStudentAcademicStateTool,

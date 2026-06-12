@@ -15,7 +15,11 @@ export async function recommendCoursesHandler(input: {
   units?: string
   level?: string
 }): Promise<string> {
-  const body: Record<string, string> = { interests: input.interests, mode: 'free' }
+  // 'interest' (not 'free') so bia-roommate runs the LLM interest-recommender
+  // agent — real interest-matched courses with reasoning (e.g. CSCI 360 for
+  // "ai + film"). 'free' is dumb keyword matching that returns generic GE
+  // courses, which made george hedge instead of naming relevant classes.
+  const body: Record<string, string> = { interests: input.interests, mode: 'interest' }
   if (input.semester) body.semester = input.semester
   if (input.units) body.units = input.units
   if (input.level) body.level = input.level
@@ -24,7 +28,10 @@ export async function recommendCoursesHandler(input: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
+    // Interest mode runs an LLM recommender agent server-side, which is slower
+    // than the old keyword path — give it real headroom (george shows a typing
+    // bubble meanwhile).
+    signal: AbortSignal.timeout(45_000),
   })
   if (!res.ok) return `Course recommendation failed (${res.status})`
   const data = await res.json()

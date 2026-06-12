@@ -13,7 +13,7 @@ globalThis.fetch = fetchMock
 describe('recommend_courses tool', () => {
   afterEach(() => fetchMock.mockReset())
 
-  it("POSTs with mode='free' to avoid LLM agent timeout", async () => {
+  it("POSTs with mode='interest' to use the LLM interest recommender", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ recommendations: [{ dept: 'CSCI', code: '201L' }] }),
@@ -26,7 +26,7 @@ describe('recommend_courses tool', () => {
     const init = call[1] as RequestInit
     expect(url).toContain('/api/courses/recommend')
     const body = JSON.parse(init.body as string)
-    expect(body.mode).toBe('free')
+    expect(body.mode).toBe('interest')
     expect(body.interests).toBe('AI, startups')
   })
 
