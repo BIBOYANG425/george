@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { runSpectrumLoop } from '../../src/adapters/spectrum.js'
-import { sendWithRetry, redactHandle } from '../../src/adapters/spectrum-client.js'
+import { sendWithRetry, redactHandle, isTransientSendError } from '../../src/adapters/spectrum-client.js'
 import type { SpectrumClient, InboundMessage, ReplyHandle } from '../../src/adapters/spectrum-client.js'
 
 function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: string[]; typing: string[] } {
@@ -54,10 +54,48 @@ describe('sendWithRetry', () => {
     await sendWithRetry(fn, { backoffMs: 0 })
     expect(fn).toHaveBeenCalledTimes(2)
   })
-  it('throws the last error after exhausting attempts', async () => {
-    const fn = vi.fn(async () => { throw new Error('still down') })
-    await expect(sendWithRetry(fn, { backoffMs: 0 })).rejects.toThrow('still down')
+  it('exhausts attempts on a persistent transient failure then throws', async () => {
+    const fn = vi.fn(async () => { throw new Error('[upstream] Connection dropped') })
+    await expect(sendWithRetry(fn, { backoffMs: 0 })).rejects.toThrow('Connection dropped')
     expect(fn).toHaveBeenCalledTimes(2)
+  })
+  it('does NOT retry a non-transient error (avoids duplicate sends)', async () => {
+    // space.send has no dedupe key, so resending a non-transport failure could
+    // duplicate the bubble — these throw on the first attempt.
+    const fn = vi.fn(async () => { throw new Error('message too long') })
+    await expect(sendWithRetry(fn, { backoffMs: 0 })).rejects.toThrow('message too long')
+    expect(fn).toHaveBeenCalledTimes(1)
+  })
+  it('honors a custom shouldRetry predicate', async () => {
+    let n = 0
+    const fn = vi.fn(async () => { if (n++ === 0) throw new Error('whatever') })
+    await sendWithRetry(fn, { backoffMs: 0, shouldRetry: () => true })
+    expect(fn).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('isTransientSendError', () => {
+  it('matches known transient transport drops', () => {
+    for (const m of [
+      '[upstream] Connection dropped',
+      'ECONNRESET',
+      'socket hang up',
+      'stream closed',
+      'UNAVAILABLE: 14',
+      'deadline exceeded',
+      'HTTP 503',
+    ]) {
+      expect(isTransientSendError(new Error(m))).toBe(true)
+    }
+  })
+  it('does not match application/validation errors', () => {
+    for (const m of ['message too long', 'ValidationError', 'AuthenticationError', 'forbidden']) {
+      expect(isTransientSendError(new Error(m))).toBe(false)
+    }
+  })
+  it('tolerates non-Error throwables', () => {
+    expect(isTransientSendError('connection dropped')).toBe(true)
+    expect(isTransientSendError(null)).toBe(false)
   })
 })
 

@@ -66,23 +66,44 @@ export function redactHandle(handle: string | undefined | null): string {
   return `${'*'.repeat(handle.length - 4)}${handle.slice(-4)}`
 }
 
+// Connection/transport faults where the request almost certainly never reached
+// Spectrum, so a resend is safe (won't duplicate the bubble). Anything outside
+// this set — validation, auth, "message too long", unknown — is NOT retried:
+// space.send() exposes no idempotency key (confirmed against spectrum-ts 3.1.0),
+// so blindly resending a non-transport failure risks a duplicate message if the
+// original actually landed. Matched on message text because the SDK surfaces
+// these as plain Errors without a typed code.
+const TRANSIENT_SEND_ERROR =
+  /connection dropped|upstream|econnreset|etimedout|epipe|socket hang up|stream (?:closed|ended|reset)|unavailable|deadline exceeded|503/i
+
+// Whether a send error is a transient transport drop that is safe to resend.
+// Exported for testing.
+export function isTransientSendError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return TRANSIENT_SEND_ERROR.test(msg)
+}
+
 // Retry a fire-once send across a transient transport failure (e.g. the
 // "[upstream] Connection dropped" we observed on the gRPC stream): the SDK
 // re-establishes on the next call, so one retry after a brief backoff recovers
-// a reply that would otherwise be silently lost. Throws the last error if all
-// attempts fail. Exported for testing; backoffMs is injectable so tests run fast.
+// a reply that would otherwise be silently lost. Only TRANSIENT transport errors
+// are retried (see isTransientSendError) — space.send has no Spectrum-side
+// dedupe key, so retrying a non-transport failure could duplicate the bubble.
+// Throws the last error if all attempts fail OR the error is not retryable.
+// Exported for testing; backoffMs/shouldRetry are injectable so tests run fast.
 export async function sendWithRetry(
   fn: () => Promise<unknown>,
-  opts: { attempts?: number; backoffMs?: number } = {},
+  opts: { attempts?: number; backoffMs?: number; shouldRetry?: (err: unknown) => boolean } = {},
 ): Promise<void> {
   const attempts = opts.attempts ?? 2
   const backoffMs = opts.backoffMs ?? 600
+  const shouldRetry = opts.shouldRetry ?? isTransientSendError
   for (let i = 0; ; i++) {
     try {
       await fn()
       return
     } catch (err) {
-      if (i >= attempts - 1) throw err
+      if (i >= attempts - 1 || !shouldRetry(err)) throw err
       if (backoffMs > 0) await new Promise((r) => setTimeout(r, backoffMs))
     }
   }
