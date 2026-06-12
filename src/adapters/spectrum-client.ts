@@ -38,6 +38,10 @@ export interface InboundMessage {
 export interface ReplyHandle {
   sendText(text: string): Promise<void>
   sendAttachment(localPath: string): Promise<void>
+  // Typing indicator ("…" bubble). Best-effort — platforms without a typing
+  // API silently no-op. Used to show activity during the ~10s orchestrator turn.
+  startTyping(): Promise<void>
+  stopTyping(): Promise<void>
 }
 
 export interface SpectrumClient {
@@ -70,9 +74,14 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
   return {
     async *messages() {
       for await (const [space, message] of app.messages) {
+        console.log(
+          `[spectrum IN] platform=${message.platform} sender=${message.sender?.id ?? '?'} type=${message.content.type} id=${message.id}`,
+        )
         const replyHandle: ReplyHandle = {
           sendText: async (text: string) => { await space.send(text) },
           sendAttachment: async (localPath: string) => { await space.send(attachment(localPath)) },
+          startTyping: async () => { await space.startTyping() },
+          stopTyping: async () => { await space.stopTyping() },
         }
         const inbound: InboundMessage = {
           platform: message.platform,

@@ -2,18 +2,21 @@ import { describe, it, expect, vi } from 'vitest'
 import { runSpectrumLoop } from '../../src/adapters/spectrum.js'
 import type { SpectrumClient, InboundMessage, ReplyHandle } from '../../src/adapters/spectrum-client.js'
 
-function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: string[] } {
+function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: string[]; typing: string[] } {
   const sent: string[] = []
+  const typing: string[] = []
   const reply: ReplyHandle = {
     sendText: async (t) => { sent.push(t) },
     sendAttachment: async () => {},
+    startTyping: async () => { typing.push('start') },
+    stopTyping: async () => { typing.push('stop') },
   }
   const client: SpectrumClient = {
     async *messages() { for (const m of msgs) yield [reply, m] as const },
     getLocation: async () => null,
     close: async () => {},
   }
-  return { client, sent }
+  return { client, sent, typing }
 }
 
 const msg = (over: Partial<InboundMessage> = {}): InboundMessage => ({
@@ -47,6 +50,26 @@ describe('runSpectrumLoop', () => {
     const { client, sent } = fakeClient([msg()])
     await runSpectrumLoop(client, { handleText: async () => null, handleLocation: vi.fn() })
     expect(sent).toEqual([])
+  })
+
+  it('shows a typing indicator around the handler turn (start before, stop after)', async () => {
+    const { client, typing } = fakeClient([msg()])
+    const order: string[] = []
+    await runSpectrumLoop(client, {
+      handleText: async () => { order.push('handle'); return 'pong' },
+      handleLocation: vi.fn(),
+    })
+    expect(typing).toEqual(['start', 'stop'])
+  })
+
+  it('stops typing even when the handler returns null or throws', async () => {
+    const a = fakeClient([msg()])
+    await runSpectrumLoop(a.client, { handleText: async () => null, handleLocation: vi.fn() })
+    expect(a.typing).toEqual(['start', 'stop'])
+
+    const b = fakeClient([msg()])
+    await runSpectrumLoop(b.client, { handleText: async () => { throw new Error('boom') }, handleLocation: vi.fn() })
+    expect(b.typing).toEqual(['start', 'stop'])
   })
 
   it('debounces a burst from one sender into a single handler call', async () => {

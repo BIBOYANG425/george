@@ -42,11 +42,16 @@ export async function runSpectrumLoop(
     const buf = buffers.get(senderId)
     if (!buf) return
     buffers.delete(senderId)
+    // Show the "…" typing bubble while the (slow) orchestrator turn runs.
+    // Best-effort: a failed typing signal must never block or fail the reply.
+    await buf.reply.startTyping().catch(() => {})
     try {
       const out = await handlers.handleText(senderId, buf.texts.join('\n'), buf.reply)
       if (out) await buf.reply.sendText(out)
     } catch (err) {
       log('error', 'spectrum_turn_error', { senderId, error: (err as Error).message })
+    } finally {
+      await buf.reply.stopTyping().catch(() => {})
     }
   }
 
