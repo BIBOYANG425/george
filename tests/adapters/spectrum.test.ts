@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { runSpectrumLoop } from '../../src/adapters/spectrum.js'
-import { sendWithRetry } from '../../src/adapters/spectrum-client.js'
+import { sendWithRetry, redactHandle } from '../../src/adapters/spectrum-client.js'
 import type { SpectrumClient, InboundMessage, ReplyHandle } from '../../src/adapters/spectrum-client.js'
 
 function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: string[]; typing: string[] } {
@@ -23,6 +23,23 @@ function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: str
 const msg = (over: Partial<InboundMessage> = {}): InboundMessage => ({
   platform: 'iMessage', senderId: '+15551234567', contentType: 'text',
   text: 'hi', messageId: 'm1', ...over,
+})
+
+describe('redactHandle', () => {
+  it('masks all but the last 4 chars of a phone handle', () => {
+    expect(redactHandle('+15551234567')).toBe('********4567')
+  })
+  it('does not leak the full handle', () => {
+    expect(redactHandle('+15551234567')).not.toContain('5551')
+  })
+  it('fully masks short handles', () => {
+    expect(redactHandle('123')).toBe('***')
+  })
+  it('returns ? for empty/undefined', () => {
+    expect(redactHandle('')).toBe('?')
+    expect(redactHandle(undefined)).toBe('?')
+    expect(redactHandle(null)).toBe('?')
+  })
 })
 
 describe('sendWithRetry', () => {

@@ -57,6 +57,15 @@ export interface SpectrumCredentials {
   imessageToken: string
 }
 
+// Redact a sender handle (phone/email) for logs. Keeps the last 4 chars so a
+// support thread is still correlatable, masks the rest so the full PII handle
+// never lands in plaintext logs. Exported for testing.
+export function redactHandle(handle: string | undefined | null): string {
+  if (!handle) return '?'
+  if (handle.length <= 4) return '*'.repeat(handle.length)
+  return `${'*'.repeat(handle.length - 4)}${handle.slice(-4)}`
+}
+
 // Retry a fire-once send across a transient transport failure (e.g. the
 // "[upstream] Connection dropped" we observed on the gRPC stream): the SDK
 // re-establishes on the next call, so one retry after a brief backoff recovers
@@ -97,7 +106,7 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
     async *messages() {
       for await (const [space, message] of app.messages) {
         console.log(
-          `[spectrum IN] platform=${message.platform} sender=${message.sender?.id ?? '?'} type=${message.content.type} id=${message.id}`,
+          `[spectrum IN] platform=${message.platform} sender=${redactHandle(message.sender?.id)} type=${message.content.type} id=${message.id}`,
         )
         const replyHandle: ReplyHandle = {
           // Replies retry once across a transient stream drop so a generated

@@ -75,18 +75,27 @@ export type TransportMode = 'spectrum' | 'legacy'
 // dual-path) so a missing var never silently cuts over. Set TRANSPORT=spectrum
 // to use the Photon Spectrum adapter.
 export function loadTransportConfig() {
-  const transport: TransportMode =
-    process.env.TRANSPORT === 'spectrum' ? 'spectrum' : 'legacy'
-  return {
-    transport,
-    spectrum: {
-      // Accept the namespaced SPECTRUM_* names (preferred in george's shared
-      // .env) OR the bare PROJECT_ID/PROJECT_SECRET that `bun create
-      // spectrum-project` scaffolds, so a scaffolded .env works unchanged.
-      projectId: process.env.SPECTRUM_PROJECT_ID || process.env.PROJECT_ID || '',
-      projectSecret: process.env.SPECTRUM_PROJECT_SECRET || process.env.PROJECT_SECRET || '',
-      imessageAddress: process.env.SPECTRUM_IMESSAGE_ADDRESS || '',
-      imessageToken: process.env.IMESSAGE_TOKEN || '',
-    },
+  // Fail fast on a typo'd value rather than silently running legacy.
+  const raw = process.env.TRANSPORT
+  if (raw !== undefined && raw !== '' && raw !== 'spectrum' && raw !== 'legacy') {
+    throw new Error(`Invalid TRANSPORT="${raw}" (use 'spectrum' or 'legacy')`)
   }
+  const transport: TransportMode = raw === 'spectrum' ? 'spectrum' : 'legacy'
+  const spectrum = {
+    // Accept the namespaced SPECTRUM_* names (preferred in george's shared
+    // .env) OR the bare PROJECT_ID/PROJECT_SECRET that `bun create
+    // spectrum-project` scaffolds, so a scaffolded .env works unchanged.
+    projectId: process.env.SPECTRUM_PROJECT_ID || process.env.PROJECT_ID || '',
+    projectSecret: process.env.SPECTRUM_PROJECT_SECRET || process.env.PROJECT_SECRET || '',
+    imessageAddress: process.env.SPECTRUM_IMESSAGE_ADDRESS || '',
+    imessageToken: process.env.IMESSAGE_TOKEN || '',
+  }
+  // In spectrum mode the creds are required to connect; surface that at startup
+  // instead of failing opaquely on the first message.
+  if (transport === 'spectrum' && (!spectrum.projectId || !spectrum.projectSecret)) {
+    throw new Error(
+      'TRANSPORT=spectrum requires SPECTRUM_PROJECT_ID (or PROJECT_ID) and SPECTRUM_PROJECT_SECRET (or PROJECT_SECRET)',
+    )
+  }
+  return { transport, spectrum }
 }

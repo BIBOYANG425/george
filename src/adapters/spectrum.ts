@@ -17,7 +17,7 @@ import { extractCodeFromStartMessage, runHandshake } from '../onboarding/handsha
 import { lookupByCode, linkImessageHandle } from '../onboarding/pending-users.js'
 import { checkInjection, INJECTION_REJECTIONS } from '../security/injection-filter.js'
 import { normalizeHandle } from '../services/phone-handle.js'
-import { tryHandleUserCommand } from '../index.js'
+import { tryHandleUserCommand } from '../agent/user-command-router.js'
 import type { SessionStore } from '../agent/session-store.js'
 import type { ProfileStore } from '../memory/profile.js'
 

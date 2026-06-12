@@ -1,23 +1,61 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 describe('config.transport', () => {
-  beforeEach(() => { vi.resetModules() })
+  const originalEnv = { ...process.env }
+
+  beforeEach(() => {
+    vi.resetModules()
+    // Clear the vars this suite mutates so cases stay order-independent.
+    for (const k of [
+      'TRANSPORT',
+      'SPECTRUM_PROJECT_ID',
+      'SPECTRUM_PROJECT_SECRET',
+      'PROJECT_ID',
+      'PROJECT_SECRET',
+    ]) {
+      delete process.env[k]
+    }
+  })
+
+  afterEach(() => {
+    process.env = { ...originalEnv }
+  })
 
   it('defaults to legacy when TRANSPORT is unset', async () => {
-    delete process.env.TRANSPORT
     const { loadTransportConfig } = await import('../src/config.js')
     expect(loadTransportConfig().transport).toBe('legacy')
   })
 
-  it('selects spectrum when TRANSPORT=spectrum', async () => {
+  it('selects spectrum when TRANSPORT=spectrum (with creds)', async () => {
     process.env.TRANSPORT = 'spectrum'
+    process.env.SPECTRUM_PROJECT_ID = 'pid'
+    process.env.SPECTRUM_PROJECT_SECRET = 'psecret'
     const { loadTransportConfig } = await import('../src/config.js')
     expect(loadTransportConfig().transport).toBe('spectrum')
   })
 
-  it('prefers SPECTRUM_PROJECT_ID but falls back to the scaffold PROJECT_ID', async () => {
+  it('throws on an unsupported TRANSPORT value', async () => {
+    // Import first so config.ts's dotenv.config() runs, then set the bad value
+    // live — loadTransportConfig reads process.env at call time.
+    const { loadTransportConfig } = await import('../src/config.js')
+    process.env.TRANSPORT = 'webhook'
+    expect(() => loadTransportConfig()).toThrow(/Invalid TRANSPORT/)
+  })
+
+  it('throws when TRANSPORT=spectrum but creds are missing', async () => {
+    // Import first so dotenv.config() injects the real .env (which carries the
+    // bare PROJECT_ID/PROJECT_SECRET scaffold names), THEN strip every cred so
+    // they're absent at call time regardless of what .env holds.
+    const { loadTransportConfig } = await import('../src/config.js')
+    process.env.TRANSPORT = 'spectrum'
     delete process.env.SPECTRUM_PROJECT_ID
     delete process.env.SPECTRUM_PROJECT_SECRET
+    delete process.env.PROJECT_ID
+    delete process.env.PROJECT_SECRET
+    expect(() => loadTransportConfig()).toThrow(/requires SPECTRUM_PROJECT_ID/)
+  })
+
+  it('prefers SPECTRUM_PROJECT_ID but falls back to the scaffold PROJECT_ID', async () => {
     process.env.PROJECT_ID = 'scaffold-id'
     process.env.PROJECT_SECRET = 'scaffold-secret'
     let { loadTransportConfig } = await import('../src/config.js')
@@ -28,9 +66,5 @@ describe('config.transport', () => {
     process.env.SPECTRUM_PROJECT_ID = 'namespaced-id'
     ;({ loadTransportConfig } = await import('../src/config.js'))
     expect(loadTransportConfig().spectrum.projectId).toBe('namespaced-id')
-
-    delete process.env.PROJECT_ID
-    delete process.env.PROJECT_SECRET
-    delete process.env.SPECTRUM_PROJECT_ID
   })
 })
