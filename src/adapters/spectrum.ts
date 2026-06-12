@@ -17,6 +17,16 @@ import { lookupByCode, linkImessageHandle } from '../onboarding/pending-users.js
 import { checkInjection, INJECTION_REJECTIONS } from '../security/injection-filter.js'
 import { normalizeHandle } from '../services/phone-handle.js'
 import { tryHandleUserCommand } from '../index.js'
+import type { SessionStore } from '../agent/session-store.js'
+import type { ProfileStore } from '../memory/profile.js'
+
+// Conversation memory deps, injected from index.ts (where the singletons live).
+// Without a sessionStore the orchestrator has no history and george treats
+// every message in isolation — these wire the same persistence /chat uses.
+export interface SpectrumAdapterDeps {
+  sessionStore?: SessionStore
+  profileStore?: ProfileStore
+}
 
 export interface SpectrumHandlers {
   // Returns the reply text, or null to send nothing (filtered/handshake-consumed).
@@ -106,7 +116,10 @@ export function buildTextHandler(deps: TextHandlerDeps) {
 // drives the downstream pipeline (injection filter → handshake → user commands
 // → orchestrator). Mirrors startIMessageAdapter from adapters/imessage.ts but
 // without the Mac-only polling loop — Spectrum pushes inbound via app.messages.
-export async function startSpectrumAdapter(creds: SpectrumCredentials): Promise<void> {
+export async function startSpectrumAdapter(
+  creds: SpectrumCredentials,
+  deps: SpectrumAdapterDeps = {},
+): Promise<void> {
   const client = await createSpectrumClient(creds)
 
   const handleText = buildTextHandler({
@@ -134,11 +147,23 @@ export async function startSpectrumAdapter(creds: SpectrumCredentials): Promise<
     tryUserCommand: (userId: string, text: string) => tryHandleUserCommand(userId, text),
 
     runOrchestratorText: async (userId: string, text: string): Promise<string> => {
+      // Persist the user turn before running so it survives an orchestrator
+      // failure, then run WITH the session + profile stores so george loads
+      // prior conversation context (buildHistoryPrefix). Mirrors POST /chat.
+      if (deps.sessionStore) {
+        await deps.sessionStore.save(userId, {
+          sessionId: userId,
+          messages: [{ role: 'user', content: text }],
+          systemContext: {},
+        })
+      }
       let finalText = ''
       for await (const event of runOrchestrator({
         userId,
         channel: 'imessage',
         text,
+        sessionStore: deps.sessionStore,
+        profileStore: deps.profileStore,
       })) {
         const e = event as {
           type?: string
@@ -154,6 +179,14 @@ export async function startSpectrumAdapter(creds: SpectrumCredentials): Promise<
             .join('')
           if (t) finalText = t
         }
+      }
+      // Persist the assistant turn so it's part of the next turn's history.
+      if (deps.sessionStore && finalText) {
+        await deps.sessionStore.save(userId, {
+          sessionId: userId,
+          messages: [{ role: 'assistant', content: finalText }],
+          systemContext: {},
+        })
       }
       return finalText
     },

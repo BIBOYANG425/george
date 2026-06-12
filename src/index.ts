@@ -668,7 +668,13 @@ async function startServer() {
   const transportCfg = loadTransportConfig()
   if (transportCfg.transport === 'spectrum') {
     const { startSpectrumAdapter } = await import('./adapters/spectrum.js')
-    startSpectrumAdapter(transportCfg.spectrum).catch((err) => {
+    // Pass the session + profile stores so the orchestrator loads conversation
+    // history (same memory wiring as POST /chat); without these george would
+    // treat every message in isolation.
+    startSpectrumAdapter(transportCfg.spectrum, {
+      sessionStore,
+      profileStore: _profileStore ?? undefined,
+    }).catch((err) => {
       log('warn', 'spectrum_start_failed', { error: (err as Error).message })
       console.warn('Spectrum adapter failed to start.')
     })
