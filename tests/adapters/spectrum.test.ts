@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { runSpectrumLoop } from '../../src/adapters/spectrum.js'
+import { sendWithRetry } from '../../src/adapters/spectrum-client.js'
 import type { SpectrumClient, InboundMessage, ReplyHandle } from '../../src/adapters/spectrum-client.js'
 
 function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: string[]; typing: string[] } {
@@ -22,6 +23,25 @@ function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: str
 const msg = (over: Partial<InboundMessage> = {}): InboundMessage => ({
   platform: 'iMessage', senderId: '+15551234567', contentType: 'text',
   text: 'hi', messageId: 'm1', ...over,
+})
+
+describe('sendWithRetry', () => {
+  it('returns on first success without retrying', async () => {
+    const fn = vi.fn(async () => {})
+    await sendWithRetry(fn, { backoffMs: 0 })
+    expect(fn).toHaveBeenCalledTimes(1)
+  })
+  it('retries once after a transient failure then succeeds', async () => {
+    let n = 0
+    const fn = vi.fn(async () => { if (n++ === 0) throw new Error('[upstream] Connection dropped') })
+    await sendWithRetry(fn, { backoffMs: 0 })
+    expect(fn).toHaveBeenCalledTimes(2)
+  })
+  it('throws the last error after exhausting attempts', async () => {
+    const fn = vi.fn(async () => { throw new Error('still down') })
+    await expect(sendWithRetry(fn, { backoffMs: 0 })).rejects.toThrow('still down')
+    expect(fn).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('runSpectrumLoop', () => {

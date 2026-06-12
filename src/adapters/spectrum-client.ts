@@ -57,6 +57,28 @@ export interface SpectrumCredentials {
   imessageToken: string
 }
 
+// Retry a fire-once send across a transient transport failure (e.g. the
+// "[upstream] Connection dropped" we observed on the gRPC stream): the SDK
+// re-establishes on the next call, so one retry after a brief backoff recovers
+// a reply that would otherwise be silently lost. Throws the last error if all
+// attempts fail. Exported for testing; backoffMs is injectable so tests run fast.
+export async function sendWithRetry(
+  fn: () => Promise<unknown>,
+  opts: { attempts?: number; backoffMs?: number } = {},
+): Promise<void> {
+  const attempts = opts.attempts ?? 2
+  const backoffMs = opts.backoffMs ?? 600
+  for (let i = 0; ; i++) {
+    try {
+      await fn()
+      return
+    } catch (err) {
+      if (i >= attempts - 1) throw err
+      if (backoffMs > 0) await new Promise((r) => setTimeout(r, backoffMs))
+    }
+  }
+}
+
 // Real factory — wires spectrum-ts to the seam interfaces.
 // imessage.config() uses the Spectrum cloud-managed pool (local: false, no
 // dedicated-line address/token needed until Phase 2).
@@ -78,8 +100,10 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
           `[spectrum IN] platform=${message.platform} sender=${message.sender?.id ?? '?'} type=${message.content.type} id=${message.id}`,
         )
         const replyHandle: ReplyHandle = {
-          sendText: async (text: string) => { await space.send(text) },
-          sendAttachment: async (localPath: string) => { await space.send(attachment(localPath)) },
+          // Replies retry once across a transient stream drop so a generated
+          // reply isn't silently lost. Typing is best-effort (no retry).
+          sendText: async (text: string) => { await sendWithRetry(() => space.send(text)) },
+          sendAttachment: async (localPath: string) => { await sendWithRetry(() => space.send(attachment(localPath))) },
           startTyping: async () => { await space.startTyping() },
           stopTyping: async () => { await space.stopTyping() },
         }
