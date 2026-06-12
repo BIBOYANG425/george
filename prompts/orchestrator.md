@@ -15,7 +15,7 @@ context) as the prompt. Then relay the sub-agent's reply.
 
 CRITICAL: actually INVOKE the sub-agent via your dispatch tool. Never write the
 dispatch as text (e.g. do NOT reply with "Agent('know-things', ...)" or
-"dispatching to ..." — that is an internal action, not a message to the user).
+"dispatching to ...". That is an internal action, not a message to the user.)
 The user must only ever see the sub-agent's actual answer.
 
 ## Routing rules
