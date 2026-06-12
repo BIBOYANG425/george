@@ -9,6 +9,7 @@ import path from 'node:path'
 import type { SpectrumClient, ReplyHandle } from './spectrum-client.js'
 import type { SpectrumCredentials } from './spectrum-client.js'
 import { createSpectrumClient } from './spectrum-client.js'
+import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS } from './split-response.js'
 import { log } from '../observability/logger.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
 import { supabase } from '../db/client.js'
@@ -57,7 +58,16 @@ export async function runSpectrumLoop(
     await buf.reply.startTyping().catch(() => {})
     try {
       const out = await handlers.handleText(senderId, buf.texts.join('\n'), buf.reply)
-      if (out) await buf.reply.sendText(out)
+      // One idea per bubble: split on blank-line boundaries and send each as a
+      // separate iMessage with a pause, matching george's short-burst cadence
+      // (same as the legacy adapter). A single-paragraph reply stays one bubble.
+      if (out) {
+        const parts = splitIntoMessages(out)
+        for (let i = 0; i < parts.length; i++) {
+          if (i > 0) await sleep(INTER_MESSAGE_DELAY_MS)
+          await buf.reply.sendText(parts[i])
+        }
+      }
     } catch (err) {
       log('error', 'spectrum_turn_error', { senderId, error: (err as Error).message })
     } finally {
