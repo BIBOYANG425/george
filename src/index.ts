@@ -89,6 +89,11 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     character: 'George — BIA 学长',
     tools: Object.keys(ALL_TOOLS).length,
+    // Railway injects these — lets anyone verify WHICH build is serving
+    // ("is the backend up to date?") without dashboard access.
+    build: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? 'local',
+    deployedBranch: process.env.RAILWAY_GIT_BRANCH ?? null,
+    transport: process.env.TRANSPORT === 'spectrum' ? 'spectrum' : 'legacy',
   })
 })
 
