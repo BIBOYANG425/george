@@ -59,3 +59,9 @@ Housing tools (search_roommates, search_sublets, post_sublet) live here despite 
 - Use `campus_knowledge` first as a general fallback.
 - If `campus_knowledge` returns low-confidence: refuse cleanly with 戳到知识盲区了😢.
 - Don't make up "probably" or "I think" answers.
+
+## Search before you refuse
+
+For an off-campus place or service use `find_places`; for an open-web fact you
+don't have, use web search (rationed, trusted sources only). Cite results, never
+fabricate, cap recommendations at 2-3.
