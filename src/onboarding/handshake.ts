@@ -4,9 +4,26 @@
 // link as msg 3. Compresses what was 9 individual sends into 3 — way lower
 // latency through Messages.app and showcase images render as a proper grid
 // instead of scrolling spam.
+import fs from 'node:fs';
 import { isValidCodeFormat } from './code-generator.js';
 import { SHOWCASE, CONTACT_CARD_PATH } from './showcase.js';
 import type { PendingUser } from './pending-users.js';
+
+// Showcase images smaller than this are placeholder stubs (the committed
+// 70-byte PNGs). Sending them produces five broken-image bubbles — worse than
+// no images. Until real assets land, message 2 degrades to text-only captions.
+// Exported for testing.
+export const MIN_REAL_IMAGE_BYTES = 1024;
+
+export function usableImagePaths(paths: string[]): string[] {
+  return paths.filter((p) => {
+    try {
+      return fs.statSync(p).size >= MIN_REAL_IMAGE_BYTES;
+    } catch {
+      return false;
+    }
+  });
+}
 
 // Two accepted formats:
 //   1. New (preferred): "...george...(g7k2m4)" — natural sentence shape that
@@ -91,12 +108,14 @@ export async function runHandshake(opts: HandshakeOptions): Promise<boolean> {
     filePaths: [CONTACT_CARD_PATH],
   });
 
-  // Message 2: intro + 5-image carousel (single iMessage with text + grid)
+  // Message 2: intro + 5-image carousel (single iMessage with text + grid).
+  // Placeholder/missing images are filtered out; zero real images → text-only.
   const captionsList = SHOWCASE.map((s) => `• ${s.caption}`).join('\n');
+  const realImages = usableImagePaths(SHOWCASE.map((s) => s.path));
   await opts.sendImessage({
     to: opts.imessageHandle,
     text: `here's what I can do.\n\n${captionsList}`,
-    imagePaths: SHOWCASE.map((s) => s.path),
+    ...(realImages.length > 0 ? { imagePaths: realImages } : {}),
   });
 
   // Message 3: profile link
