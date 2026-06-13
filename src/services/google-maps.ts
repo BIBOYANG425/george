@@ -148,5 +148,90 @@ export async function distanceMatrix(
   return matrix
 }
 
+export interface PlaceResult {
+  name: string
+  address: string
+  rating: number | null
+  reviews: number | null
+  priceLevel: number | null
+  openNow: boolean | null
+  lat: number
+  lng: number
+}
+
+function applyPlaceFilters(
+  places: PlaceResult[],
+  opts: { minRating?: number },
+  limit: number,
+): PlaceResult[] {
+  let out = places
+  if (typeof opts.minRating === 'number') {
+    const min = opts.minRating
+    out = out.filter((p) => (p.rating ?? 0) >= min)
+  }
+  out = [...out].sort(
+    (a, b) => (b.rating ?? 0) - (a.rating ?? 0) || (b.reviews ?? 0) - (a.reviews ?? 0),
+  )
+  return out.slice(0, limit)
+}
+
+// Google Places Text Search. Returns up to `limit` mapped results, best-first
+// (rating desc, then review count). The full mapped set is cached (1h, shared
+// apiCache); minRating/limit are applied per-call so variants reuse the cache.
+// Throws GeoError('geo_disabled') when the key is unset, GeoError('geo_unavailable')
+// on a non-OK API status (mirrors geocode/distanceMatrix).
+export async function placesTextSearch(
+  query: string,
+  opts: { near?: LatLng; radiusMeters?: number; openNow?: boolean; minRating?: number; limit?: number } = {},
+): Promise<PlaceResult[]> {
+  const limit = opts.limit ?? 5
+  const cacheKey = `places|${query.toLowerCase().trim()}|${opts.near ? llKey(opts.near) : ''}|${opts.radiusMeters ?? ''}|${opts.openNow ? '1' : ''}`
+  const cached = apiCache.get(cacheKey) as PlaceResult[] | undefined
+  if (cached) return applyPlaceFilters(cached, opts, limit)
+
+  const key = requireKey()
+  const params = new URLSearchParams({ query, key })
+  if (opts.near) {
+    params.set('location', `${opts.near.lat},${opts.near.lng}`)
+    params.set('radius', String(opts.radiusMeters ?? 16000))
+  }
+  if (opts.openNow) params.set('opennow', 'true')
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params.toString()}`
+  const res = await fetchWithRetry(url)
+  const data = (await res.json()) as {
+    status: string
+    results?: Array<{
+      name?: string
+      formatted_address?: string
+      rating?: number
+      user_ratings_total?: number
+      price_level?: number
+      opening_hours?: { open_now?: boolean }
+      geometry?: { location?: { lat: number; lng: number } }
+    }>
+  }
+  if (data.status === 'ZERO_RESULTS') {
+    apiCache.set(cacheKey, [])
+    return []
+  }
+  if (data.status !== 'OK') {
+    throw new GeoError('geo_unavailable', `places status ${data.status}`)
+  }
+  const places: PlaceResult[] = (data.results ?? [])
+    .map((r) => ({
+      name: r.name ?? '',
+      address: r.formatted_address ?? '',
+      rating: typeof r.rating === 'number' ? r.rating : null,
+      reviews: typeof r.user_ratings_total === 'number' ? r.user_ratings_total : null,
+      priceLevel: typeof r.price_level === 'number' ? r.price_level : null,
+      openNow: r.opening_hours?.open_now ?? null,
+      lat: r.geometry?.location?.lat ?? 0,
+      lng: r.geometry?.location?.lng ?? 0,
+    }))
+    .filter((p) => p.name && p.lat !== 0 && p.lng !== 0)
+  apiCache.set(cacheKey, places)
+  return applyPlaceFilters(places, opts, limit)
+}
+
 // Exported for Task 5 (rate limiter) and Phase 2 (placesNearby).
 export const _internal = { apiCache, fetchWithRetry, requireKey, geocodeCache }

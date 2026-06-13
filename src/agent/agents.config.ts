@@ -41,6 +41,7 @@ export const SUB_AGENTS = {
       'submit_event',
       'get_event_details',
       'travel_time',
+      'find_places',
       'distance_compare',
       'safe_route',
       'dps_zone_check',
@@ -53,6 +54,7 @@ export const SUB_AGENTS = {
     prompt: `${MASTER_PROMPT}\n\n${KNOW_THINGS_PROMPT}`,
     tools: [
       'campus_knowledge',
+      'find_places',
       'freshman_faq',
       'describe_course',
       'recommend_courses',
