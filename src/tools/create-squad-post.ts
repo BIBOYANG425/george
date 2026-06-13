@@ -10,6 +10,7 @@ import { supabase } from '../db/client.js'
 import { resolveStudentId, getStudentById } from '../db/students.js'
 import { triggerPingFanout } from '../services/squad-ping-deps.js'
 import { wrapTool } from './_wrap.js'
+import { normalizeSquadCategory } from '../services/squad-categories.js'
 
 const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-/i
 
@@ -37,8 +38,8 @@ const inputSchema = {
   student_id: z.string().describe('The student UUID injected from context, or a handle as fallback'),
   content: z.string().describe('Post body — the text the student wants to share'),
   category: z
-    .enum(['拼车', '自习', '约会', '健身', '游戏', '其它'])
-    .describe('Activity category'),
+    .string()
+    .describe('Activity category — one of 拼车/自习/健身/游戏/其它. 约会 and unknown values are normalized at runtime.'),
   max_people: z.number().int().min(2).describe('Max headcount including the poster'),
   deadline: z.string().optional().describe('ISO timestamp deadline, optional'),
   location: z.string().optional().describe('Location text, optional'),
@@ -58,12 +59,22 @@ export async function createSquadPostHandler(input: {
     // 1. Resolve UUID
     const createdByStudentId = await toStudentUuid(input.student_id)
 
+    // 1b. Normalize category — rejects romantic asks, coerces unknown → 其它
+    const normalizedCategory = normalizeSquadCategory(input.category)
+    if (typeof normalizedCategory === 'object' && 'rejected' in normalizedCategory) {
+      return JSON.stringify({
+        error: 'unsupported_category',
+        message: '找搭子只组正经局哈 约会的不发 🫡',
+      })
+    }
+    const category = normalizedCategory
+
     // 2. Look up the student row for poster_name
     const studentRow = await getStudentById(createdByStudentId).catch(() => null)
     const posterName: string = (studentRow as { name?: string } | null)?.name ?? '学长'
 
     // 3. Derive tags
-    const tags = deriveTags(input.content, input.category)
+    const tags = deriveTags(input.content, category)
 
     // 4. Best-effort embedding — any error → null, post still created
     let embedding: number[] | null = null
@@ -83,7 +94,7 @@ export async function createSquadPostHandler(input: {
       .from('squad_posts')
       .insert({
         content: input.content,
-        category: input.category,
+        category,
         max_people: input.max_people,
         location: input.location ?? null,
         contact: input.contact ?? null,

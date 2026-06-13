@@ -211,4 +211,77 @@ describe('create_squad_post tool', () => {
     expect(resolveMock).toHaveBeenCalledWith('+16265551234', 'imessage')
     expect(result.ok).toBe(true)
   })
+
+  it('category=约会 is refused with unsupported_category (platonic-only policy)', async () => {
+    vi.doMock('../../src/db/client.js', () => ({ supabase: {} }))
+    vi.doMock('../../src/services/squad-ping-deps.js', () => ({
+      triggerPingFanout: vi.fn(async () => ({ sent: 0, suppressed: 0 })),
+    }))
+    vi.doMock('../../src/db/students.js', () => ({
+      resolveStudentId: vi.fn(async () => UUID),
+      getStudentById: vi.fn(async () => null),
+    }))
+    vi.doMock('../../src/services/squad-categories.js', async () => {
+      const actual = await vi.importActual('../../src/services/squad-categories.js')
+      return actual
+    })
+    const { createSquadPostHandler } = await import('../../src/tools/create-squad-post.js')
+    const raw = await createSquadPostHandler({
+      student_id: UUID,
+      content: '约个会',
+      category: '约会',
+      max_people: 2,
+    })
+    const result = JSON.parse(raw)
+    expect(result.error).toBe('unsupported_category')
+    expect(result.message).toMatch(/只组正经局/)
+    expect(result.ok).toBeUndefined()
+  })
+
+  it('unknown category is normalized to 其它 (no DB 23514 constraint error)', async () => {
+    let capturedCategory: string | undefined
+    const insertMock = vi.fn(async (data: Record<string, unknown>) => {
+      capturedCategory = data.category as string
+      return {
+        data: { id: POST_ID, content: '组局', category: '其它', max_people: 2 },
+        error: null,
+      }
+    })
+    vi.doMock('../../src/db/client.js', () => ({
+      supabase: {
+        from: () => ({
+          insert: (data: Record<string, unknown>) => ({
+            select: () => ({
+              single: () => insertMock(data),
+            }),
+          }),
+        }),
+        functions: {
+          invoke: vi.fn(async () => ({ data: { embeddings: [[0.1]] }, error: null })),
+        },
+      },
+    }))
+    vi.doMock('../../src/services/squad-ping-deps.js', () => ({
+      triggerPingFanout: vi.fn(async () => ({ sent: 0, suppressed: 0 })),
+    }))
+    vi.doMock('../../src/db/students.js', () => ({
+      resolveStudentId: vi.fn(async () => UUID),
+      getStudentById: vi.fn(async () => null),
+    }))
+    vi.doMock('../../src/services/squad-categories.js', async () => {
+      const actual = await vi.importActual('../../src/services/squad-categories.js')
+      return actual
+    })
+    const { createSquadPostHandler } = await import('../../src/tools/create-squad-post.js')
+    const raw = await createSquadPostHandler({
+      student_id: UUID,
+      content: '一起搞点活动',
+      category: 'not_a_real_category',
+      max_people: 3,
+    })
+    const result = JSON.parse(raw)
+    expect(result.ok).toBe(true)
+    // The normalized category (其它) was passed to insert
+    expect(capturedCategory).toBe('其它')
+  })
 })
