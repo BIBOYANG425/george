@@ -5,6 +5,7 @@
 
 import { supabase } from '../db/client.js'
 import { resolveStudentId } from '../db/students.js'
+import { log } from '../observability/logger.js'
 
 const PINGS_RX = /^\/pings\s+(on|off)\s*$/i
 
@@ -22,9 +23,16 @@ export async function tryPingsCommand(userId: string, text: string): Promise<str
   // Resolve UUID — provision the student row if needed
   const studentId = await resolveStudentId(userId, 'imessage')
 
-  await supabase
+  const { error } = await supabase
     .from('user_match_prefs')
     .upsert({ student_id: studentId, pings_enabled: enabled }, { onConflict: 'student_id' })
+
+  // Only confirm if the preference actually persisted — otherwise the user
+  // thinks they opted in/out when nothing changed.
+  if (error) {
+    log('error', 'pings_command_upsert_failed', { enabled, error: error.message })
+    return '诶 设置没存上 等下再试一次哈'
+  }
 
   if (enabled) {
     return '包的 有对的局我喊你'

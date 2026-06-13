@@ -63,11 +63,26 @@ export async function runPingFanout(
 
     const handle = await deps.handleFor(c.student_id);
     if (!handle) { await record('suppressed_no_channel'); continue; }
+
+    // Delivery and recording are separate concerns. A successfully delivered
+    // ping must NEVER be relabeled 'suppressed_no_channel' just because writing
+    // its row failed, and a recording error must NOT abort the whole fan-out.
+    let delivered = false;
     try {
       await deps.deliver(handle, deps.composePing(c, postId));
+      delivered = true;
+    } catch {
+      delivered = false;
+    }
+    if (!delivered) {
+      try { await record('suppressed_no_channel'); } catch { suppressed++; }
+      continue;
+    }
+    try {
       await record('sent');
     } catch {
-      await record('suppressed_no_channel');
+      // Delivered, but the row write failed: count the delivery, never relabel it.
+      sent++;
     }
   }
   return { sent, suppressed };

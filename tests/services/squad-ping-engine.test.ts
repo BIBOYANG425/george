@@ -61,6 +61,22 @@ describe('runPingFanout', () => {
     await runPingFanout('post-1', d)
     expect(d.rows.every((r) => r.status === 'suppressed_no_channel')).toBe(true)
   })
+  it('delivery success but recordPing throws: never relabels the delivered ping as suppressed', async () => {
+    const recorded: { status: string }[] = []
+    let calls = 0
+    const d = deps({
+      recordPing: vi.fn(async (row: { status: string }) => {
+        calls++
+        if (calls === 1) throw new Error('insert blip') // first sent-record fails
+        recorded.push(row)
+      }),
+    } as never)
+    const res = await runPingFanout('post-1', d)
+    expect(d.sent).toHaveLength(2) // both were actually delivered
+    expect(recorded.some((r) => r.status === 'suppressed_no_channel')).toBe(false)
+    expect(recorded.every((r) => r.status === 'sent')).toBe(true)
+    expect(res.sent).toBe(2) // counted as sent despite the one record blip
+  })
   it('respects maxPings ordering by score', async () => {
     const d = deps({ maxPings: 1 })
     await runPingFanout('post-1', d)

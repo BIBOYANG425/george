@@ -2,6 +2,18 @@ import Anthropic from '@anthropic-ai/sdk'
 import { config } from '../config.js'
 import { normalizeSquadCategory, type SquadCategory } from './squad-categories.js'
 
+// Cache the Anthropic client at module scope so we don't construct a new one on
+// every draft request. Lazy init so a missing key surfaces at first use rather
+// than at module import.
+let _anthropic: Anthropic | null = null
+function anthropicClient(): Anthropic {
+  if (!_anthropic) {
+    if (!config.anthropic.apiKey) throw new Error('ANTHROPIC_API_KEY not set')
+    _anthropic = new Anthropic({ apiKey: config.anthropic.apiKey })
+  }
+  return _anthropic
+}
+
 export type DraftResult =
   | {
       ok: true
@@ -38,7 +50,7 @@ export async function draftSquadPost(
   const complete =
     deps?.complete ??
     (async (prompt: string): Promise<string> => {
-      const client = new Anthropic({ apiKey: config.anthropic.apiKey })
+      const client = anthropicClient()
       const response = await client.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 512,

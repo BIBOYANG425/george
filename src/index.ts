@@ -225,7 +225,7 @@ app.post('/squad/draft', adminAuth, async (req, res) => {
     if (result.error === 'unsupported_category') {
       return res.status(422).json({ error: 'unsupported_category' })
     }
-    return res.status(502).json({ error: 'draft_unavailable' })
+    return res.status(503).json({ error: 'draft_unavailable' })
   } catch (err) {
     log('error', 'squad_draft_endpoint_error', { error: (err as Error).message })
     res.status(500).json({ error: 'internal_error' })

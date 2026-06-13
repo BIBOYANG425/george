@@ -18,6 +18,7 @@ import { ALL_TOOLS } from '../tools/index.js';
 import type { SessionStore } from './session-store.js';
 import type { Profile, ProfileStore } from '../memory/profile.js';
 import { resolveStudentId } from '../db/students.js';
+import { log } from '../observability/logger.js';
 
 // Register george's 23 tools as an in-process SDK MCP server so the model can
 // actually CALL them. Without this, the orchestrator/sub-agents only had tool
@@ -143,8 +144,7 @@ export function buildAgentsConfig(
   // The squad tools (create/find/join) run INSIDE the find-people sub-agent and
   // need the real students.id. Inject the id block here too — relying on the
   // orchestrator to relay it through the dispatch prompt is the loop's softest
-  // seam (final-review IMPORTANT). With it in-context the sub-agent passes the
-  // exact uuid without a relay.
+  // seam. With it in-context the sub-agent passes the exact uuid without a relay.
   const studentIdBlock = buildStudentIdBlock(studentId);
   const config: Record<string, { description: string; prompt: string; tools: string[] }> = {};
   for (const [name, def] of Object.entries(SUB_AGENTS)) {
@@ -219,10 +219,17 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // prompt. Fail-open: if the lookup errors, proceed with the raw userId so
   // nothing crashes (tools have their own defensive fallback).
   let studentId: string = args.userId;
-  try {
-    studentId = await resolveStudentId(args.userId, 'imessage');
-  } catch {
-    // fall through with raw userId
+  // Only the iMessage channel maps to a student via imessage_id; resolving for
+  // web/cron would JIT a bogus row, so skip it there. (args.channel is
+  // imessage|web|cron, not a resolveStudentId platform, so it can't be passed
+  // through directly.) Fail-open: a lookup error logs and falls back to the raw
+  // userId — the squad tools have their own defensive fallback.
+  if (args.channel === 'imessage') {
+    try {
+      studentId = await resolveStudentId(args.userId, 'imessage');
+    } catch (err) {
+      log('warn', 'resolve_student_id_failed', { channel: args.channel, error: (err as Error).message });
+    }
   }
 
   const systemPrompt = buildOrchestratorPrompt(profile, studentId);
