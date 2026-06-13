@@ -13,7 +13,7 @@
 // Merely importing this module (for its exported interfaces/types) is safe on
 // all platforms.
 //
-// Header last reviewed: 2026-06-11
+// Header last reviewed: 2026-06-13
 
 // Mirrors @photon-ai/advanced-imessage SharedFriendLocation (fields we use).
 // Lives here (not imported) because the location-normalize module is Phase 2.
@@ -52,6 +52,9 @@ export interface ReplyHandle {
 export interface SpectrumClient {
   messages(): AsyncIterable<readonly [ReplyHandle, InboundMessage]>
   getLocation(handle: string): Promise<RawSpectrumLocation | null>
+  // Proactive send: opens a new 1:1 space to `handle` and sends each bubble as
+  // a separate iMessage. Used by the squad-ping fan-out (no inbound context).
+  sendProactive(handle: string, bubbles: string[]): Promise<void>
   close(): Promise<void>
 }
 
@@ -182,6 +185,25 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
     // Returns null until a dedicated-line gRPC address + token is provisioned.
     async getLocation(_handle: string): Promise<RawSpectrumLocation | null> {
       return null
+    },
+
+    // Proactive outbound: open a new 1:1 iMessage space to `handle` and send
+    // each bubble in order. Uses the same sendWithRetry wrapper as reactive
+    // replies so transient stream drops are handled identically.
+    // Space is created via imessage(app).space.create(handle) — spectrum-ts
+    // SpaceNamespace API, confirmed against dist/types-Be0T6E0e.d.ts.
+    async sendProactive(handle: string, bubbles: string[]): Promise<void> {
+      const im = imessage(app)
+      const space = await im.space.create(handle)
+      for (const b of bubbles) {
+        try {
+          await sendWithRetry(() => space.send(b))
+          console.log(`[spectrum OUT] line=proactive to=${redactHandle(handle)} kind=proactive chars=${b.length} ok`)
+        } catch (err) {
+          console.error(`[spectrum OUT] line=proactive to=${redactHandle(handle)} kind=proactive FAILED: ${(err as Error).message}`)
+          throw err
+        }
+      }
     },
 
     async close(): Promise<void> {

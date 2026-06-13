@@ -46,6 +46,8 @@ import { getKVCache } from './memory/kv-cache.js'
 import { createDeepSeekClient } from './agent/llm-clients.js'
 import { createServiceRoleClient } from './memory/supabase-client.js'
 import { tryHandleUserCommand, setUserCommandRuntime } from './agent/user-command-router.js'
+import { draftSquadPost } from './services/squad-draft.js'
+import { checkRateLimit } from './adapters/rate-limiter.js'
 
 // ALL_TOOLS (imported above) registers all 23 tools as a side effect.
 
@@ -190,6 +192,42 @@ app.post('/chat', adminAuth, async (req, res) => {
     // "invalid api_key sk-ant-..."), or DB connection strings never reach
     // the chat client.
     log('error', 'chat_endpoint_error', { error: (err as Error).message })
+    res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Web form assist: given a free-text description, returns a structured draft
+// for a 找搭子 post. Called by bia-roommate's "describe one line, george fills
+// the form" feature. Gated by adminAuth + per-IP rate limit.
+app.post('/squad/draft', adminAuth, async (req, res) => {
+  try {
+    const body = req.body as { text?: string }
+    if (!body?.text || typeof body.text !== 'string' || !body.text.trim()) {
+      return res.status(400).json({ error: 'text is required' })
+    }
+    if (body.text.length > 400) {
+      return res.status(400).json({ error: 'text_too_long' })
+    }
+
+    // Reuse the same rate limiter as the iMessage path. Key on the request IP
+    // so unauthenticated callers that somehow pass adminAuth don't flood Haiku.
+    const rateLimitKey = (req.ip ?? req.socket.remoteAddress ?? 'unknown') + ':squad_draft'
+    const rl = checkRateLimit(rateLimitKey)
+    if (!rl.allowed) {
+      return res.status(429).json({ error: 'rate_limit_exceeded' })
+    }
+
+    const result = await draftSquadPost(body.text)
+
+    if ('ok' in result) {
+      return res.json({ draft: result.draft })
+    }
+    if (result.error === 'unsupported_category') {
+      return res.status(422).json({ error: 'unsupported_category' })
+    }
+    return res.status(503).json({ error: 'draft_unavailable' })
+  } catch (err) {
+    log('error', 'squad_draft_endpoint_error', { error: (err as Error).message })
     res.status(500).json({ error: 'internal_error' })
   }
 })

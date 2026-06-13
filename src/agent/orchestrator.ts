@@ -17,6 +17,8 @@ import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOO
 import { ALL_TOOLS } from '../tools/index.js';
 import type { SessionStore } from './session-store.js';
 import type { Profile, ProfileStore } from '../memory/profile.js';
+import { resolveStudentId } from '../db/students.js';
+import { log } from '../observability/logger.js';
 
 // Register george's 23 tools as an in-process SDK MCP server so the model can
 // actually CALL them. Without this, the orchestrator/sub-agents only had tool
@@ -99,11 +101,24 @@ const ONBOARDING_NUDGE = [
   'your welcome. One line, in voice — never a sales pitch, never a help-desk checklist.',
 ].join('\n');
 
-export function buildOrchestratorPrompt(profile?: Profile | null): string {
+// Inject the resolved student UUID so sub-agents can pass it to tools.
+// Fenced as a separate section so it's trivially stripped by tests.
+function buildStudentIdBlock(studentId?: string | null): string {
+  if (!studentId) return '';
+  return [
+    '# CURRENT STUDENT',
+    `student_id: ${studentId}`,
+    'When a tool takes student_id, pass exactly this value.',
+  ].join('\n');
+}
+
+export function buildOrchestratorPrompt(profile?: Profile | null, studentId?: string | null): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
   const userProfileBlock = buildUserProfileBlock(profile);
   if (userProfileBlock) parts.push(userProfileBlock);
   if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
+  const studentIdBlock = buildStudentIdBlock(studentId);
+  if (studentIdBlock) parts.push(studentIdBlock);
   return parts.join('\n\n');
 }
 
@@ -114,8 +129,9 @@ export function buildOrchestratorPrompt(profile?: Profile | null): string {
  * string[] (tool names, not tool objects). The SDK resolves the tool objects
  * internally — we just list the names.
  */
-function buildAgentsConfig(
+export function buildAgentsConfig(
   profile?: Profile | null,
+  studentId?: string | null,
 ): Record<string, { description: string; prompt: string; tools: string[] }> {
   // Inject the user profile into each sub-agent so it doesn't have to be
   // re-stated through the dispatch prompt (it often wasn't). Now know-things
@@ -125,9 +141,14 @@ function buildAgentsConfig(
   // them too — otherwise "im hungry" gets answered by what's-happening with no
   // invitation woven in.
   const nudge = isProfileEmpty(profile) ? ONBOARDING_NUDGE : '';
+  // The squad tools (create/find/join) run INSIDE the find-people sub-agent and
+  // need the real students.id. Inject the id block here too — relying on the
+  // orchestrator to relay it through the dispatch prompt is the loop's softest
+  // seam. With it in-context the sub-agent passes the exact uuid without a relay.
+  const studentIdBlock = buildStudentIdBlock(studentId);
   const config: Record<string, { description: string; prompt: string; tools: string[] }> = {};
   for (const [name, def] of Object.entries(SUB_AGENTS)) {
-    const extras = [userProfileBlock, nudge].filter(Boolean).join('\n\n');
+    const extras = [userProfileBlock, nudge, studentIdBlock].filter(Boolean).join('\n\n');
     config[name] = {
       description: def.description,
       prompt: extras ? `${def.prompt}\n\n${extras}` : def.prompt,
@@ -194,8 +215,25 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // Silently falls back to no profile when profileStore is not provided.
   const profile = args.profileStore ? await args.profileStore.loadProfile(args.userId) : null;
 
-  const systemPrompt = buildOrchestratorPrompt(profile);
-  const agentsConfig = buildAgentsConfig(profile);
+  // Resolve the real students.id UUID so tools can receive it via the system
+  // prompt. Fail-open: if the lookup errors, proceed with the raw userId so
+  // nothing crashes (tools have their own defensive fallback).
+  let studentId: string = args.userId;
+  // Only the iMessage channel maps to a student via imessage_id; resolving for
+  // web/cron would JIT a bogus row, so skip it there. (args.channel is
+  // imessage|web|cron, not a resolveStudentId platform, so it can't be passed
+  // through directly.) Fail-open: a lookup error logs and falls back to the raw
+  // userId — the squad tools have their own defensive fallback.
+  if (args.channel === 'imessage') {
+    try {
+      studentId = await resolveStudentId(args.userId, 'imessage');
+    } catch (err) {
+      log('warn', 'resolve_student_id_failed', { channel: args.channel, error: (err as Error).message });
+    }
+  }
+
+  const systemPrompt = buildOrchestratorPrompt(profile, studentId);
+  const agentsConfig = buildAgentsConfig(profile, studentId);
   const orchestratorTools = buildOrchestratorToolNames();
 
   // Load conversation history from our custom SessionStore and prepend as context.

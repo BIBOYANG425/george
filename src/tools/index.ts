@@ -1,3 +1,6 @@
+export { createSquadPostTool } from './create-squad-post.js'
+export { findSquadPostsTool } from './find-squad-posts.js'
+export { joinSquadPostTool } from './join-squad-post.js'
 export { lookupStudentTool } from './lookup-student.js'
 export { updateProfileTool } from './update-profile.js'
 export { suggestConnectionTool } from './suggest-connection.js'
@@ -26,6 +29,9 @@ export { dpsZoneCheckTool } from './dps-zone-check.js'
 export { distanceCompareTool } from './distance-compare.js'
 export { safeRouteTool } from './safe-route.js'
 
+import { createSquadPostTool } from './create-squad-post.js'
+import { findSquadPostsTool } from './find-squad-posts.js'
+import { joinSquadPostTool } from './join-squad-post.js'
 import { lookupStudentTool } from './lookup-student.js'
 import { updateProfileTool } from './update-profile.js'
 import { suggestConnectionTool } from './suggest-connection.js'
@@ -55,6 +61,9 @@ import { distanceCompareTool } from './distance-compare.js'
 import { safeRouteTool } from './safe-route.js'
 
 export const ALL_TOOLS = {
+  create_squad_post: createSquadPostTool,
+  find_squad_posts: findSquadPostsTool,
+  join_squad_post: joinSquadPostTool,
   lookup_student: lookupStudentTool,
   update_profile: updateProfileTool,
   suggest_connection: suggestConnectionTool,
