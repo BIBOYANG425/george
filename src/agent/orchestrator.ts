@@ -17,6 +17,7 @@ import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOO
 import { ALL_TOOLS } from '../tools/index.js';
 import type { SessionStore } from './session-store.js';
 import type { Profile, ProfileStore } from '../memory/profile.js';
+import { resolveStudentId } from '../db/students.js';
 
 // Register george's 23 tools as an in-process SDK MCP server so the model can
 // actually CALL them. Without this, the orchestrator/sub-agents only had tool
@@ -99,11 +100,24 @@ const ONBOARDING_NUDGE = [
   'your welcome. One line, in voice — never a sales pitch, never a help-desk checklist.',
 ].join('\n');
 
-export function buildOrchestratorPrompt(profile?: Profile | null): string {
+// Inject the resolved student UUID so sub-agents can pass it to tools.
+// Fenced as a separate section so it's trivially stripped by tests.
+function buildStudentIdBlock(studentId?: string | null): string {
+  if (!studentId) return '';
+  return [
+    '# CURRENT STUDENT',
+    `student_id: ${studentId}`,
+    'When a tool takes student_id, pass exactly this value.',
+  ].join('\n');
+}
+
+export function buildOrchestratorPrompt(profile?: Profile | null, studentId?: string | null): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
   const userProfileBlock = buildUserProfileBlock(profile);
   if (userProfileBlock) parts.push(userProfileBlock);
   if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
+  const studentIdBlock = buildStudentIdBlock(studentId);
+  if (studentIdBlock) parts.push(studentIdBlock);
   return parts.join('\n\n');
 }
 
@@ -194,7 +208,17 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // Silently falls back to no profile when profileStore is not provided.
   const profile = args.profileStore ? await args.profileStore.loadProfile(args.userId) : null;
 
-  const systemPrompt = buildOrchestratorPrompt(profile);
+  // Resolve the real students.id UUID so tools can receive it via the system
+  // prompt. Fail-open: if the lookup errors, proceed with the raw userId so
+  // nothing crashes (tools have their own defensive fallback).
+  let studentId: string = args.userId;
+  try {
+    studentId = await resolveStudentId(args.userId, 'imessage');
+  } catch {
+    // fall through with raw userId
+  }
+
+  const systemPrompt = buildOrchestratorPrompt(profile, studentId);
   const agentsConfig = buildAgentsConfig(profile);
   const orchestratorTools = buildOrchestratorToolNames();
 

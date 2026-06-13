@@ -18,6 +18,7 @@ import { lookupByCode, linkImessageHandle, lookupByImessageHandle, markGreeted }
 import { checkInjection, INJECTION_REJECTIONS } from '../security/injection-filter.js'
 import { normalizeHandle } from '../services/phone-handle.js'
 import { tryHandleUserCommand } from '../agent/user-command-router.js'
+import { tryPingsCommand } from '../tools/pings-command.js'
 import type { SessionStore } from '../agent/session-store.js'
 import type { ProfileStore } from '../memory/profile.js'
 
@@ -183,7 +184,11 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
       return false
     },
 
-    tryUserCommand: (userId: string, text: string) => tryHandleUserCommand(userId, text),
+    tryUserCommand: async (userId: string, text: string) => {
+      const pingsReply = await tryPingsCommand(userId, text)
+      if (pingsReply !== null) return pingsReply
+      return tryHandleUserCommand(userId, text)
+    },
 
     runOrchestratorText: async (userId: string, text: string): Promise<string> => {
       const turnStart = Date.now()

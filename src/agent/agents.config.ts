@@ -29,7 +29,7 @@ export const SUB_AGENTS = {
     description:
       'Match students for activities (squad mode). Reactive only. Use for messages about finding hike buddies, study groups, hotpot crew, jam sessions.',
     prompt: `${MASTER_PROMPT}\n\n${FIND_PEOPLE_PROMPT}`,
-    tools: ['lookup_student', 'update_profile', 'suggest_connection'],
+    tools: ['lookup_student', 'update_profile', 'suggest_connection', 'create_squad_post', 'find_squad_posts', 'join_squad_post'],
     model: SUB_AGENT_MODEL,
   },
   'whats-happening': {
