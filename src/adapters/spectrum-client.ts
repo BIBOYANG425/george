@@ -33,6 +33,11 @@ export interface InboundMessage {
   contentType: string        // 'text' | 'attachment' | ...
   text: string
   messageId: string          // stable id for dedup
+  // Which pool/dedicated line the conversation is routed through
+  // (iMessage space.phone). On the shared pool this DIFFERS per user —
+  // one project connection serves every line.
+  linePhone?: string
+  spaceType?: string         // 'dm' | 'group'
 }
 
 export interface ReplyHandle {
@@ -126,14 +131,34 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
   return {
     async *messages() {
       for await (const [space, message] of app.messages) {
+        const sp = space as unknown as { phone?: string; type?: string }
         console.log(
-          `[spectrum IN] platform=${message.platform} sender=${redactHandle(message.sender?.id)} type=${message.content.type} id=${message.id}`,
+          `[spectrum IN] line=${sp.phone ?? '?'} space=${sp.type ?? '?'} sender=${redactHandle(message.sender?.id)} type=${message.content.type} id=${message.id}`,
         )
         const replyHandle: ReplyHandle = {
           // Replies retry once across a transient stream drop so a generated
           // reply isn't silently lost. Typing is best-effort (no retry).
-          sendText: async (text: string) => { await sendWithRetry(() => space.send(text)) },
-          sendAttachment: async (localPath: string) => { await sendWithRetry(() => space.send(attachment(localPath))) },
+          // [spectrum OUT] logs make the RESPONDING surface observable: every
+          // send attempt logs line + outcome so a silent outbound failure is
+          // impossible to miss in deploy logs.
+          sendText: async (text: string) => {
+            try {
+              await sendWithRetry(() => space.send(text))
+              console.log(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=text chars=${text.length} ok`)
+            } catch (err) {
+              console.error(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=text FAILED: ${(err as Error).message}`)
+              throw err
+            }
+          },
+          sendAttachment: async (localPath: string) => {
+            try {
+              await sendWithRetry(() => space.send(attachment(localPath)))
+              console.log(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=attachment path=${localPath.split('/').pop()} ok`)
+            } catch (err) {
+              console.error(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=attachment FAILED: ${(err as Error).message}`)
+              throw err
+            }
+          },
           startTyping: async () => { await space.startTyping() },
           stopTyping: async () => { await space.stopTyping() },
         }
@@ -146,6 +171,8 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
           text: message.content.type === 'text' ? message.content.text : '',
           // message.id is the stable SDK-assigned guid
           messageId: message.id,
+          linePhone: sp.phone,
+          spaceType: sp.type,
         }
         yield [replyHandle, inbound] as const
       }

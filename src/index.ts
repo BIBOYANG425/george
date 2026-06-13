@@ -89,6 +89,11 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     character: 'George — BIA 学长',
     tools: Object.keys(ALL_TOOLS).length,
+    // Railway injects these — lets anyone verify WHICH build is serving
+    // ("is the backend up to date?") without dashboard access.
+    build: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? 'local',
+    deployedBranch: process.env.RAILWAY_GIT_BRANCH ?? null,
+    transport: process.env.TRANSPORT === 'spectrum' ? 'spectrum' : 'legacy',
   })
 })
 
@@ -609,6 +614,18 @@ async function startServer() {
   // The Spectrum adapter is dynamic-imported here so the legacy default path
   // never touches spectrum-ts at all.
   const transportCfg = loadTransportConfig()
+  // Loud, unmissable transport banner: a wrong/missing TRANSPORT silently runs
+  // legacy (no Spectrum connection) — make the active mode obvious in deploy logs.
+  log('info', 'transport_selected', {
+    transport: transportCfg.transport,
+    spectrumProjectId: transportCfg.transport === 'spectrum' ? transportCfg.spectrum.projectId : undefined,
+    imessageLegacyEnabled: config.imessage.enabled,
+  })
+  console.log(
+    transportCfg.transport === 'spectrum'
+      ? `[transport] TRANSPORT=spectrum → connecting to the Spectrum shared pool (project ${transportCfg.spectrum.projectId.slice(0, 8)}…). Watch for "spectrum_connected".`
+      : `[transport] TRANSPORT=legacy (or unset) → NO Spectrum connection. Legacy iMessage adapter: ${config.imessage.enabled ? 'enabled' : 'disabled'}. Set TRANSPORT=spectrum for cloud iMessage.`,
+  )
   if (transportCfg.transport === 'spectrum') {
     const { startSpectrumAdapter, stopSpectrumAdapter } = await import('./adapters/spectrum.js')
     stopSpectrum = stopSpectrumAdapter // let shutdown() close the connection cleanly

@@ -14,7 +14,7 @@ import { log } from '../observability/logger.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
 import { supabase } from '../db/client.js'
 import { extractCodeFromStartMessage, runHandshake } from '../onboarding/handshake.js'
-import { lookupByCode, linkImessageHandle } from '../onboarding/pending-users.js'
+import { lookupByCode, linkImessageHandle, lookupByImessageHandle, markGreeted } from '../onboarding/pending-users.js'
 import { checkInjection, INJECTION_REJECTIONS } from '../security/injection-filter.js'
 import { normalizeHandle } from '../services/phone-handle.js'
 import { tryHandleUserCommand } from '../agent/user-command-router.js'
@@ -149,26 +149,44 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
     pickRejection: () => INJECTION_REJECTIONS[Math.floor(Math.random() * INJECTION_REJECTIONS.length)],
 
     tryHandshake: async (userId: string, text: string, reply: ReplyHandle): Promise<boolean> => {
-      const parsed = extractCodeFromStartMessage(text)
-      if (!parsed) return false
-      return runHandshake({
-        code: parsed.code,
-        format: parsed.format,
+      const send = async (out: { text?: string; imagePaths?: string[]; filePaths?: string[] }) => {
+        if (out.text) await reply.sendText(out.text)
+        for (const p of out.imagePaths ?? []) await reply.sendAttachment(path.resolve(p))
+        for (const f of out.filePaths ?? []) await reply.sendAttachment(path.resolve(f))
+      }
+      const common = {
         imessageHandle: userId,
-        sendImessage: async (out) => {
-          if (out.text) await reply.sendText(out.text)
-          for (const p of out.imagePaths ?? []) await reply.sendAttachment(path.resolve(p))
-          for (const f of out.filePaths ?? []) await reply.sendAttachment(path.resolve(f))
-        },
-        lookupPending: (c) => lookupByCode(supabase, c),
-        linkImessageHandle: (c, h) => linkImessageHandle(supabase, c, h),
+        sendImessage: send,
+        lookupPending: (c: string) => lookupByCode(supabase, c),
+        linkImessageHandle: (c: string, h: string) => linkImessageHandle(supabase, c, h),
         profileUrlBase: process.env.ONBOARDING_PROFILE_URL_BASE ?? 'https://uscbia.com/george/profile',
-      })
+        markGreeted: (c: string) => markGreeted(supabase, c),
+      }
+
+      const parsed = extractCodeFromStartMessage(text)
+      if (parsed) {
+        const handled = await runHandshake({ code: parsed.code, format: parsed.format, ...common })
+        if (handled) log('info', 'onboarding_handshake', { via: 'code', format: parsed.format })
+        return handled
+      }
+
+      // Spectrum signup funnel: the web form registers the student's phone and
+      // pre-links it to a pending row, then prefills just "Hi". Greet known
+      // pending handles that haven't been greeted yet; everything else falls
+      // through to the orchestrator. format:'natural' so a race-miss is silent.
+      const byHandle = await lookupByImessageHandle(supabase, userId)
+      if (byHandle && !byHandle.greeted_at) {
+        const handled = await runHandshake({ code: byHandle.code, format: 'natural', ...common })
+        if (handled) log('info', 'onboarding_handshake', { via: 'handle', code: byHandle.code })
+        return handled
+      }
+      return false
     },
 
     tryUserCommand: (userId: string, text: string) => tryHandleUserCommand(userId, text),
 
     runOrchestratorText: async (userId: string, text: string): Promise<string> => {
+      const turnStart = Date.now()
       // Persist the user turn before running so it survives an orchestrator
       // failure, then run WITH the session + profile stores so george loads
       // prior conversation context (buildHistoryPrefix). Mirrors POST /chat.
@@ -210,6 +228,11 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
           systemContext: {},
         })
       }
+      log('info', 'spectrum_turn', {
+        ms: Date.now() - turnStart,
+        replied: finalText.length > 0,
+        chars: finalText.length,
+      })
       return finalText
     },
 
