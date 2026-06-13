@@ -3,7 +3,7 @@
 // to the unchanged downstream pipeline, the Find My location path, and outbound
 // replies via the conversation space. The ONLY file aware of Spectrum.
 //
-// Header last reviewed: 2026-06-11
+// Header last reviewed: 2026-06-13
 
 import path from 'node:path'
 import type { SpectrumClient, ReplyHandle } from './spectrum-client.js'
@@ -297,4 +297,10 @@ export async function stopSpectrumAdapter(): Promise<void> {
   const client = activeSpectrumClient
   activeSpectrumClient = null
   if (client) await client.close().catch(() => {})
+}
+
+// Expose the live connection to out-of-band senders (e.g. squad-ping fan-out).
+// Returns null if the Spectrum adapter is not running or currently reconnecting.
+export function getActiveSpectrumClient(): SpectrumClient | null {
+  return activeSpectrumClient
 }
