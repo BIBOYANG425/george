@@ -74,6 +74,9 @@ export interface HandshakeOptions {
   lookupPending: (code: string) => Promise<PendingUser | null>;
   linkImessageHandle: (code: string, imessageHandle: string) => Promise<void>;
   profileUrlBase: string;
+  // Optional: stamp pending_users.greeted_at after the greeting so the
+  // by-handle path (Spectrum signup funnel: prefilled "Hi") never re-greets.
+  markGreeted?: (code: string) => Promise<void>;
 }
 
 // Returns true when the message was consumed by the handshake flow (greeting
@@ -123,5 +126,6 @@ export async function runHandshake(opts: HandshakeOptions): Promise<boolean> {
     to: opts.imessageHandle,
     text: `ready to set up? takes 2 min. ${opts.profileUrlBase}?code=${opts.code}`,
   });
+  if (opts.markGreeted) await opts.markGreeted(opts.code);
   return true;
 }

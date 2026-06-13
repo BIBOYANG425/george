@@ -8,6 +8,10 @@ export interface PendingUser {
   status: 'pending' | 'completed' | 'abandoned';
   created_at: string;
   reminded_at: string | null;
+  // Set when the 3-message greeting has been sent (by code OR by handle).
+  // Makes the greeting idempotent: a second "hello" before the profile form
+  // completes must not re-send the carousel.
+  greeted_at: string | null;
 }
 
 export async function createPendingUser(supabase: SupabaseClient, code: string): Promise<void> {
@@ -60,6 +64,14 @@ export async function lookupByImessageHandle(
     .limit(1);
   if (error) throw new Error(`lookupByImessageHandle failed: ${error.message}`);
   return data?.[0] ?? null;
+}
+
+export async function markGreeted(supabase: SupabaseClient, code: string): Promise<void> {
+  const { error } = await supabase
+    .from('pending_users')
+    .update({ greeted_at: new Date().toISOString() })
+    .eq('code', code);
+  if (error) throw new Error(`markGreeted failed: ${error.message}`);
 }
 
 // Only purges 'pending' rows. Completed rows must survive so a returning user

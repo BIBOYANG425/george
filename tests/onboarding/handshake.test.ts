@@ -134,3 +134,45 @@ describe('usableImagePaths (placeholder guard)', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe('markGreeted callback (by-handle funnel idempotency)', () => {
+  it('stamps greeted after a successful greeting', async () => {
+    const markGreeted = vi.fn(async () => {});
+    await runHandshake({
+      imessageHandle: '+15551234567',
+      profileUrlBase: 'https://uscbia.com/george/profile',
+      code: 'g7k2m4',
+      format: 'natural',
+      sendImessage: vi.fn(async () => {}),
+      lookupPending: vi.fn(async () => ({ code: 'g7k2m4', status: 'pending' })) as any,
+      linkImessageHandle: vi.fn(),
+      markGreeted,
+    });
+    expect(markGreeted).toHaveBeenCalledWith('g7k2m4');
+  });
+
+  it('does NOT stamp on "already in" or lookup miss', async () => {
+    const markGreeted = vi.fn(async () => {});
+    await runHandshake({
+      imessageHandle: '+15551234567',
+      profileUrlBase: 'https://uscbia.com/george/profile',
+      code: 'g7k2m4',
+      format: 'natural',
+      sendImessage: vi.fn(async () => {}),
+      lookupPending: vi.fn(async () => ({ code: 'g7k2m4', status: 'completed' })) as any,
+      linkImessageHandle: vi.fn(),
+      markGreeted,
+    });
+    await runHandshake({
+      imessageHandle: '+15551234567',
+      profileUrlBase: 'https://uscbia.com/george/profile',
+      code: 'nocode',
+      format: 'natural',
+      sendImessage: vi.fn(async () => {}),
+      lookupPending: vi.fn(async () => null),
+      linkImessageHandle: vi.fn(),
+      markGreeted,
+    });
+    expect(markGreeted).not.toHaveBeenCalled();
+  });
+});
