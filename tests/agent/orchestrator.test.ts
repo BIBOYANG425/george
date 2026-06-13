@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runOrchestrator, buildOrchestratorPrompt, isProfileEmpty } from '../../src/agent/orchestrator.js';
+import { runOrchestrator, buildOrchestratorPrompt, isProfileEmpty, buildAgentsConfig } from '../../src/agent/orchestrator.js';
 import type { Profile } from '../../src/memory/profile.js';
 
 describe('buildOrchestratorPrompt', () => {
@@ -111,3 +111,15 @@ describe('runOrchestrator (mock mode)', () => {
     expect(text.toLowerCase()).toMatch(/engemann|213-740/);
   });
 });
+
+describe('buildAgentsConfig — student_id reaches the squad sub-agent', () => {
+  it('injects the # CURRENT STUDENT block into find-people when a studentId is given', () => {
+    const cfg = buildAgentsConfig(null, '11111111-2222-3333-4444-555555555555');
+    expect(cfg['find-people'].prompt).toMatch(/# CURRENT STUDENT/);
+    expect(cfg['find-people'].prompt).toContain('11111111-2222-3333-4444-555555555555');
+  });
+  it('omits the block when no studentId', () => {
+    const cfg = buildAgentsConfig(null, null);
+    expect(cfg['find-people'].prompt).not.toMatch(/# CURRENT STUDENT/);
+  });
+})

@@ -128,8 +128,9 @@ export function buildOrchestratorPrompt(profile?: Profile | null, studentId?: st
  * string[] (tool names, not tool objects). The SDK resolves the tool objects
  * internally — we just list the names.
  */
-function buildAgentsConfig(
+export function buildAgentsConfig(
   profile?: Profile | null,
+  studentId?: string | null,
 ): Record<string, { description: string; prompt: string; tools: string[] }> {
   // Inject the user profile into each sub-agent so it doesn't have to be
   // re-stated through the dispatch prompt (it often wasn't). Now know-things
@@ -139,9 +140,15 @@ function buildAgentsConfig(
   // them too — otherwise "im hungry" gets answered by what's-happening with no
   // invitation woven in.
   const nudge = isProfileEmpty(profile) ? ONBOARDING_NUDGE : '';
+  // The squad tools (create/find/join) run INSIDE the find-people sub-agent and
+  // need the real students.id. Inject the id block here too — relying on the
+  // orchestrator to relay it through the dispatch prompt is the loop's softest
+  // seam (final-review IMPORTANT). With it in-context the sub-agent passes the
+  // exact uuid without a relay.
+  const studentIdBlock = buildStudentIdBlock(studentId);
   const config: Record<string, { description: string; prompt: string; tools: string[] }> = {};
   for (const [name, def] of Object.entries(SUB_AGENTS)) {
-    const extras = [userProfileBlock, nudge].filter(Boolean).join('\n\n');
+    const extras = [userProfileBlock, nudge, studentIdBlock].filter(Boolean).join('\n\n');
     config[name] = {
       description: def.description,
       prompt: extras ? `${def.prompt}\n\n${extras}` : def.prompt,
@@ -219,7 +226,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   }
 
   const systemPrompt = buildOrchestratorPrompt(profile, studentId);
-  const agentsConfig = buildAgentsConfig(profile);
+  const agentsConfig = buildAgentsConfig(profile, studentId);
   const orchestratorTools = buildOrchestratorToolNames();
 
   // Load conversation history from our custom SessionStore and prepend as context.
