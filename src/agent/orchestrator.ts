@@ -47,6 +47,9 @@ export interface RunOrchestratorArgs {
   profileStore?: ProfileStore;
   mockMode?: boolean;
   maxTurns?: number;
+  // Aborts the in-flight turn (e.g. when the user fires a rapid follow-up that
+  // supersedes this one). Passed straight to the SDK query().
+  abortController?: AbortController;
 }
 
 // The 6 memory blocks rendered as a system-prompt section. Empty string when
@@ -288,6 +291,8 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
       allowedTools: ['Task', 'Agent', 'WebSearch', ...Object.keys(ALL_TOOLS).map(nsTool)],
       agents: agentsConfig,
       maxTurns: args.maxTurns ?? 12,
+      // Abort handle for rapid-fire supersede (undefined = no external abort).
+      abortController: args.abortController,
       // CRITICAL: isolation mode. Without this, the SDK inherits the host's
       // ~/.claude/settings.json, project .claude/settings.json, MCP servers,
       // hooks, AND slash commands. A USC freshman texting "/cost" or "/model"

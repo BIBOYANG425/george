@@ -32,7 +32,7 @@ export interface SpectrumAdapterDeps {
 
 export interface SpectrumHandlers {
   // Returns the reply text, or null to send nothing (filtered/handshake-consumed).
-  handleText: (userId: string, text: string, reply: ReplyHandle) => Promise<string | null>
+  handleText: (userId: string, text: string, reply: ReplyHandle, abortController?: AbortController) => Promise<string | null>
   // Fire-and-forget: refresh the user's location into LocationContext.
   handleLocation: (userId: string) => Promise<void>
 }
@@ -61,26 +61,35 @@ export async function runSpectrumLoop(
   const interimDelayMs = opts.interimDelayMs ?? 9000
   const seen = new Set<string>()
   const buffers = new Map<string, { texts: string[]; reply: ReplyHandle; timer: ReturnType<typeof setTimeout> }>()
+  // The turn currently running for each sender. When the user fires another
+  // message mid-turn, the message loop aborts this controller so we never reply
+  // to a superseded message — the next turn handles the latest intent (the prior
+  // message is already persisted to history). Keeps replies fast: no debounce
+  // bump, just cancel-and-replace on a rapid follow-up.
+  const inflight = new Map<string, AbortController>()
 
   const flush = async (senderId: string) => {
     const buf = buffers.get(senderId)
     if (!buf) return
     buffers.delete(senderId)
+    const ac = new AbortController()
+    inflight.set(senderId, ac)
     // Show the "…" typing bubble while the (slow) orchestrator turn runs.
     // Best-effort: a failed typing signal must never block or fail the reply.
     await buf.reply.startTyping().catch(() => {})
     // If the turn runs long, send one "still thinking" nudge so the user isn't
-    // left staring at a typing bubble. Cleared as soon as the reply is ready.
+    // left staring at a typing bubble. Skipped if the turn was already superseded.
     const interimTimer = setTimeout(() => {
-      void buf.reply.sendText(pickStillThinking()).catch(() => {})
+      if (!ac.signal.aborted) void buf.reply.sendText(pickStillThinking()).catch(() => {})
     }, interimDelayMs)
     try {
-      const out = await handlers.handleText(senderId, buf.texts.join('\n'), buf.reply)
+      const out = await handlers.handleText(senderId, buf.texts.join('\n'), buf.reply, ac)
       clearTimeout(interimTimer)
       // One idea per bubble: split on blank-line boundaries and send each as a
       // separate iMessage with a pause, matching george's short-burst cadence
       // (same as the legacy adapter). A single-paragraph reply stays one bubble.
-      if (out) {
+      // Suppress the send entirely if a rapid follow-up superseded this turn.
+      if (out && !ac.signal.aborted) {
         const parts = splitIntoMessages(out)
         for (let i = 0; i < parts.length; i++) {
           if (i > 0) await sleep(INTER_MESSAGE_DELAY_MS)
@@ -88,9 +97,12 @@ export async function runSpectrumLoop(
         }
       }
     } catch (err) {
-      log('error', 'spectrum_turn_error', { senderId, error: (err as Error).message })
+      // A superseded turn aborts on purpose — that's not an error and it sends
+      // nothing. Only a genuine failure is logged.
+      if (!ac.signal.aborted) log('error', 'spectrum_turn_error', { senderId, error: (err as Error).message })
     } finally {
       clearTimeout(interimTimer)
+      if (inflight.get(senderId) === ac) inflight.delete(senderId)
       await buf.reply.stopTyping().catch(() => {})
     }
   }
@@ -102,6 +114,12 @@ export async function runSpectrumLoop(
       if (seen.size > DEDUP_CAP) for (const id of Array.from(seen).slice(0, DEDUP_CAP / 2)) seen.delete(id)
     }
     if (message.contentType !== 'text') continue
+    // Rapid-fire supersede: a fresh message means the user is still talking, so
+    // any turn already running for them is now stale — abort it so we don't reply
+    // to a superseded message. (The coalesce path below batches messages that
+    // arrive before a turn starts; this handles the ones that land mid-turn.)
+    const running = inflight.get(message.senderId)
+    if (running && !running.signal.aborted) running.abort()
     const existing = buffers.get(message.senderId)
     if (existing) {
       existing.texts.push(message.text)
@@ -126,18 +144,18 @@ export interface TextHandlerDeps {
   // Returns a command reply string, or null if not a command.
   tryUserCommand: (userId: string, text: string) => Promise<string | null>
   // Runs the orchestrator and returns the final reply text (or '').
-  runOrchestratorText: (userId: string, text: string) => Promise<string>
+  runOrchestratorText: (userId: string, text: string, abortController?: AbortController) => Promise<string>
   normalizeHandle: (raw: string) => string
 }
 
 export function buildTextHandler(deps: TextHandlerDeps) {
-  return async (rawUserId: string, text: string, reply: ReplyHandle): Promise<string | null> => {
+  return async (rawUserId: string, text: string, reply: ReplyHandle, abortController?: AbortController): Promise<string | null> => {
     const userId = deps.normalizeHandle(rawUserId)
     if (deps.checkInjection(text).blocked) return deps.pickRejection()
     if (await deps.tryHandshake(userId, text, reply)) return null
     const cmd = await deps.tryUserCommand(userId, text)
     if (cmd !== null) return cmd
-    const out = await deps.runOrchestratorText(userId, text)
+    const out = await deps.runOrchestratorText(userId, text, abortController)
     return out || null
   }
 }
@@ -190,7 +208,7 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
       return tryHandleUserCommand(userId, text)
     },
 
-    runOrchestratorText: async (userId: string, text: string): Promise<string> => {
+    runOrchestratorText: async (userId: string, text: string, abortController?: AbortController): Promise<string> => {
       const turnStart = Date.now()
       // Persist the user turn before running so it survives an orchestrator
       // failure, then run WITH the session + profile stores so george loads
@@ -209,6 +227,7 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
         text,
         sessionStore: deps.sessionStore,
         profileStore: deps.profileStore,
+        abortController,
       })) {
         const e = event as {
           type?: string
