@@ -103,6 +103,14 @@ export async function runHandshake(opts: HandshakeOptions): Promise<boolean> {
   }
 
   await opts.linkImessageHandle(opts.code, opts.imessageHandle);
+  // Stamp greeted BEFORE sending the (multi-second) greeting, not after. The
+  // by-handle path keys off greeted_at to decide whether to greet; the welcome
+  // is 3 sequential sends that take several seconds, far longer than the loop's
+  // ~1.5s debounce. Marking up front closes the race where a follow-up arriving
+  // mid-greeting ("im hungry") re-triggers the whole welcome. Trade-off: a send
+  // that fails partway still counts as greeted — strictly better than spamming
+  // the carousel. Falls through to the orchestrator on the next message.
+  if (opts.markGreeted) await opts.markGreeted(opts.code);
 
   // Message 1: greeting + vcf contact card (single iMessage with text + file)
   await opts.sendImessage({
@@ -126,6 +134,5 @@ export async function runHandshake(opts: HandshakeOptions): Promise<boolean> {
     to: opts.imessageHandle,
     text: `ready to set up? takes 2 min. ${opts.profileUrlBase}?code=${opts.code}`,
   });
-  if (opts.markGreeted) await opts.markGreeted(opts.code);
   return true;
 }

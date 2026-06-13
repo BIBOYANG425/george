@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runOrchestrator, buildOrchestratorPrompt } from '../../src/agent/orchestrator.js';
+import { runOrchestrator, buildOrchestratorPrompt, isProfileEmpty } from '../../src/agent/orchestrator.js';
 import type { Profile } from '../../src/memory/profile.js';
 
 describe('buildOrchestratorPrompt', () => {
@@ -44,6 +44,38 @@ describe('orchestrator profile injection', () => {
     // The master prompt contains the phrase "USER PROFILE" in prose; the injected
     // block adds a markdown H1 "# USER PROFILE". Check that the H1 header is absent.
     expect(prompt).not.toMatch(/^# USER PROFILE$/m);
+  });
+});
+
+describe('onboarding nudge (soft gate, not a hard gate)', () => {
+  const filled: Profile = {
+    identity: 'name: Bob', academic: '', interests: '', relationships: '', state: '', george_notes: '',
+  };
+  const empty: Profile = {
+    identity: '', academic: '', interests: '', relationships: '', state: '', george_notes: '',
+  };
+
+  it('isProfileEmpty: true for null/undefined/all-empty, false when any block has content', () => {
+    expect(isProfileEmpty(null)).toBe(true);
+    expect(isProfileEmpty(undefined)).toBe(true);
+    expect(isProfileEmpty(empty)).toBe(true);
+    expect(isProfileEmpty(filled)).toBe(false);
+  });
+
+  it('appends the nudge while the student is unknown (null / empty / no profile)', () => {
+    expect(buildOrchestratorPrompt(null)).toMatch(/^# ONBOARDING/m);
+    expect(buildOrchestratorPrompt(empty)).toMatch(/^# ONBOARDING/m);
+    expect(buildOrchestratorPrompt()).toMatch(/^# ONBOARDING/m);
+  });
+
+  it('drops the nudge once george knows the student', () => {
+    expect(buildOrchestratorPrompt(filled)).not.toMatch(/^# ONBOARDING/m);
+  });
+
+  it('the nudge is answer-first, never a gate', () => {
+    const p = buildOrchestratorPrompt(null);
+    expect(p).toMatch(/ALWAYS help them fully/);
+    expect(p).toMatch(/never refuse, stall, or gate/i);
   });
 });
 
