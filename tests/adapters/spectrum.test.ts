@@ -105,7 +105,7 @@ describe('runSpectrumLoop', () => {
     const handle = vi.fn(async () => 'reply text')
     await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() })
     expect(handle).toHaveBeenCalledTimes(1)
-    expect(handle).toHaveBeenCalledWith('+15551234567', 'yo learn', expect.anything())
+    expect(handle).toHaveBeenCalledWith('+15551234567', 'yo learn', expect.anything(), expect.anything())
   })
 
   it('dedups a repeated messageId', async () => {
@@ -183,5 +183,53 @@ describe('runSpectrumLoop', () => {
     await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() }, { debounceMs: 0 })
     expect(handle).toHaveBeenCalledTimes(1)
     expect(handle.mock.calls[0][1]).toBe('first\nsecond')
+  })
+
+  it('aborts the in-flight turn when a rapid follow-up lands mid-turn (replies only to the latest)', async () => {
+    const sent: string[] = []
+    const reply: ReplyHandle = {
+      sendText: async (t) => { sent.push(t) },
+      sendAttachment: async () => {},
+      startTyping: async () => {},
+      stopTyping: async () => {},
+    }
+    let turnStarted!: () => void
+    const started = new Promise<void>((r) => { turnStarted = r })
+    let firstAborted = false
+
+    const handleText = async (
+      _u: string, text: string, _r: ReplyHandle, ac?: AbortController,
+    ): Promise<string | null> => {
+      if (text === 'first') {
+        turnStarted() // the first turn is now running
+        await new Promise<void>((resolve, reject) => {
+          if (ac?.signal.aborted) return reject(new Error('aborted'))
+          ac?.signal.addEventListener('abort', () => { firstAborted = true; reject(new Error('aborted')) })
+          setTimeout(resolve, 2000) // would finish in 2s if never superseded
+        })
+        return 'REPLY-FIRST'
+      }
+      return 'REPLY-SECOND'
+    }
+
+    const client: SpectrumClient = {
+      async *messages() {
+        yield [reply, msg({ messageId: 'a', text: 'first' })] as const
+        await started // hold the 2nd message until the 1st turn is actually running
+        yield [reply, msg({ messageId: 'b', text: 'second' })] as const
+      },
+      getLocation: async () => null,
+      close: async () => {},
+    }
+
+    await runSpectrumLoop(
+      client,
+      { handleText, handleLocation: vi.fn() },
+      { debounceMs: 50, interimDelayMs: 60_000 },
+    )
+
+    expect(firstAborted).toBe(true)               // the stale turn was cancelled
+    expect(sent).toContain('REPLY-SECOND')        // the latest intent is answered
+    expect(sent).not.toContain('REPLY-FIRST')     // and the superseded reply never goes out
   })
 })
