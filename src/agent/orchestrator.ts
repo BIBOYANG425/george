@@ -19,6 +19,8 @@ import type { SessionStore } from './session-store.js';
 import type { Profile, ProfileStore } from '../memory/profile.js';
 import { resolveStudentId } from '../db/students.js';
 import { log } from '../observability/logger.js';
+import { isWebSearchOverCap, recordWebSearchUse } from '../services/web-search-budget.js';
+import { trustedDomains } from '../services/web-search-config.js';
 
 // Register george's 23 tools as an in-process SDK MCP server so the model can
 // actually CALL them. Without this, the orchestrator/sub-agents only had tool
@@ -122,6 +124,22 @@ export function buildOrchestratorPrompt(profile?: Profile | null, studentId?: st
   return parts.join('\n\n');
 }
 
+// Dynamic WebSearch guidance — injected into the info sub-agents (whats-happening,
+// know-things) only while the user is under their daily web-search cap. Carries
+// the trusted-domain list the agent must pass as allowed_domains (allowed_domains
+// is model-provided per call).
+function webSearchGuidance(): string {
+  return [
+    '# WEB SEARCH',
+    'You have a WebSearch tool for open-web facts you do not already have. It is',
+    'rationed — use it only after find_places and your own data come up empty, and',
+    'not for things you already know.',
+    `When you call WebSearch, pass allowed_domains: ${JSON.stringify(trustedDomains())}`,
+    'so results come from trusted sources. Cite the source in your reply; never state',
+    'a fact, name, address, or price that is not in the results.',
+  ].join('\n');
+}
+
 /**
  * Build the `agents` config for the Agent SDK.
  *
@@ -132,6 +150,7 @@ export function buildOrchestratorPrompt(profile?: Profile | null, studentId?: st
 export function buildAgentsConfig(
   profile?: Profile | null,
   studentId?: string | null,
+  webAllowed: boolean = false,
 ): Record<string, { description: string; prompt: string; tools: string[] }> {
   // Inject the user profile into each sub-agent so it doesn't have to be
   // re-stated through the dispatch prompt (it often wasn't). Now know-things
@@ -148,13 +167,21 @@ export function buildAgentsConfig(
   const studentIdBlock = buildStudentIdBlock(studentId);
   const config: Record<string, { description: string; prompt: string; tools: string[] }> = {};
   for (const [name, def] of Object.entries(SUB_AGENTS)) {
-    const extras = [userProfileBlock, nudge, studentIdBlock].filter(Boolean).join('\n\n');
+    // WebSearch (an SDK built-in, un-namespaced) goes to the two info agents
+    // only, and only when the user is under their daily web-search cap.
+    const wantsWeb = name === 'whats-happening' || name === 'know-things';
+    const webBlock = wantsWeb && webAllowed ? webSearchGuidance() : '';
+    const extras = [userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
     config[name] = {
       description: def.description,
       prompt: extras ? `${def.prompt}\n\n${extras}` : def.prompt,
-      // Namespace each tool to its MCP name so the sub-agent can actually call
-      // the registered implementation (inherits the parent's mcpServers).
-      tools: def.tools.map(nsTool),
+      // Namespace each george tool to its MCP name so the sub-agent can call the
+      // registered implementation. WebSearch is an SDK built-in (not namespaced)
+      // and is added only for the info agents when web is allowed.
+      tools: [
+        ...def.tools.map(nsTool),
+        ...(wantsWeb && webAllowed ? ['WebSearch'] : []),
+      ],
     };
   }
   return config;
@@ -232,8 +259,11 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     }
   }
 
+  // Web search is rationed per student/day; when over cap, it's omitted from the
+  // turn's tool set and the guidance block is dropped (find_places stays free).
+  const webAllowed = !isWebSearchOverCap(studentId);
   const systemPrompt = buildOrchestratorPrompt(profile, studentId);
-  const agentsConfig = buildAgentsConfig(profile, studentId);
+  const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed);
   const orchestratorTools = buildOrchestratorToolNames();
 
   // Load conversation history from our custom SessionStore and prepend as context.
@@ -255,7 +285,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
       // permission prompt that no one answers on a server → tool_result errors
       // ("you haven't granted it yet") and george hedges. `tools` (orchestrator)
       // and each sub-agent's tool list still gate WHICH agent may call WHAT.
-      allowedTools: ['Task', 'Agent', ...Object.keys(ALL_TOOLS).map(nsTool)],
+      allowedTools: ['Task', 'Agent', 'WebSearch', ...Object.keys(ALL_TOOLS).map(nsTool)],
       agents: agentsConfig,
       maxTurns: args.maxTurns ?? 12,
       // CRITICAL: isolation mode. Without this, the SDK inherits the host's
@@ -271,6 +301,16 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
       persistSession: false,
     },
   })) {
+    // Record actual web searches performed this turn (server-tool usage) against
+    // the student's daily budget so the next turn's webAllowed check is accurate.
+    const m = message as {
+      type?: string;
+      usage?: { server_tool_use?: { web_search_requests?: number } };
+    };
+    if (m.type === 'result') {
+      const n = m.usage?.server_tool_use?.web_search_requests ?? 0;
+      if (n > 0) recordWebSearchUse(studentId, n);
+    }
     yield message as { type: string; text?: string };
   }
 }

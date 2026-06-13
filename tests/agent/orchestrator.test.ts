@@ -123,3 +123,25 @@ describe('buildAgentsConfig — student_id reaches the squad sub-agent', () => {
     expect(cfg['find-people'].prompt).not.toMatch(/# CURRENT STUDENT/);
   });
 })
+
+describe('web search wiring (search Phase 1)', () => {
+  it('gives whats-happening + know-things WebSearch + find_places when allowed; find-people gets neither', () => {
+    const cfg = buildAgentsConfig(null, null, true);
+    expect(cfg['whats-happening'].tools).toContain('WebSearch');
+    expect(cfg['know-things'].tools).toContain('WebSearch');
+    expect(cfg['whats-happening'].tools).toContain('mcp__george__find_places');
+    expect(cfg['know-things'].tools).toContain('mcp__george__find_places');
+    expect(cfg['find-people'].tools).not.toContain('WebSearch');
+    expect(cfg['find-people'].tools).not.toContain('mcp__george__find_places');
+  });
+  it('omits WebSearch + its guidance when over the daily cap', () => {
+    const cfg = buildAgentsConfig(null, null, false);
+    expect(cfg['whats-happening'].tools).not.toContain('WebSearch');
+    expect(cfg['whats-happening'].prompt).not.toMatch(/allowed_domains/);
+  });
+  it('injects trusted-domain guidance into the info agents when web is allowed', () => {
+    const cfg = buildAgentsConfig(null, null, true);
+    expect(cfg['whats-happening'].prompt).toMatch(/allowed_domains/);
+    expect(cfg['whats-happening'].prompt).toMatch(/xiaohongshu\.com/);
+  });
+})
