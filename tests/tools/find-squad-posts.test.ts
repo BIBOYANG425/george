@@ -25,7 +25,7 @@ describe('find_squad_posts tool', () => {
       resolveStudentId: vi.fn(async () => UUID),
     }))
     const { findSquadPostsHandler } = await import('../../src/tools/find-squad-posts.js')
-    const raw = await findSquadPostsHandler({ student_id: UUID, query: '韩烤' })
+    const raw = await findSquadPostsHandler({ student_id: UUID })
     const result = JSON.parse(raw)
     expect(rpcMock).toHaveBeenCalledWith('hybrid_search_posts_for_user', {
       p_student_id: UUID,

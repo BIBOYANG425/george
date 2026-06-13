@@ -22,7 +22,7 @@ describe('join_squad_post tool', () => {
           if (table === 'squad_pings') {
             return {
               update: () => ({
-                eq: () => ({ eq: () => updateMock() }),
+                eq: () => ({ eq: () => ({ eq: () => updateMock() }) }),
               }),
             }
           }
@@ -51,19 +51,19 @@ describe('join_squad_post tool', () => {
     expect(result.ok).toBe(true)
     expect(result.poster_name).toBe('小明')
     expect(result.contact).toBe('wechat: abc123')
-    // Confirm the update was called (ping marked responded)
+    // Confirm the update was called (ping marked responded), scoped to status='sent'
     expect(updateMock).toHaveBeenCalled()
   })
 
-  it('23xxx Postgres error → squad_full message', async () => {
+  it('real trigger error { code:P0001, message:squad_full } → squad_full message', async () => {
     vi.doMock('../../src/db/client.js', () => ({
       supabase: {
         from: (table: string) => {
           if (table === 'squad_members') {
             return {
               insert: () => ({
-                error: { code: '23514', message: 'capacity_full' },
-                then: (r: Function) => r({ error: { code: '23514', message: 'capacity_full' } }),
+                error: { code: 'P0001', message: 'squad_full' },
+                then: (r: Function) => r({ error: { code: 'P0001', message: 'squad_full' } }),
               }),
             }
           }
@@ -81,15 +81,16 @@ describe('join_squad_post tool', () => {
     expect(result.message).toMatch(/满了|full/i)
   })
 
-  it('trigger message containing "full" → squad_full message', async () => {
+  it('unique_violation { code:23505 } → already_joined message (not squad_full)', async () => {
     vi.doMock('../../src/db/client.js', () => ({
       supabase: {
         from: (table: string) => {
           if (table === 'squad_members') {
             return {
               insert: () => ({
-                error: { code: 'P0001', message: 'squad is full' },
-                then: (r: Function) => r({ error: { code: 'P0001', message: 'squad is full' } }),
+                error: { code: '23505', message: 'duplicate key value violates unique constraint' },
+                then: (r: Function) =>
+                  r({ error: { code: '23505', message: 'duplicate key value violates unique constraint' } }),
               }),
             }
           }
@@ -103,7 +104,35 @@ describe('join_squad_post tool', () => {
     const { joinSquadPostHandler } = await import('../../src/tools/join-squad-post.js')
     const raw = await joinSquadPostHandler({ post_id: POST_ID, student_id: UUID })
     const result = JSON.parse(raw)
-    expect(result.error).toBe('squad_full')
+    expect(result.error).toBe('already_joined')
+    expect(result.message).toMatch(/已经在/)
+  })
+
+  it('post_not_found (P0001, not squad_full) → generic {error}, never squad_full', async () => {
+    vi.doMock('../../src/db/client.js', () => ({
+      supabase: {
+        from: (table: string) => {
+          if (table === 'squad_members') {
+            return {
+              insert: () => ({
+                error: { code: 'P0001', message: 'post_not_found' },
+                then: (r: Function) => r({ error: { code: 'P0001', message: 'post_not_found' } }),
+              }),
+            }
+          }
+          return {}
+        },
+      },
+    }))
+    vi.doMock('../../src/db/students.js', () => ({
+      resolveStudentId: vi.fn(async () => UUID),
+    }))
+    const { joinSquadPostHandler } = await import('../../src/tools/join-squad-post.js')
+    const raw = await joinSquadPostHandler({ post_id: POST_ID, student_id: UUID })
+    const result = JSON.parse(raw)
+    expect(result.error).not.toBe('squad_full')
+    expect(result.error).not.toBe('already_joined')
+    expect(result.error).toBeDefined()
   })
 
   it('defensive: non-uuid student_id triggers resolveStudentId', async () => {
@@ -117,7 +146,7 @@ describe('join_squad_post tool', () => {
           if (table === 'squad_pings') {
             return {
               update: () => ({
-                eq: () => ({ eq: () => Promise.resolve({ error: null }) }),
+                eq: () => ({ eq: () => ({ eq: () => Promise.resolve({ error: null }) }) }),
               }),
             }
           }

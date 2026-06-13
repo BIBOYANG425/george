@@ -18,12 +18,10 @@ async function toStudentUuid(raw: string): Promise<string> {
 }
 
 const inputSchema = {
-  query: z.string().optional().describe('Optional free-text query to hint the RPC'),
   student_id: z.string().optional().describe('The student UUID injected from context'),
 }
 
 export async function findSquadPostsHandler(input: {
-  query?: string
   student_id?: string
 }): Promise<string> {
   try {
@@ -50,7 +48,7 @@ export const findSquadPostsTool = wrapTool({
   name: 'find_squad_posts',
   description:
     'Find open squad posts that match this student. ' +
-    'Returns a ranked list of posts — pick 2-3 to recommend, never enumerate all. ' +
+    'Returns a ranked list of posts. Pick 2-3 to recommend, never enumerate all. ' +
     'Uses the hybrid (semantic + tag) search RPC.',
   schema: inputSchema,
   handler: findSquadPostsHandler,

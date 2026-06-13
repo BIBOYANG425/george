@@ -1,8 +1,9 @@
 // src/tools/join-squad-post.ts
 // Join a squad post. Inserts into squad_members, marks any pending ping as
 // responded, and returns the poster's contact info for introduction.
-// The DB enforces capacity via a trigger; a 23xxx error code or a trigger
-// message containing "full" is returned as the squad_full error payload.
+// The DB enforces capacity via the fn_update_squad_current_people trigger,
+// which raises 'squad_full' (plpgsql, SQLSTATE P0001). A 23505 unique_violation
+// means the student already joined. Each is mapped to a distinct user payload.
 
 import { z } from 'zod'
 import { supabase } from '../db/client.js'
@@ -16,14 +17,20 @@ async function toStudentUuid(raw: string): Promise<string> {
   return resolveStudentId(raw, 'imessage')
 }
 
-/** True when the Postgres error indicates a capacity / constraint violation. */
-function isCapacityError(code?: string, message?: string): boolean {
-  if (!code && !message) return false
-  // 23xxx family: integrity constraint violations
-  if (code && /^23/.test(code)) return true
-  // Trigger-raised application errors mentioning "full"
-  if (message && /full/i.test(message)) return true
-  return false
+// The capacity trigger fn_update_squad_current_people raises 'squad_full' as a
+// plpgsql exception (DEFAULT SQLSTATE P0001 — NOT a 23xxx code). 23505 is a
+// unique_violation, meaning the student already joined. We classify precisely so
+// each case gets the right user-facing message; post_not_found (also P0001) and
+// anything else fall through to a generic error.
+type JoinErrorKind = 'squad_full' | 'already_joined' | 'other'
+
+function classifyJoinError(code?: string, message?: string): JoinErrorKind {
+  // Capacity: trigger raised 'squad_full' (P0001). Match the message directly so
+  // post_not_found (also P0001) doesn't get mislabeled as full.
+  if (message && /squad_full/i.test(message)) return 'squad_full'
+  // Duplicate join: unique index on (post_id, student_id) → 23505.
+  if (code === '23505') return 'already_joined'
+  return 'other'
 }
 
 const inputSchema = {
@@ -50,21 +57,30 @@ export async function joinSquadPostHandler(input: {
     })
 
     if (insertErr) {
-      if (isCapacityError(insertErr.code, insertErr.message)) {
+      const kind = classifyJoinError(insertErr.code, insertErr.message)
+      if (kind === 'squad_full') {
         return JSON.stringify({
           error: 'squad_full',
           message: '这个局满了 🥲 看看别的?',
         })
       }
+      if (kind === 'already_joined') {
+        return JSON.stringify({
+          error: 'already_joined',
+          message: '你已经在这个局里了 🫡',
+        })
+      }
       return JSON.stringify({ error: insertErr.message })
     }
 
-    // 2. Mark any pending squad_pings for this (post, student) as responded
+    // 2. Mark any genuinely-sent squad_pings for this (post, student) as responded.
+    // Scope to status='sent' so a suppressed ping never gets flipped to 'joined'.
     await supabase
       .from('squad_pings')
       .update({ response: 'joined', responded_at: new Date().toISOString() })
       .eq('post_id', input.post_id)
       .eq('recipient_student_id', studentId)
+      .eq('status', 'sent')
 
     // 3. Fetch poster contact info for intro
     const { data: postData } = await supabase
