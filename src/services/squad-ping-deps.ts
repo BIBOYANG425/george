@@ -5,7 +5,6 @@
 // tests; this file's correctness is verified by integration / E2E.
 
 import { supabase } from '../db/client.js'
-import { getActiveSpectrumClient } from '../adapters/spectrum.js'
 import { runPingFanout } from './squad-ping-engine.js'
 import type { MatchCandidate, MatchPrefs, PingRow, PingDeps } from './squad-ping-engine.js'
 
@@ -135,6 +134,9 @@ export async function buildPingDeps(postId: string): Promise<PingDeps> {
     },
 
     deliver: async (handle: string, bubbles: string[]): Promise<void> => {
+      // Lazy import to break the circular dependency:
+      // squad-ping-deps → spectrum → orchestrator → ALL_TOOLS → (tools/index still loading)
+      const { getActiveSpectrumClient } = await import('../adapters/spectrum.js')
       const c = getActiveSpectrumClient()
       if (!c) throw new Error('no_spectrum_connection')
       await c.sendProactive(handle, bubbles)

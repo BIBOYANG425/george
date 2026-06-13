@@ -28,6 +28,7 @@ export { loadSkillTool } from './load-skill.js'
 export { dpsZoneCheckTool } from './dps-zone-check.js'
 export { distanceCompareTool } from './distance-compare.js'
 export { safeRouteTool } from './safe-route.js'
+export { findPlacesTool } from './find-places.js'
 
 import { createSquadPostTool } from './create-squad-post.js'
 import { findSquadPostsTool } from './find-squad-posts.js'
@@ -59,6 +60,7 @@ import { loadSkillTool } from './load-skill.js'
 import { dpsZoneCheckTool } from './dps-zone-check.js'
 import { distanceCompareTool } from './distance-compare.js'
 import { safeRouteTool } from './safe-route.js'
+import { findPlacesTool } from './find-places.js'
 
 export const ALL_TOOLS = {
   create_squad_post: createSquadPostTool,
@@ -91,4 +93,5 @@ export const ALL_TOOLS = {
   dps_zone_check: dpsZoneCheckTool,
   distance_compare: distanceCompareTool,
   safe_route: safeRouteTool,
+  find_places: findPlacesTool,
 }
