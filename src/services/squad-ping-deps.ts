@@ -9,6 +9,12 @@ import { getActiveSpectrumClient } from '../adapters/spectrum.js'
 import { runPingFanout } from './squad-ping-engine.js'
 import type { MatchCandidate, MatchPrefs, PingRow, PingDeps } from './squad-ping-engine.js'
 
+// Per-post fan-out ceiling. One approved 局 pings at most this many students,
+// regardless of how many match — pings are scarce-by-design (spec §8), so the
+// engine takes the top-N by rrf_score and suppresses the rest. The per-student
+// weekly cap is enforced separately via user_match_prefs.weekly_ping_cap.
+const MAX_PINGS_PER_POST = 5
+
 // nowHourLA: current hour in America/Los_Angeles.
 function nowHourLA(): number {
   const fmt = new Intl.DateTimeFormat('en-US', {
@@ -47,7 +53,8 @@ export async function buildPingDeps(postId: string): Promise<PingDeps> {
     const loc = post?.location ? ` ${post.location}` : ''
     const current = post?.current_people ?? 1
     const max = post?.max_people ?? 2
-    const need = max - current
+    // Clamp so a full / over-filled post never prints "缺0" or "缺-1".
+    const need = Math.max(0, max - current)
     const bubble1 = `诶 有人组了${cat}局${loc} ${current}缺${need}`
     const reason = candidate.matched_tags[0] ?? candidate.best_facet ?? '类似的'
     const bubble2 = `你之前提到${reason} 想去我帮你报名 不想去忽略我就行哈哈哈`
@@ -59,8 +66,21 @@ export async function buildPingDeps(postId: string): Promise<PingDeps> {
       const { data, error } = await supabase.rpc('match_users_for_post', {
         p_post_id: pid,
       })
-      if (error || !data) return []
-      return (data as MatchCandidate[])
+      // Fail closed: a swallowed RPC error would silently produce a no-op
+      // fan-out. Throw so triggerPingFanout's caller can surface it ("post
+      // created, pings delayed") instead of pretending zero matches.
+      if (error) throw new Error(`match_users_for_post failed: ${error.message}`)
+      const rows = (data ?? []) as unknown[]
+      // Shape guard: if the RPC ever returns the wrong column set, a bad
+      // rrf_score would corrupt scoring silently. Verify the first row before
+      // trusting the cast (lightweight — no full schema validation).
+      if (rows.length > 0) {
+        const first = rows[0] as Record<string, unknown>
+        if (typeof first.rrf_score !== 'number' || typeof first.student_id !== 'string') {
+          throw new Error('match_users_for_post returned unexpected row shape')
+        }
+      }
+      return rows as MatchCandidate[]
     },
 
     loadPrefs: async (studentId: string): Promise<MatchPrefs | null> => {
@@ -81,7 +101,11 @@ export async function buildPingDeps(postId: string): Promise<PingDeps> {
         .eq('recipient_student_id', studentId)
         .eq('status', 'sent')
         .gte('sent_at', since)
-      if (error) return 0
+      // Fail closed: returning 0 on a count error makes everyone look
+      // under-cap → unlimited pings. Returning a value ≥ any cap makes the
+      // engine record this candidate as suppressed_cap (accounted, not spammed)
+      // rather than aborting the whole candidate loop with a throw.
+      if (error) return Number.MAX_SAFE_INTEGER
       return count ?? 0
     },
 
@@ -96,7 +120,7 @@ export async function buildPingDeps(postId: string): Promise<PingDeps> {
     },
 
     recordPing: async (row: PingRow): Promise<void> => {
-      await supabase.from('squad_pings').insert({
+      const { error } = await supabase.from('squad_pings').insert({
         post_id: row.post_id,
         recipient_student_id: row.recipient_student_id,
         score: row.score,
@@ -104,6 +128,10 @@ export async function buildPingDeps(postId: string): Promise<PingDeps> {
         status: row.status,
         sent_at: row.sent_at,
       })
+      // A delivered-but-unrecorded ping corrupts cap accounting (the recipient
+      // would look under-cap forever). Surface the failure instead of dropping
+      // the record silently.
+      if (error) throw new Error(`recordPing insert failed: ${error.message}`)
     },
 
     deliver: async (handle: string, bubbles: string[]): Promise<void> => {
@@ -116,7 +144,7 @@ export async function buildPingDeps(postId: string): Promise<PingDeps> {
 
     nowHourLA,
 
-    maxPings: 5,
+    maxPings: MAX_PINGS_PER_POST,
 
     postCategory: post?.category ?? undefined,
   }
