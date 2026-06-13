@@ -165,7 +165,9 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
 
       const parsed = extractCodeFromStartMessage(text)
       if (parsed) {
-        return runHandshake({ code: parsed.code, format: parsed.format, ...common })
+        const handled = await runHandshake({ code: parsed.code, format: parsed.format, ...common })
+        if (handled) log('info', 'onboarding_handshake', { via: 'code', format: parsed.format })
+        return handled
       }
 
       // Spectrum signup funnel: the web form registers the student's phone and
@@ -174,7 +176,9 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
       // through to the orchestrator. format:'natural' so a race-miss is silent.
       const byHandle = await lookupByImessageHandle(supabase, userId)
       if (byHandle && !byHandle.greeted_at) {
-        return runHandshake({ code: byHandle.code, format: 'natural', ...common })
+        const handled = await runHandshake({ code: byHandle.code, format: 'natural', ...common })
+        if (handled) log('info', 'onboarding_handshake', { via: 'handle', code: byHandle.code })
+        return handled
       }
       return false
     },
@@ -182,6 +186,7 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
     tryUserCommand: (userId: string, text: string) => tryHandleUserCommand(userId, text),
 
     runOrchestratorText: async (userId: string, text: string): Promise<string> => {
+      const turnStart = Date.now()
       // Persist the user turn before running so it survives an orchestrator
       // failure, then run WITH the session + profile stores so george loads
       // prior conversation context (buildHistoryPrefix). Mirrors POST /chat.
@@ -223,6 +228,11 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
           systemContext: {},
         })
       }
+      log('info', 'spectrum_turn', {
+        ms: Date.now() - turnStart,
+        replied: finalText.length > 0,
+        chars: finalText.length,
+      })
       return finalText
     },
 

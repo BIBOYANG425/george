@@ -33,6 +33,11 @@ export interface InboundMessage {
   contentType: string        // 'text' | 'attachment' | ...
   text: string
   messageId: string          // stable id for dedup
+  // Which pool/dedicated line the conversation is routed through
+  // (iMessage space.phone). On the shared pool this DIFFERS per user —
+  // one project connection serves every line.
+  linePhone?: string
+  spaceType?: string         // 'dm' | 'group'
 }
 
 export interface ReplyHandle {
@@ -126,8 +131,9 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
   return {
     async *messages() {
       for await (const [space, message] of app.messages) {
+        const sp = space as unknown as { phone?: string; type?: string }
         console.log(
-          `[spectrum IN] platform=${message.platform} sender=${redactHandle(message.sender?.id)} type=${message.content.type} id=${message.id}`,
+          `[spectrum IN] line=${sp.phone ?? '?'} space=${sp.type ?? '?'} sender=${redactHandle(message.sender?.id)} type=${message.content.type} id=${message.id}`,
         )
         const replyHandle: ReplyHandle = {
           // Replies retry once across a transient stream drop so a generated
@@ -146,6 +152,8 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
           text: message.content.type === 'text' ? message.content.text : '',
           // message.id is the stable SDK-assigned guid
           messageId: message.id,
+          linePhone: sp.phone,
+          spaceType: sp.type,
         }
         yield [replyHandle, inbound] as const
       }
