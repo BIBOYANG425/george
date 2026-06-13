@@ -151,6 +151,24 @@ describe('markGreeted callback (by-handle funnel idempotency)', () => {
     expect(markGreeted).toHaveBeenCalledWith('g7k2m4');
   });
 
+  it('stamps greeted BEFORE sending the welcome (closes the re-greet race)', async () => {
+    const order: string[] = [];
+    const markGreeted = vi.fn(async () => { order.push('mark'); });
+    const sendImessage = vi.fn(async () => { order.push('send'); });
+    await runHandshake({
+      imessageHandle: '+15551234567',
+      profileUrlBase: 'https://uscbia.com/george/profile',
+      code: 'g7k2m4',
+      format: 'natural',
+      sendImessage,
+      lookupPending: vi.fn(async () => ({ code: 'g7k2m4', status: 'pending' })) as any,
+      linkImessageHandle: vi.fn(),
+      markGreeted,
+    });
+    expect(order.indexOf('mark')).toBe(0);
+    expect(order.indexOf('send')).toBeGreaterThan(order.indexOf('mark'));
+  });
+
   it('does NOT stamp on "already in" or lookup miss', async () => {
     const markGreeted = vi.fn(async () => {});
     await runHandshake({

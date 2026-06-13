@@ -73,10 +73,38 @@ function buildUserProfileBlock(profile?: Profile | null): string {
   ].join('\n');
 }
 
+// True when george has no real knowledge of this student yet — no profile row,
+// or a profile whose 6 blocks are all empty. Drives the onboarding nudge: keep
+// softly inviting setup until the profile has something in it ("once george
+// knows you better"), then stop.
+export function isProfileEmpty(profile?: Profile | null): boolean {
+  if (!profile) return true;
+  const blocks = ['identity', 'academic', 'interests', 'relationships', 'state', 'george_notes'] as const;
+  return blocks.every((name) => !String(profile[name] ?? '').trim());
+}
+
+// Soft onboarding nudge — NOT a hard gate. george always answers; this only
+// adds a throttled, in-voice invitation to finish setup while the student is
+// still unknown. Appended to the orchestrator AND each sub-agent prompt so
+// whichever agent crafts the reply can weave it in.
+const ONBOARDING_NUDGE = [
+  '# ONBOARDING (this student has not finished setting up their profile)',
+  'You have no profile for this student yet. ALWAYS help them fully and directly —',
+  'never refuse, stall, or gate an answer because they have not onboarded.',
+  'Then, only when it fits naturally and at most once every few messages (never',
+  'twice in a row — check the conversation history; if you nudged recently, skip',
+  'it this turn), drop ONE short in-voice line that finishing their profile',
+  'unlocks more: you actually remember them, tailor recs to their major/year/vibe,',
+  'and match them with the right people. Point them at the setup link you sent in',
+  'your welcome. One line, in voice — never a sales pitch, never a help-desk checklist.',
+].join('\n');
+
 export function buildOrchestratorPrompt(profile?: Profile | null): string {
-  const base = `${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`;
+  const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
   const userProfileBlock = buildUserProfileBlock(profile);
-  return userProfileBlock ? `${base}\n\n${userProfileBlock}` : base;
+  if (userProfileBlock) parts.push(userProfileBlock);
+  if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
+  return parts.join('\n\n');
 }
 
 /**
@@ -93,11 +121,16 @@ function buildAgentsConfig(
   // re-stated through the dispatch prompt (it often wasn't). Now know-things
   // always knows the student's major/year/interests and can personalize.
   const userProfileBlock = buildUserProfileBlock(profile);
+  // Sub-agents craft the actual reply, so the onboarding nudge has to reach
+  // them too — otherwise "im hungry" gets answered by what's-happening with no
+  // invitation woven in.
+  const nudge = isProfileEmpty(profile) ? ONBOARDING_NUDGE : '';
   const config: Record<string, { description: string; prompt: string; tools: string[] }> = {};
   for (const [name, def] of Object.entries(SUB_AGENTS)) {
+    const extras = [userProfileBlock, nudge].filter(Boolean).join('\n\n');
     config[name] = {
       description: def.description,
-      prompt: userProfileBlock ? `${def.prompt}\n\n${userProfileBlock}` : def.prompt,
+      prompt: extras ? `${def.prompt}\n\n${extras}` : def.prompt,
       // Namespace each tool to its MCP name so the sub-agent can actually call
       // the registered implementation (inherits the parent's mcpServers).
       tools: def.tools.map(nsTool),
