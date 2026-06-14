@@ -157,6 +157,11 @@ export interface PlaceResult {
   openNow: boolean | null
   lat: number
   lng: number
+  // Which live source produced this row, and a link to cite it. Optional so
+  // pre-Phase-2 callers and fixtures stay valid. Google sets source:'google',
+  // url:null; Yelp sets source:'yelp' with the business page URL.
+  source?: 'google' | 'yelp'
+  url?: string | null
 }
 
 function applyPlaceFilters(
@@ -227,6 +232,8 @@ export async function placesTextSearch(
       openNow: r.opening_hours?.open_now ?? null,
       lat: r.geometry?.location?.lat ?? 0,
       lng: r.geometry?.location?.lng ?? 0,
+      url: null,
+      source: 'google' as const,
     }))
     .filter((p) => p.name && p.lat !== 0 && p.lng !== 0)
   apiCache.set(cacheKey, places)
