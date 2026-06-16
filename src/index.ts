@@ -14,7 +14,7 @@
 // loads spectrum-ts on the legacy path). Unset/legacy → original
 // startIMessageAdapter() call, unchanged.
 //
-// Header last reviewed: 2026-06-11
+// Header last reviewed: 2026-06-15
 
 import express from 'express'
 import cors from 'cors'
@@ -48,6 +48,8 @@ import { createServiceRoleClient } from './memory/supabase-client.js'
 import { tryHandleUserCommand, setUserCommandRuntime } from './agent/user-command-router.js'
 import { draftSquadPost } from './services/squad-draft.js'
 import { checkRateLimit } from './adapters/rate-limiter.js'
+import { runCoordinatorOnce } from './jobs/squad-coordinator.js'
+import { buildCoordinatorDeps } from './services/squad-coordinator-deps.js'
 
 // ALL_TOOLS (imported above) registers all 23 tools as a side effect.
 
@@ -476,6 +478,28 @@ cron.schedule('0 6 * * *', () => {
 if (process.env.ONBOARDING_ENABLED !== 'false') {
   startPendingUsersCleanupCron(supabase)
   console.log('[pending-cleanup] cron scheduled (daily 03:00 LA, purge pending >14 days)')
+}
+
+// Squad Coordinator (Phase 4): after-join coordination. Off by default; reuses
+// the Spectrum proactive seam. A running-flag skips a tick if the previous is
+// still in flight (ticks are cheap but a slow DB shouldn't stack them).
+if (process.env.SQUAD_COORDINATION_ENABLED === 'true') {
+  const interval = process.env.SQUAD_COORDINATION_INTERVAL_CRON || '*/15 * * * *'
+  let running = false
+  cron.schedule(interval, async () => {
+    if (running) { console.log('[squad-coordinator] previous tick still running, skipping'); return }
+    running = true
+    const t0 = Date.now()
+    try {
+      await runCoordinatorOnce(buildCoordinatorDeps())
+      console.log(`[squad-coordinator] tick complete in ${Date.now() - t0}ms`)
+    } catch (err) {
+      console.error('[squad-coordinator] tick failed:', err)
+    } finally {
+      running = false
+    }
+  })
+  console.log(`[squad-coordinator] enabled (${interval})`)
 }
 
 // ==========================================
