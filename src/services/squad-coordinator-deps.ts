@@ -28,23 +28,47 @@ export function buildCoordinatorDeps(): CoordinatorDeps {
   return {
     // web-expressed interest: response='joined' pings with no member row + not yet brokered + post still open.
     selectWebInterest: async (): Promise<WebInterestRow[]> => {
-      const { data, error } = await supabase
+      const { data: pings, error: pErr } = await supabase
         .from('squad_pings')
-        .select('id, recipient_student_id, squad_posts_with_status!inner(category, location, status), ' +
-                'squad_members!left(student_id)')
+        .select('id, recipient_student_id, post_id')
         .eq('response', 'joined')
         .is('brokered_at', null)
-      if (error || !data) return []
-      const rows: WebInterestRow[] = []
-      for (const r of data as unknown as Array<{
-        id: string; recipient_student_id: string
-        squad_posts_with_status: { category: string | null; location: string | null; status: string } | null
-        squad_members: Array<{ student_id: string | null }>
+      if (pErr || !pings || pings.length === 0) return []
+      const candidates = pings as Array<{ id: string; recipient_student_id: string; post_id: string }>
+      const postIds = [...new Set(candidates.map((c) => c.post_id))]
+      // Query the base table and derive 'open' inline (the view's status formula): not cancelled,
+      // not completed, room left, and deadline null-or-future. completed_at/needs_refill don't exist
+      // on the squad_posts_with_status view, so the post-status lookup runs against squad_posts.
+      const nowMs = Date.now()
+      const { data: posts, error: poErr } = await supabase
+        .from('squad_posts')
+        .select('id, category, location, current_people, max_people, deadline, completed_at, cancelled_at')
+        .in('id', postIds)
+      if (poErr || !posts) return []
+      const openPost = new Map<string, { category: string | null; location: string | null }>()
+      for (const p of posts as Array<{
+        id: string; category: string | null; location: string | null
+        current_people: number; max_people: number; deadline: string | null
+        completed_at: string | null; cancelled_at: string | null
       }>) {
-        const post = r.squad_posts_with_status
-        if (!post || post.status !== 'open') continue
-        if ((r.squad_members ?? []).some((m) => m.student_id === r.recipient_student_id)) continue
-        rows.push({ ping_id: r.id, recipient_student_id: r.recipient_student_id, category: post.category ?? '活动', location: post.location })
+        const isOpen = !p.cancelled_at && !p.completed_at && p.current_people < p.max_people &&
+          (!p.deadline || new Date(p.deadline).getTime() > nowMs)
+        if (isOpen) openPost.set(p.id, { category: p.category, location: p.location })
+      }
+      if (openPost.size === 0) return []
+      const { data: members } = await supabase
+        .from('squad_members')
+        .select('post_id, student_id')
+        .in('post_id', [...openPost.keys()])
+      const memberSet = new Set(
+        (members ?? []).map((m: { post_id: string; student_id: string | null }) => `${m.post_id}|${m.student_id}`),
+      )
+      const rows: WebInterestRow[] = []
+      for (const c of candidates) {
+        const post = openPost.get(c.post_id)
+        if (!post) continue
+        if (memberSet.has(`${c.post_id}|${c.recipient_student_id}`)) continue
+        rows.push({ ping_id: c.id, recipient_student_id: c.recipient_student_id, category: post.category ?? '活动', location: post.location })
       }
       return rows
     },
@@ -52,44 +76,60 @@ export function buildCoordinatorDeps(): CoordinatorDeps {
     // RSVP reminder: open/full posts with a deadline in the window, not yet reminded, with >=1 member.
     selectReminders: async (): Promise<ReminderRow[]> => {
       const nowMs = Date.now()
-      const windowStart = new Date(nowMs).toISOString()
+      const nowIso = new Date(nowMs).toISOString()
       const windowEnd = new Date(nowMs + reminderWindowH * 3600_000).toISOString()
-      const { data, error } = await supabase
-        .from('squad_posts_with_status')
-        .select('id, poster_name, category, location, status, deadline, reminder_sent_at, ' +
-                'squad_members(student_id)')
+      // Query the base table: reminder_sent_at/completed_at/cancelled_at live there, not on the
+      // squad_posts_with_status view (which only projects display columns + a computed status).
+      // deadline in (now, windowEnd] => never 'expired'; with cancelled_at null the status the view
+      // would report is 'full' (current>=max) or 'open' — both qualify, so we don't need the view.
+      const { data: posts, error } = await supabase
+        .from('squad_posts')
+        .select('id, poster_name, category, location, deadline')
         .is('reminder_sent_at', null)
+        .is('completed_at', null)
+        .is('cancelled_at', null)
         .not('deadline', 'is', null)
-        .gt('deadline', windowStart)
+        .gt('deadline', nowIso)
         .lte('deadline', windowEnd)
-      if (error || !data) return []
+      if (error || !posts) return []
+      const open = posts as Array<{ id: string; poster_name: string | null; category: string | null; location: string | null }>
+      if (open.length === 0) return []
+      const { data: members } = await supabase
+        .from('squad_members')
+        .select('post_id, student_id')
+        .in('post_id', open.map((p) => p.id))
+      const byPost = new Map<string, string[]>()
+      for (const m of (members ?? []) as Array<{ post_id: string; student_id: string | null }>) {
+        if (!m.student_id) continue
+        const arr = byPost.get(m.post_id) ?? []
+        arr.push(m.student_id)
+        byPost.set(m.post_id, arr)
+      }
       const rows: ReminderRow[] = []
-      for (const p of data as unknown as Array<{
-        id: string; poster_name: string | null; category: string | null; location: string | null; status: string
-        squad_members: Array<{ student_id: string | null }>
-      }>) {
-        if (p.status !== 'open' && p.status !== 'full') continue
-        const members = (p.squad_members ?? []).map((m) => m.student_id).filter((s): s is string => !!s)
-        if (members.length === 0) continue
-        rows.push({ post_id: p.id, poster_name: p.poster_name ?? '学长', category: p.category ?? '活动', location: p.location, member_student_ids: members })
+      for (const p of open) {
+        const ids = byPost.get(p.id) ?? []
+        if (ids.length === 0) continue
+        rows.push({ post_id: p.id, poster_name: p.poster_name ?? '学长', category: p.category ?? '活动', location: p.location, member_student_ids: ids })
       }
       return rows
     },
 
     // refill: open posts flagged needs_refill with room and a future (or no) deadline.
+    // needs_refill/completed_at live on the base table, not the squad_posts_with_status view; the
+    // 'open' status is derived inline (not cancelled + room left + deadline null-or-future).
     selectRefills: async (): Promise<string[]> => {
       const { data, error } = await supabase
-        .from('squad_posts_with_status')
-        .select('id, status, current_people, max_people, deadline, needs_refill, completed_at, cancelled_at')
+        .from('squad_posts')
+        .select('id, current_people, max_people, deadline, needs_refill, completed_at, cancelled_at')
         .eq('needs_refill', true)
         .is('completed_at', null)
         .is('cancelled_at', null)
       if (error || !data) return []
       const now = Date.now()
       return (data as unknown as Array<{
-        id: string; status: string; current_people: number; max_people: number; deadline: string | null
+        id: string; current_people: number; max_people: number; deadline: string | null
       }>)
-        .filter((p) => p.status === 'open' && p.current_people < p.max_people && (!p.deadline || new Date(p.deadline).getTime() > now))
+        .filter((p) => p.current_people < p.max_people && (!p.deadline || new Date(p.deadline).getTime() > now))
         .map((p) => p.id)
     },
 
