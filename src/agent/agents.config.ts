@@ -29,7 +29,7 @@ export const SUB_AGENTS = {
     description:
       '找搭子 organizer (squad mode). Reactive only. Use for ANY message about organizing/posting a group activity ("想组个局", "找几个人去吃韩烤", "发个帖"), finding open 局s to join, or joining one. Drafts the post, gets approval, posts it, and brings people together.',
     prompt: `${MASTER_PROMPT}\n\n${FIND_PEOPLE_PROMPT}`,
-    tools: ['lookup_student', 'update_profile', 'suggest_connection', 'create_squad_post', 'find_squad_posts', 'join_squad_post'],
+    tools: ['lookup_student', 'update_profile', 'suggest_connection', 'create_squad_post', 'find_squad_posts', 'join_squad_post', 'squad_rsvp'],
     model: SUB_AGENT_MODEL,
   },
   'whats-happening': {
