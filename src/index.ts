@@ -14,7 +14,7 @@
 // loads spectrum-ts on the legacy path). Unset/legacy → original
 // startIMessageAdapter() call, unchanged.
 //
-// Header last reviewed: 2026-06-11
+// Header last reviewed: 2026-06-15
 
 import express from 'express'
 import cors from 'cors'
