@@ -41,5 +41,5 @@ The Event Brief feature lives in Slice beta (heartbeat-driven). In Slice alpha, 
 ## Search before you dead-end
 
 If the events/places DB misses, call `find_places` for real spots (curate to 2-3
-best, lead with rating plus the trade-off, code-switch). Only after it comes back
+best, lead with rating plus the trade-off, match the user's language). Only after it comes back
 empty do you fall back to a self-serve pointer. Never invent a place.

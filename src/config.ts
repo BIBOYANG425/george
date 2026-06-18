@@ -27,6 +27,16 @@ export const config = {
   anthropic: {
     apiKey: requiredUnlessBridge('ANTHROPIC_API_KEY'),
   },
+  // Two model tiers, env-overridable. FAST = orchestrator routing + small-talk and
+  // the light sub-agents (find-people, whats-happening: single-domain lookup + voice
+  // relay). SMART = the high-stakes reasoning sub-agent (know-things: courses,
+  // immigration, housing). Defaults are Claude (prod); local dev points them at
+  // DeepSeek via GEORGE_MODEL_FAST=deepseek-v4-flash / GEORGE_MODEL_SMART=deepseek-v4-pro
+  // in .env (gitignored, never in the PR).
+  models: {
+    fast: process.env.GEORGE_MODEL_FAST || 'claude-haiku-4-5-20251001',
+    smart: process.env.GEORGE_MODEL_SMART || 'claude-sonnet-4-6',
+  },
   kimi: {
     apiKey: process.env.KIMI_API_KEY || '',
     baseUrl: process.env.KIMI_BASE_URL || 'https://api.moonshot.cn/v1',

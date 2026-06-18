@@ -24,6 +24,9 @@ export async function callLightweightLLM(
     const response = await claude.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: options?.maxTokens || 500,
+      // Lightweight calls (classify, extract, capture) don't need extended
+      // thinking; disabling it drops ~7s/call on the DeepSeek-backed fast tier.
+      thinking: { type: 'disabled' },
       system: messages.find((m) => m.role === 'system')?.content,
       messages: messages
         .filter((m) => m.role !== 'system')
