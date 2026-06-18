@@ -221,6 +221,7 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
         })
       }
       let finalText = ''
+      let turnTelemetry: import('../agent/session-store.js').TurnTelemetry | undefined
       for await (const event of runOrchestrator({
         userId,
         channel: 'imessage',
@@ -232,9 +233,12 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
         const e = event as {
           type?: string
           result?: string
+          telemetry?: import('../agent/session-store.js').TurnTelemetry
           message?: { content?: Array<{ type?: string; text?: string }> }
         }
-        if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
+        if (e.type === 'telemetry') {
+          turnTelemetry = e.telemetry
+        } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
           finalText = e.result
         } else if (e.type === 'assistant' && e.message?.content && finalText === '') {
           const t = e.message.content
@@ -244,11 +248,12 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
           if (t) finalText = t
         }
       }
-      // Persist the assistant turn so it's part of the next turn's history.
+      // Persist the assistant turn (with per-turn telemetry) so the dashboard
+      // captures cost/tokens/model for the production iMessage path too.
       if (deps.sessionStore && finalText) {
         await deps.sessionStore.save(userId, {
           sessionId: userId,
-          messages: [{ role: 'assistant', content: finalText }],
+          messages: [{ role: 'assistant', content: finalText, telemetry: turnTelemetry }],
           systemContext: {},
         })
       }
