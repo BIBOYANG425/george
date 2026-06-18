@@ -18,7 +18,9 @@ import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import { createAdminDashboardRouter } from '../src/admin/router.js';
 
-const PORT = parseInt(process.env.DASHBOARD_PORT || '3009', 10);
+// Cloud platforms (Railway, Cloudflare Container, Fly) inject PORT; honor it
+// first, then DASHBOARD_PORT for local runs, else default 3009.
+const PORT = parseInt(process.env.PORT || process.env.DASHBOARD_PORT || '3009', 10);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY;
