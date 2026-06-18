@@ -6,3 +6,4 @@ data/ingest/
 
 # R session history junk
 .Rhistory
+data/user-controls.json
