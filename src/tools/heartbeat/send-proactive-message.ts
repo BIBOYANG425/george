@@ -4,6 +4,7 @@
 // NOT registered with Agent SDK — called manually by heartbeat handler.
 
 import { z } from 'zod';
+import { parseControlTokens, isNoReplyEnabled } from '../../adapters/split-response.js';
 
 const inputSchema = z.object({
   text: z.string().min(10).max(500),
@@ -38,16 +39,33 @@ export function createSendProactiveTool(opts: SendProactiveOptions) {
       if (opts.tickState.proactivesSent >= MAX_PROACTIVES_PER_TICK) {
         throw new Error('Proactive rate limit (1 per tick) already reached.');
       }
+      // The heartbeat inherits master.md, so when GEORGE_NOREPLY_ENABLED is on the
+      // model can emit {{NO_REPLY}} into a proactive. Strip the token ALWAYS (a
+      // literal marker must never reach a user) and, when the opt-out is enabled or
+      // stripping left nothing to say, decline the send (don't count it against the
+      // tick limit). The heartbeat already has heartbeat_ok for silence, so this is
+      // a defensive backstop for the reactive-style token leaking into this sink.
+      const { noReply, text: cleanText } = parseControlTokens(parsed.text);
+      if ((isNoReplyEnabled() && noReply) || cleanText.length === 0) {
+        opts.logAction({
+          tool: 'send_proactive_message',
+          suppressed: true,
+          reason: noReply ? 'no_reply' : 'empty_after_strip',
+        });
+        return {
+          content: [{ type: 'text' as const, text: 'Declined to send (NO_REPLY).' }],
+        };
+      }
       if (parsed.channel === 'imessage') {
-        await opts.sendImessage({ to: opts.userId, text: parsed.text });
+        await opts.sendImessage({ to: opts.userId, text: cleanText });
       } else {
         throw new Error('Web channel not yet implemented; use imessage.');
       }
       opts.tickState.proactivesSent += 1;
-      opts.logAction({ tool: 'send_proactive_message', channel: parsed.channel, length: parsed.text.length });
+      opts.logAction({ tool: 'send_proactive_message', channel: parsed.channel, length: cleanText.length });
       return {
         content: [
-          { type: 'text' as const, text: `Sent: "${parsed.text.slice(0, 80)}..."` },
+          { type: 'text' as const, text: `Sent: "${cleanText.slice(0, 80)}..."` },
         ],
       };
     },

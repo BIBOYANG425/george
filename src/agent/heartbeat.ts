@@ -9,6 +9,7 @@ import { createUpdateBlockTool } from '../tools/heartbeat/update-block.js';
 import { createSendProactiveTool } from '../tools/heartbeat/send-proactive-message.js';
 import { createAddFollowupTool } from '../tools/heartbeat/add-followup.js';
 import { createHeartbeatOkTool } from '../tools/heartbeat/heartbeat-ok.js';
+import { applyNoReplyGate } from './noreply-gate.js';
 
 export interface HeartbeatConfig {
   cadence: string;
@@ -60,9 +61,8 @@ const HEARTBEAT_PROMPT = fs.readFileSync(
   path.resolve(__dirname, '../../prompts/heartbeat.md'),
   'utf-8'
 );
-const MASTER_PROMPT = fs.readFileSync(
-  path.resolve(__dirname, '../../prompts/master.md'),
-  'utf-8'
+const MASTER_PROMPT = applyNoReplyGate(
+  fs.readFileSync(path.resolve(__dirname, '../../prompts/master.md'), 'utf-8')
 );
 
 const RECENT_MESSAGES_LIMIT = 10;

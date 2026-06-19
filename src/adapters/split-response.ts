@@ -12,7 +12,15 @@
  *    kept part so nothing is silently dropped.
  *  - Keep the source message order.
  *
- * Header last reviewed: 2026-04-18
+ * Also hosts parseControlTokens(): a tiny, pure parser for output-format control
+ * tokens George may emit. Today the only token is {{NO_REPLY}}, which lets the
+ * model decline to reply at all (pure acks, automated texts). Parsing is always
+ * safe to call — it only *detects* the token and strips it; whether a detected
+ * {{NO_REPLY}} actually suppresses the send is gated by GEORGE_NOREPLY_ENABLED at
+ * the call sites (default OFF). The token is always stripped from outgoing text
+ * so it can never reach a user even if a backend echoes it.
+ *
+ * Header last reviewed: 2026-06-18
  */
 
 // Hard cap on parts per reply. Above this, WeChat / iMessage starts looking
@@ -38,6 +46,52 @@ export function splitIntoMessages(response: string): string[] {
   const tail = parts.slice(MAX_PARTS - 1).join('\n')
   kept.push(tail)
   return kept
+}
+
+// Output-format control token: the model may emit {{NO_REPLY}} to decline to
+// reply (a pure ack, an automated/system text, or a conversation that has wound
+// down). Matched case-insensitively, tolerant of inner whitespace, anywhere in
+// the text. Kept here next to splitIntoMessages because both are the adapter-layer
+// translation of in-band control markers George writes into its reply.
+const NO_REPLY_TOKEN = /\{\{\s*NO_REPLY\s*\}\}/gi
+
+export interface ControlTokens {
+  // True if the reply carried a {{NO_REPLY}} token anywhere.
+  noReply: boolean
+  // The reply text with every control token removed and re-trimmed. When noReply
+  // is true this is usually empty, but a model may pad the token with stray
+  // words; callers that honor noReply ignore this, callers that don't still get
+  // clean, token-free text to send.
+  text: string
+}
+
+// Detect + strip output-format control tokens from a raw model reply. Pure: no
+// env reads, no side effects. Always safe to call on any reply — it never throws
+// and, when no token is present, returns the input trimmed with noReply:false.
+// The two jobs (does this reply opt out? / give me text with no stray markers)
+// are intentionally split so the env flag can gate suppression while stripping
+// stays unconditional (a stray token must never reach a user).
+export function parseControlTokens(response: string): ControlTokens {
+  if (!response) return { noReply: false, text: response ?? '' }
+  const noReply = NO_REPLY_TOKEN.test(response)
+  // Reset lastIndex: the regex is /g, so .test() above advanced it.
+  NO_REPLY_TOKEN.lastIndex = 0
+  const text = response.replace(NO_REPLY_TOKEN, '').trim()
+  return { noReply, text }
+}
+
+// Convenience for the send sinks that don't themselves decide suppression: strip
+// any control token out of outgoing text so it can never be shown to a user.
+// (Equivalent to parseControlTokens(text).text but reads clearer at call sites.)
+export function stripControlTokens(response: string): string {
+  return parseControlTokens(response).text
+}
+
+// True when the {{NO_REPLY}} opt-out is enabled. Default OFF: when the env var is
+// unset the parser still strips tokens, but a detected {{NO_REPLY}} does NOT
+// suppress the reply, so behavior is byte-for-byte unchanged from before.
+export function isNoReplyEnabled(): boolean {
+  return process.env.GEORGE_NOREPLY_ENABLED === 'true'
 }
 
 // Inter-message delay that feels like typing, not a flood. 600ms is long
