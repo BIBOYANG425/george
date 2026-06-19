@@ -10,6 +10,15 @@ import { createSendProactiveTool } from '../tools/heartbeat/send-proactive-messa
 import { createAddFollowupTool } from '../tools/heartbeat/add-followup.js';
 import { createHeartbeatOkTool } from '../tools/heartbeat/heartbeat-ok.js';
 import { applyNoReplyGate } from './noreply-gate.js';
+import {
+  extractOpenThreads,
+  parseRaisedThreads,
+  unraisedThreads,
+  renderGroundedProactiveNote,
+  raisedThreadLine,
+  isGroundedProactiveEnabled,
+  type OpenThread,
+} from './grounded-proactive.js';
 
 export interface HeartbeatConfig {
   cadence: string;
@@ -93,6 +102,20 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
 
     const systemPrompt = `${MASTER_PROMPT}\n\n${HEARTBEAT_PROMPT}`;
     const profileBlock = deps.profileStore.renderForPrompt(profile);
+
+    // P4 — grounded proactive (DEFAULT-OFF). When enabled, mine the already-loaded
+    // recent messages for a concrete open thread george can ground a proactive on,
+    // skipping any thread already raised (ledgered in george_notes). The rendered
+    // note is append-or-empty-string, so when the flag is off — or there is no
+    // fresh thread — the user prompt is byte-for-byte identical to before.
+    let groundableThreads: OpenThread[] = [];
+    let groundedNote = '';
+    if (isGroundedProactiveEnabled()) {
+      const raised = parseRaisedThreads(profile.george_notes);
+      groundableThreads = unraisedThreads(extractOpenThreads(messages), raised);
+      groundedNote = renderGroundedProactiveNote(groundableThreads);
+    }
+
     const userPrompt = [
       profileBlock,
       `# STANDING INSTRUCTIONS\n${instructions || '(none)'}`,
@@ -104,6 +127,7 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
           ? dueFollowups.map((f) => `- (${f.scheduled_for}) ${f.content}`).join('\n')
           : '(none)'
       }`,
+      ...(groundedNote ? [groundedNote] : []),
       `\nReview this user's state. Choose exactly ONE tool to call.`,
     ].join('\n\n');
 
@@ -145,8 +169,18 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
       }
       await tool.handler(call.input as any);
       if (call.name === 'update_block') outcome = 'block_update';
-      else if (call.name === 'send_proactive_message') outcome = 'proactive_send';
-      else if (call.name === 'add_followup') outcome = 'followup_scheduled';
+      else if (call.name === 'send_proactive_message') {
+        outcome = 'proactive_send';
+        // P4 — mark the grounded thread raised so it is not raised again next
+        // tick. appendToBlock dedupes, so this is a no-op if already ledgered.
+        // Only the top unraised thread is marked (one proactive grounds on one
+        // thread per tick). Guarded so it is inert when the flag is off.
+        if (isGroundedProactiveEnabled() && groundableThreads.length > 0) {
+          const raised = groundableThreads[0];
+          await deps.profileStore.appendToBlock(userId, 'george_notes', raisedThreadLine(raised.key));
+          logAction({ tool: 'mark_thread_raised', threadKey: raised.key });
+        }
+      } else if (call.name === 'add_followup') outcome = 'followup_scheduled';
       else outcome = 'ok';
     }
 
