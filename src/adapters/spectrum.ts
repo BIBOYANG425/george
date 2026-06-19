@@ -19,6 +19,11 @@ import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS, parseControlTokens, i
 import { log } from '../observability/logger.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
 import { captureFactsFromTurn } from '../memory/capture.js'
+import {
+  isRelationshipEvalEnabled,
+  shouldRunRelationshipEval,
+  runRelationshipEval,
+} from '../agent/evaluators/relationship.js'
 import { supabase } from '../db/client.js'
 import { extractCodeFromStartMessage, runHandshake } from '../onboarding/handshake.js'
 import { lookupByCode, linkImessageHandle, lookupByImessageHandle, markGreeted } from '../onboarding/pending-users.js'
@@ -282,6 +287,31 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
       // capture has to be wired here too (codex review P2).
       if (deps.profileStore && finalText) {
         void captureFactsFromTurn(deps.profileStore, userId, text, finalText)
+      }
+      // Fire-and-forget prose relationship-memory rewrite (no-op unless
+      // GEORGE_RELATIONSHIP_EVAL_ENABLED). Runs roughly every Nth user message on
+      // the SMART tier, off the recent history we just persisted. Same fire-and-
+      // forget shape as capture so it never slows or blocks the reply.
+      if (deps.profileStore && deps.sessionStore && finalText && isRelationshipEvalEnabled()) {
+        const store = deps.profileStore
+        const sessions = deps.sessionStore
+        void (async () => {
+          try {
+            // Cadence keys off the CUMULATIVE user-message count (not the recent
+            // window), so "every Nth message" keeps advancing past the 20-message
+            // history cap instead of plateauing and firing every turn.
+            const userMessageCount = await sessions.countUserMessages(userId)
+            if (!shouldRunRelationshipEval(userMessageCount)) return
+            const session = await sessions.load(userId)
+            const recentMessages = (session?.messages ?? []).filter(
+              (m): m is { role: 'user' | 'assistant'; content: string } =>
+                (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string',
+            )
+            await runRelationshipEval({ store, userId, recentMessages })
+          } catch (err) {
+            log('warn', 'relationship_eval_dispatch_failed', { error: (err as Error).message })
+          }
+        })()
       }
       log('info', 'spectrum_turn', {
         ms: Date.now() - turnStart,

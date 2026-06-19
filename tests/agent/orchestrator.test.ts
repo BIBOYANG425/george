@@ -1,6 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { runOrchestrator, buildOrchestratorPrompt, isProfileEmpty, buildAgentsConfig } from '../../src/agent/orchestrator.js';
 import type { Profile } from '../../src/memory/profile.js';
+import { upsertRelationshipNote } from '../../src/memory/profile.js';
 
 describe('buildOrchestratorPrompt', () => {
   it('concatenates master + orchestrator prompts', () => {
@@ -44,6 +45,47 @@ describe('orchestrator profile injection', () => {
     // The master prompt contains the phrase "USER PROFILE" in prose; the injected
     // block adds a markdown H1 "# USER PROFILE". Check that the H1 header is absent.
     expect(prompt).not.toMatch(/^# USER PROFILE$/m);
+  });
+});
+
+describe('relationship-note injection (P3, default-OFF flag)', () => {
+  const orig = process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED;
+  afterEach(() => {
+    if (orig === undefined) delete process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED;
+    else process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED = orig;
+  });
+
+  const noteText = 'they text terse and late-night, mostly CS coursework stress';
+  const profileWithNote = (): Profile => ({
+    identity: '', academic: '', interests: '', relationships: '', state: '',
+    george_notes: upsertRelationshipNote('keep this heartbeat scratch', noteText),
+  });
+
+  it('flag OFF: no # RELATIONSHIP NOTE section, and the raw sentinel/note are not leaked', () => {
+    delete process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED;
+    const prompt = buildOrchestratorPrompt(profileWithNote());
+    expect(prompt).not.toMatch(/^# RELATIONSHIP NOTE$/m);
+  });
+
+  it('flag ON: surfaces the note under its own header exactly once', () => {
+    process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED = 'true';
+    const prompt = buildOrchestratorPrompt(profileWithNote());
+    expect(prompt).toMatch(/^# RELATIONSHIP NOTE$/m);
+    expect(prompt).toContain(noteText);
+    // Shown once (in the dedicated section), not duplicated inside USER PROFILE.
+    expect(prompt.split(noteText).length - 1).toBe(1);
+    // The non-note george_notes content still renders in USER PROFILE.
+    expect(prompt).toContain('keep this heartbeat scratch');
+    // Sentinel markers never leak into the prompt.
+    expect(prompt).not.toContain('relationship_note:start');
+  });
+
+  it('flag ON but no note present: no # RELATIONSHIP NOTE section', () => {
+    process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED = 'true';
+    const profile: Profile = {
+      identity: '', academic: '', interests: '', relationships: '', state: '', george_notes: '',
+    };
+    expect(buildOrchestratorPrompt(profile)).not.toMatch(/^# RELATIONSHIP NOTE$/m);
   });
 });
 

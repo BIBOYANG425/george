@@ -47,6 +47,11 @@ export interface SessionStore {
   save(sessionId: string, session: Session): Promise<void>;
   list(): Promise<string[]>;
   delete(sessionId: string): Promise<void>;
+  // Cumulative count of user-role messages ever persisted for this session.
+  // Unlike load(), this is NOT capped at the recent window, so callers that key
+  // a cadence off "every Nth user message" (e.g. the relationship evaluator)
+  // get a value that keeps incrementing past the 20-message history limit.
+  countUserMessages(sessionId: string): Promise<number>;
 }
 
 export function createInMemorySessionStore(): SessionStore {
@@ -63,6 +68,9 @@ export function createInMemorySessionStore(): SessionStore {
     },
     async delete(sessionId) {
       store.delete(sessionId);
+    },
+    async countUserMessages(sessionId) {
+      return (store.get(sessionId)?.messages ?? []).filter((m) => m.role === 'user').length;
     },
   };
 }
@@ -163,6 +171,22 @@ export class SupabaseSessionStore implements SessionStore {
       this.supabase.from('messages').delete().eq('user_id', sessionId),
       this.supabase.from('student_memories').delete().eq('user_id', sessionId),
     ]);
+  }
+
+  async countUserMessages(sessionId: string): Promise<number> {
+    // head:true returns only the count, no rows — a cheap aggregate. Counts the
+    // full history (not the recent-window cap), so the relationship-eval cadence
+    // keeps advancing past 20 messages instead of plateauing and misfiring.
+    const { count, error } = await this.supabase
+      .from('messages')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', sessionId)
+      .eq('role', 'user');
+    if (error) {
+      console.error('[sessionStore] countUserMessages failed:', error.message);
+      return 0;
+    }
+    return count ?? 0;
   }
 }
 
