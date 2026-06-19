@@ -11,12 +11,16 @@
 // (e.g. HEARTBEAT_ENABLED=false), the runtime stays null and
 // tryHandleUserCommand falls through to the orchestrator.
 //
-// Header last reviewed: 2026-06-11
+// /delete me also clears the in-process World Info state (world-state.ts) so no
+// ephemeral per-user signal survives a deletion request.
+//
+// Header last reviewed: 2026-06-19
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { ProfileStore } from '../memory/profile.js'
 import type { KVCache } from '../memory/kv-cache.js'
 import { parseAndRouteUserCommand, executeUserCommand, UserCommandDeps } from '../tools/user-commands.js'
+import { getWorldStateStore } from './world-state.js'
 
 // The raw runtime handles index.ts injects after the memory/heartbeat layer
 // initializes. Kept minimal — the richer UserCommandDeps (with the DB closures)
@@ -62,6 +66,9 @@ function buildUserCommandDeps(): UserCommandDeps | null {
       ]);
       await cache.delete(`user:${userId}:profile`);
       await cache.delete(`user:${userId}:instructions`);
+      // Drop the ephemeral in-process World Info state too — a deletion request
+      // must leave no per-user signal behind, even the transient kind.
+      getWorldStateStore().clear(userId);
     },
     sendImessage,
     async setDeleteConfirmPending(userId: string, pending: boolean) {
