@@ -26,6 +26,7 @@ import { renderMoodBlock } from './calendar-mood.js';
 import { extractRelationshipNote, upsertRelationshipNote } from '../memory/profile.js';
 import { isRelationshipEvalEnabled } from './evaluators/relationship.js';
 import { stripRaisedThreadLines } from './grounded-proactive.js';
+import { renderActivityBlock } from './activity-state.js';
 import { fastReply } from './fast-path.js';
 import { checkUsageAllowed, resolveModelForUser } from '../admin/user-controls.js';
 
@@ -57,6 +58,11 @@ export interface RunOrchestratorArgs {
   // Aborts the in-flight turn (e.g. when the user fires a rapid follow-up that
   // supersedes this one). Passed straight to the SDK query().
   abortController?: AbortController;
+  // Optional per-turn system note (e.g. "it's been ~9h since your last reply"),
+  // produced by the transport adapter when there was a long gap. Injected into
+  // the system prompt only — never persisted as the user turn. '' / undefined
+  // when there's nothing to add (default-off behavior unchanged).
+  delayContext?: string;
 }
 
 // The 6 memory blocks rendered as a system-prompt section. Empty string when
@@ -158,12 +164,19 @@ function buildStudentIdBlock(studentId?: string | null): string {
   ].join('\n');
 }
 
-export function buildOrchestratorPrompt(profile?: Profile | null, studentId?: string | null): string {
+export function buildOrchestratorPrompt(profile?: Profile | null, studentId?: string | null, delayContext?: string): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
   // Calendar-mood overlay (master.md "Calendar mood overlay"): inject the current
   // academic-calendar tone so finals/orientation/etc. actually changes behavior.
   const moodBlock = renderMoodBlock();
   if (moodBlock) parts.push(moodBlock);
+  // Activity-state overlay (time-of-day sibling of the mood): '' unless the
+  // GEORGE_ACTIVITY_STATE_ENABLED flag is on AND the hour shifts tone.
+  const activityBlock = renderActivityBlock();
+  if (activityBlock) parts.push(activityBlock);
+  // Delay-context (long-gap note from the transport adapter): already self-gated
+  // upstream — only non-empty when the flag is on and the gap was long.
+  if (delayContext) parts.push(delayContext);
   const userProfileBlock = buildUserProfileBlock(profile);
   if (userProfileBlock) parts.push(userProfileBlock);
   const relationshipNoteBlock = buildRelationshipNoteBlock(profile);
@@ -212,10 +225,17 @@ export function buildSingleAgentPrompt(
   profile?: Profile | null,
   studentId?: string | null,
   webAllowed: boolean = false,
+  delayContext?: string,
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
   const moodBlock = renderMoodBlock();
   if (moodBlock) parts.push(moodBlock);
+  // Activity-state overlay (see buildOrchestratorPrompt): self-gated to '' when
+  // GEORGE_ACTIVITY_STATE_ENABLED is off, so this is a no-op by default.
+  const activityBlock = renderActivityBlock();
+  if (activityBlock) parts.push(activityBlock);
+  // Delay-context (long-gap note): self-gated upstream; '' by default.
+  if (delayContext) parts.push(delayContext);
   const userProfileBlock = buildUserProfileBlock(profile);
   if (userProfileBlock) parts.push(userProfileBlock);
   const relationshipNoteBlock = buildRelationshipNoteBlock(profile);
@@ -256,6 +276,7 @@ export function buildAgentsConfig(
   profile?: Profile | null,
   studentId?: string | null,
   webAllowed: boolean = false,
+  delayContext?: string,
 ): Record<string, { description: string; prompt: string; tools: string[]; model?: string }> {
   // Inject the user profile into each sub-agent so it doesn't have to be
   // re-stated through the dispatch prompt (it often wasn't). Now know-things
@@ -270,15 +291,20 @@ export function buildAgentsConfig(
   // orchestrator to relay it through the dispatch prompt is the loop's softest
   // seam. With it in-context the sub-agent passes the exact uuid without a relay.
   const studentIdBlock = buildStudentIdBlock(studentId);
-  // Sub-agents craft the reply, so they need the calendar mood too.
+  // Sub-agents craft the reply, so they need the same per-turn overlays the
+  // single-agent / orchestrator prompts get: calendar mood, the activity-state
+  // tone (self-gated to '' unless GEORGE_ACTIVITY_STATE_ENABLED), and the long-gap
+  // delay-context note. Without these the legacy multi-agent path silently dropped
+  // the activity/delay overlays the other two paths inject.
   const moodBlock = renderMoodBlock();
+  const activityBlock = renderActivityBlock();
   const config: Record<string, { description: string; prompt: string; tools: string[]; model?: string }> = {};
   for (const [name, def] of Object.entries(SUB_AGENTS)) {
     // WebSearch (an SDK built-in, un-namespaced) goes to the two info agents
     // only, and only when the user is under their daily web-search cap.
     const wantsWeb = name === 'whats-happening' || name === 'know-things';
     const webBlock = wantsWeb && webAllowed ? webSearchGuidance() : '';
-    const extras = [moodBlock, userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
+    const extras = [moodBlock, activityBlock, delayContext, userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
     config[name] = {
       description: def.description,
       prompt: extras ? `${def.prompt}\n\n${extras}` : def.prompt,
@@ -415,8 +441,8 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // Web search is rationed per student/day; when over cap, it's omitted from the
   // turn's tool set and the guidance block is dropped (find_places stays free).
   const webAllowed = !isWebSearchOverCap(studentId);
-  const systemPrompt = buildOrchestratorPrompt(profile, studentId);
-  const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed);
+  const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext);
+  const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed, args.delayContext);
   const orchestratorTools = buildOrchestratorToolNames();
 
   // historyPrefix was loaded above (shared with the fast path). The SDK's own
@@ -456,7 +482,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // george runs only with the tools and prompt we set here.
   const queryOptions = singleAgent
     ? {
-        systemPrompt: buildSingleAgentPrompt(profile, studentId, webAllowed),
+        systemPrompt: buildSingleAgentPrompt(profile, studentId, webAllowed, args.delayContext),
         model: resolvedModel,
         // Disable extended thinking on the agent loop — it adds ~7s PER tool-call
         // turn (DeepSeek-v4 defaults it on). Tools provide the grounding; the

@@ -1,5 +1,6 @@
 // src/jobs/heartbeat-scheduler.ts
 import cron from 'node-cron';
+import { tzHourMinute } from '../agent/la-time.js';
 
 export interface ConfigRow {
   user_id: string;
@@ -19,17 +20,10 @@ function parseCadenceHours(cadence: string): number {
   return m ? parseInt(m[1], 10) : 12;
 }
 
+// Per-user timezone (not always LA), so pass the row's timezone through to the
+// shared formatter rather than defaulting to LA.
 function currentLocalTime(now: Date, timezone: string): { hours: number; minutes: number } {
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    hour12: false,
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-  const parts = formatter.formatToParts(now);
-  const hours = parseInt(parts.find((p) => p.type === 'hour')!.value, 10) % 24;
-  const minutes = parseInt(parts.find((p) => p.type === 'minute')!.value, 10);
-  return { hours, minutes };
+  return tzHourMinute(now, timezone);
 }
 
 function isWithinActiveHours(now: Date, row: ConfigRow): boolean {

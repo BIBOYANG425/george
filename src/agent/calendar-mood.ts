@@ -9,21 +9,17 @@
 // Windows are approximate USC academic-calendar ranges, kept as an easy-to-edit
 // table (month*100 + day). Tune the dates per the official USC calendar each year.
 
+import { tzMonthDay } from './la-time.js';
+
 export interface CalendarMood {
   phase: 'finals' | 'orientation' | 'midterms' | 'break';
   directive: string;
 }
 
 // {month, day} in America/Los_Angeles for the given instant (USC is in LA).
+// Thin wrapper over the shared la-time helper so this module reads the same way.
 function laMonthDay(now: Date): { month: number; day: number } {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Los_Angeles',
-    month: 'numeric',
-    day: 'numeric',
-  }).formatToParts(now);
-  const month = Number(parts.find((p) => p.type === 'month')?.value ?? '0');
-  const day = Number(parts.find((p) => p.type === 'day')?.value ?? '0');
-  return { month, day };
+  return tzMonthDay(now);
 }
 
 // Returns the current mood, or null for a normal period (no overlay injected).
