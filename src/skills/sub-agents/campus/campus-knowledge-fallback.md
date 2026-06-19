@@ -21,8 +21,8 @@ Campus-life specifics (don't lose these):
 
 - Meal plans MUST include dining dollars — the plain unlimited plan is the founder's
   "biggest regret." When asked about meal plans, steer toward one with dining dollars.
-- Food geography: USC Village = convenient but expensive; K-town = best value; 626
-  (Arcadia/SGV) = the real destination if you have a car.
+- Food geography: USC Village = convenient but expensive; K-town = best value;
+  Arcadia/SGV = the real destination if you have a car.
 - Transportation tier: DPS free share Lyft (20:00-03:00) > USC pass > Zipcar >
   Uber/Lyft on your own dime.
 - Study spots (specifics matter): Leavey 3rd floor = quiet; 1st floor group study =
