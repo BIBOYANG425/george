@@ -9,6 +9,12 @@ import path from 'node:path'
 import type { SpectrumClient, ReplyHandle } from './spectrum-client.js'
 import type { SpectrumCredentials } from './spectrum-client.js'
 import { createSpectrumClient } from './spectrum-client.js'
+import {
+  recordSpectrumConnect,
+  recordSpectrumInbound,
+  recordSpectrumError,
+  recordSpectrumReconnecting,
+} from './spectrum-stats.js'
 import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS } from './split-response.js'
 import { log } from '../observability/logger.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
@@ -109,6 +115,7 @@ export async function runSpectrumLoop(
   }
 
   for await (const [reply, message] of client.messages()) {
+    recordSpectrumInbound()
     if (message.messageId) {
       if (seen.has(message.messageId)) continue
       seen.add(message.messageId)
@@ -306,11 +313,13 @@ export async function startSpectrumAdapter(
       activeSpectrumClient = client
       backoffMs = 1_000 // reset after a successful connect
       log('info', 'spectrum_connected', {})
+      recordSpectrumConnect()
       await runSpectrumLoop(client, handlers)
       // runSpectrumLoop returning means the stream ended (not an error).
       log('warn', 'spectrum_stream_ended', {})
     } catch (err) {
       log('error', 'spectrum_stream_error', { error: (err as Error).message })
+      recordSpectrumError((err as Error).message)
     } finally {
       if (activeSpectrumClient) {
         await activeSpectrumClient.close().catch(() => {})
@@ -321,6 +330,7 @@ export async function startSpectrumAdapter(
     await new Promise((r) => setTimeout(r, backoffMs))
     backoffMs = Math.min(backoffMs * 2, 30_000)
     log('warn', 'spectrum_reconnecting', { backoffMs })
+    recordSpectrumReconnecting()
   }
   log('info', 'spectrum_adapter_stopped', {})
 }
