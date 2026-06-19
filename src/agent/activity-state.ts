@@ -110,7 +110,8 @@ const DELAY_CONTEXT_MIN_MS = 6 * 60 * 60 * 1000; // 6h
 //
 // Returns '' when the flag is off, the gap is short, or the gap is unknown — so
 // the caller can prepend unconditionally and the default is byte-for-byte
-// unchanged. `now` defaults to the activity state at call time.
+// unchanged. `now` defaults to the current time and is used only to pick a
+// plausible reason for the gap (asleep / late-night / busy).
 export function renderDelayContext(gapMs: number, now: Date = new Date()): string {
   if (!flagOn()) return '';
   if (!Number.isFinite(gapMs) || gapMs < DELAY_CONTEXT_MIN_MS) return '';

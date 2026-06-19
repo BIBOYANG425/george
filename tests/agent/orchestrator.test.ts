@@ -166,6 +166,33 @@ describe('buildAgentsConfig — student_id reaches the squad sub-agent', () => {
   });
 })
 
+describe('buildAgentsConfig — activity-state + delay-context reach sub-agents (P2)', () => {
+  const original = process.env.GEORGE_ACTIVITY_STATE_ENABLED;
+  afterEach(() => {
+    if (original === undefined) delete process.env.GEORGE_ACTIVITY_STATE_ENABLED;
+    else process.env.GEORGE_ACTIVITY_STATE_ENABLED = original;
+  });
+
+  it('does NOT inject the activity block into sub-agents when the flag is off', () => {
+    delete process.env.GEORGE_ACTIVITY_STATE_ENABLED;
+    const cfg = buildAgentsConfig(null, null);
+    expect(cfg['know-things'].prompt).not.toMatch(/# RIGHT NOW \(your own state\)/);
+  });
+
+  it('injects the per-turn delay-context note into every sub-agent when provided', () => {
+    const delay = '# GAP SINCE YOUR LAST REPLY\nIt has been roughly 9h since you last replied.';
+    const cfg = buildAgentsConfig(null, null, false, delay);
+    for (const name of ['find-people', 'whats-happening', 'know-things']) {
+      expect(cfg[name].prompt).toContain('# GAP SINCE YOUR LAST REPLY');
+    }
+  });
+
+  it('omits the delay-context note when none is passed', () => {
+    const cfg = buildAgentsConfig(null, null);
+    expect(cfg['know-things'].prompt).not.toMatch(/# GAP SINCE YOUR LAST REPLY/);
+  });
+})
+
 describe('web search wiring (search Phase 1)', () => {
   it('gives whats-happening + know-things WebSearch + find_places when allowed; find-people gets neither', () => {
     const cfg = buildAgentsConfig(null, null, true);

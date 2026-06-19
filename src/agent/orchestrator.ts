@@ -276,6 +276,7 @@ export function buildAgentsConfig(
   profile?: Profile | null,
   studentId?: string | null,
   webAllowed: boolean = false,
+  delayContext?: string,
 ): Record<string, { description: string; prompt: string; tools: string[]; model?: string }> {
   // Inject the user profile into each sub-agent so it doesn't have to be
   // re-stated through the dispatch prompt (it often wasn't). Now know-things
@@ -290,15 +291,20 @@ export function buildAgentsConfig(
   // orchestrator to relay it through the dispatch prompt is the loop's softest
   // seam. With it in-context the sub-agent passes the exact uuid without a relay.
   const studentIdBlock = buildStudentIdBlock(studentId);
-  // Sub-agents craft the reply, so they need the calendar mood too.
+  // Sub-agents craft the reply, so they need the same per-turn overlays the
+  // single-agent / orchestrator prompts get: calendar mood, the activity-state
+  // tone (self-gated to '' unless GEORGE_ACTIVITY_STATE_ENABLED), and the long-gap
+  // delay-context note. Without these the legacy multi-agent path silently dropped
+  // the activity/delay overlays the other two paths inject.
   const moodBlock = renderMoodBlock();
+  const activityBlock = renderActivityBlock();
   const config: Record<string, { description: string; prompt: string; tools: string[]; model?: string }> = {};
   for (const [name, def] of Object.entries(SUB_AGENTS)) {
     // WebSearch (an SDK built-in, un-namespaced) goes to the two info agents
     // only, and only when the user is under their daily web-search cap.
     const wantsWeb = name === 'whats-happening' || name === 'know-things';
     const webBlock = wantsWeb && webAllowed ? webSearchGuidance() : '';
-    const extras = [moodBlock, userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
+    const extras = [moodBlock, activityBlock, delayContext, userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
     config[name] = {
       description: def.description,
       prompt: extras ? `${def.prompt}\n\n${extras}` : def.prompt,
@@ -436,7 +442,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // turn's tool set and the guidance block is dropped (find_places stays free).
   const webAllowed = !isWebSearchOverCap(studentId);
   const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext);
-  const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed);
+  const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed, args.delayContext);
   const orchestratorTools = buildOrchestratorToolNames();
 
   // historyPrefix was loaded above (shared with the fast path). The SDK's own
