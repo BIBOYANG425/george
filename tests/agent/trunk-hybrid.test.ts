@@ -261,7 +261,7 @@ describe('must-fix 2 — trunk routing prompt does NOT carry the 3-way orchestra
   it('does NOT inline the find-people or whats-happening specialization prompts', () => {
     const prompt = buildTrunkPrompt(null, null, false);
     // Those specializations stay behind dispatched sub-agents.
-    expect(prompt).not.toContain('# Find People specialization');
+    expect(prompt).not.toContain('# 找搭子 concierge (find-people specialization)');
     expect(prompt).not.toContain("# What's Happening specialization");
   });
 });
