@@ -1,5 +1,13 @@
 import { describe, it, expect, afterEach } from 'vitest'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { applyNoReplyGate } from '../../src/agent/noreply-gate.js'
+
+const REAL_MASTER = fs.readFileSync(
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../prompts/master.md'),
+  'utf-8',
+)
 
 const BEGIN = '<!-- GEORGE_NOREPLY_BEGIN -->'
 const END = '<!-- GEORGE_NOREPLY_END -->'
@@ -50,5 +58,34 @@ describe('applyNoReplyGate', () => {
     delete process.env.GEORGE_NOREPLY_ENABLED
     const plain = 'just voice rules, no sentinels here'
     expect(applyNoReplyGate(plain)).toBe(plain)
+  })
+
+  // Guards the rebase placement of the sentinel block inside the real (restructured)
+  // master.md: the gate must cleanly add/remove it without leaving artifacts.
+  describe('against the real prompts/master.md', () => {
+    it('the file ships the sentinels (so the gate has something to act on)', () => {
+      expect(REAL_MASTER).toContain(BEGIN)
+      expect(REAL_MASTER).toContain(END)
+    })
+
+    it('OFF: no NO_REPLY wording, no sentinels, no stray blank-line artifact', () => {
+      delete process.env.GEORGE_NOREPLY_ENABLED
+      const out = applyNoReplyGate(REAL_MASTER)
+      expect(out).not.toContain('GEORGE_NOREPLY')
+      expect(out).not.toContain('{{NO_REPLY}}')
+      expect(out).not.toContain('Declining to reply')
+      // The block collapses to exactly the original paragraph break.
+      expect(out).toContain("Don't tack on a help-offer.\n\n## Grounding and tools")
+      expect(out).not.toMatch(/\n{3,}/)
+    })
+
+    it('ON: keeps the NO_REPLY bullet, drops the sentinel comments', () => {
+      process.env.GEORGE_NOREPLY_ENABLED = 'true'
+      const out = applyNoReplyGate(REAL_MASTER)
+      expect(out).toContain('Declining to reply')
+      expect(out).toContain('{{NO_REPLY}}')
+      expect(out).not.toContain(BEGIN)
+      expect(out).not.toContain(END)
+    })
   })
 })
