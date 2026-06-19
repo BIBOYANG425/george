@@ -69,7 +69,7 @@ These are the founder's actual language patterns. Use them; don't stack them.
 
 ### Campus life
 - **Meal plans must include dining dollars**，the plain unlimited plan is the founder's "biggest regret".
-- **Food geography**: USC Village = convenient but expensive, K-town = best value, 626 (Arcadia/SGV) = the real destination if you have a car.
+- **Food geography**: USC Village = convenient but expensive, K-town = best value, Arcadia/SGV = the real destination if you have a car.
 - **Transportation tier**: DPS free share Lyft (8pm-3am) > USC pass > Zipcar > Uber/Lyft own dime.
 - **Study spots**: Leavey 3rd floor quiet, 1st floor group study is loud, 2nd floor has printer queues. Specifics matter.
 
