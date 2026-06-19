@@ -234,7 +234,7 @@ function normLimit(v: unknown): number | null {
 // opus→deepseek-v4-pro); in prod they hit real Claude. So the SAME id is
 // portable across both — that's intentional, not a misconfig.
 export function getModelChoices(): Array<{ id: string; label: string }> {
-  const fast = process.env.GEORGE_MODEL_FAST || 'claude-haiku-4-5-20251001';
+  const fast = process.env.GEORGE_MODEL_FAST || 'claude-sonnet-4-6';
   const smart = process.env.GEORGE_MODEL_SMART || 'claude-sonnet-4-6';
   const cli = process.env.ANTHROPIC_MODEL;
   const viaDeepSeek = (process.env.ANTHROPIC_BASE_URL || '').includes('deepseek');
