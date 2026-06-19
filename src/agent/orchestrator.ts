@@ -15,12 +15,13 @@
 import { query, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS } from './agents.config.js';
 import { ALL_TOOLS } from '../tools/index.js';
-import type { SessionStore } from './session-store.js';
+import type { SessionStore, TurnTelemetry } from './session-store.js';
 import type { Profile, ProfileStore } from '../memory/profile.js';
 import { resolveStudentId } from '../db/students.js';
 import { log } from '../observability/logger.js';
 import { isWebSearchOverCap, recordWebSearchUse } from '../services/web-search-budget.js';
 import { trustedDomains } from '../services/web-search-config.js';
+import { checkUsageAllowed, resolveModelForUser } from '../admin/user-controls.js';
 
 // Register george's 23 tools as an in-process SDK MCP server so the model can
 // actually CALL them. Without this, the orchestrator/sub-agents only had tool
@@ -230,7 +231,7 @@ async function buildHistoryPrefix(sessionStore: SessionStore | undefined, userId
   return `<conversation_history>\n${historyLines}\n</conversation_history>\n\n`;
 }
 
-export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerator<{ type: string; text?: string }> {
+export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerator<{ type: string; text?: string; result?: string; telemetry?: TurnTelemetry }> {
   if (args.mockMode) {
     // For tests: return a synthetic response without calling the real LLM.
     if (args.text.toLowerCase().match(/doctor|sick|medical/)) {
@@ -239,6 +240,23 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     }
     yield { type: 'text', text: `[mock] received: ${args.text}` };
     return;
+  }
+
+  // ── Admin usage gate (per-user controls, set from the dashboard) ──
+  // Hard-block or daily-limit a user BEFORE any LLM cost. checkUsageAllowed
+  // always supplies an in-voice (or admin-custom) message so a block/limit is
+  // never silent. Fail-open: a control-store error must never block a real
+  // conversation.
+  try {
+    const gate = await checkUsageAllowed(args.userId);
+    if (!gate.allowed) {
+      log('info', 'usage_gate_blocked', { userId: args.userId, reason: gate.reason });
+      yield { type: 'result', result: gate.message || '学长这边暂时没法回你消息了🥲' };
+      yield { type: 'telemetry', telemetry: { channel: args.channel, outcome: gate.reason === 'limit' ? 'limit_blocked' : 'blocked', isError: false, tools: [] } };
+      return;
+    }
+  } catch (err) {
+    log('warn', 'usage_gate_error', { error: (err as Error).message });
   }
 
   // Load user profile early so it can be injected into the system prompt.
@@ -275,10 +293,23 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   const historyPrefix = await buildHistoryPrefix(args.sessionStore, args.userId);
   const promptWithHistory = `${historyPrefix}${args.text}`;
 
+  // Per-user model control (set from the admin dashboard). Empty when the user
+  // has no valid override → we leave `model` unset so the SDK default applies
+  // (main's behavior unchanged).
+  const resolvedModel = resolveModelForUser(args.userId, '');
+
+  // Per-turn telemetry accumulator. Filled from the SDK stream (sub-agent
+  // dispatch + tool_use names) and the final `result` message (tokens, cost,
+  // model, duration). Yielded as a final { type: 'telemetry' } event so callers
+  // can attach it to the assistant message they persist. Best-effort only.
+  const turnTools = new Set<string>();
+  const telemetry: TurnTelemetry = { channel: args.channel, tools: [], outcome: 'success' };
+
   for await (const message of query({
     prompt: promptWithHistory,
     options: {
       systemPrompt,
+      ...(resolvedModel ? { model: resolvedModel } : {}),
       // Register george's tools so the model can actually invoke them. Keyed
       // 'george' to match the mcp__george__* names in the allowlists above.
       mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
@@ -312,10 +343,55 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
       type?: string;
       usage?: { server_tool_use?: { web_search_requests?: number } };
     };
+    // Accumulate routing/tool telemetry from every assistant tool_use block.
+    if (m.type === 'assistant') {
+      const content =
+        (message as { message?: { content?: Array<{ type?: string; name?: string; input?: any }> } }).message
+          ?.content ?? [];
+      for (const c of content) {
+        if (c.type === 'tool_use') {
+          const name = c.name ?? '';
+          if (name === 'Task' || name === 'Agent') {
+            const sub = c.input?.subagent_type ?? c.input?.subagentType;
+            if (sub) telemetry.subAgent = String(sub);
+          } else if (name) {
+            turnTools.add(name.replace(/^mcp__[^_]+__/, ''));
+          }
+        }
+      }
+    }
     if (m.type === 'result') {
       const n = m.usage?.server_tool_use?.web_search_requests ?? 0;
       if (n > 0) recordWebSearchUse(studentId, n);
+      // Harvest the cost/token/model telemetry the SDK hands us (previously
+      // discarded). Works for both success and error result subtypes.
+      const r = message as {
+        subtype?: string;
+        is_error?: boolean;
+        duration_ms?: number;
+        total_cost_usd?: number;
+        usage?: { input_tokens?: number; output_tokens?: number };
+        modelUsage?: Record<string, unknown>;
+      };
+      const inTok = r.usage?.input_tokens;
+      const outTok = r.usage?.output_tokens;
+      telemetry.tokensIn = inTok;
+      telemetry.tokensOut = outTok;
+      if (typeof inTok === 'number' || typeof outTok === 'number') {
+        telemetry.tokensTotal = (inTok ?? 0) + (outTok ?? 0);
+      }
+      telemetry.costUsd = r.total_cost_usd;
+      telemetry.durationMs = r.duration_ms;
+      telemetry.isError = r.is_error ?? false;
+      if (r.subtype) telemetry.outcome = r.subtype;
+      const models = Object.keys(r.modelUsage ?? {});
+      if (models.length) telemetry.model = models.join(',');
+      telemetry.perModel = (r.modelUsage as Record<string, unknown>) ?? undefined;
     }
     yield message as { type: string; text?: string };
   }
+
+  // Final telemetry event for the caller to attach to the persisted assistant turn.
+  telemetry.tools = Array.from(turnTools);
+  yield { type: 'telemetry', telemetry };
 }

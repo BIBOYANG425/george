@@ -33,6 +33,7 @@ import { loadAllSkills, getRegistryStats } from './skills/index.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
 import { supabase } from './db/client.js'
+import { createAdminDashboardRouter } from './admin/router.js'
 import { extractCodeFromStartMessage, runHandshake } from './onboarding/handshake.js'
 import { toPublicAssetUrls } from './onboarding/showcase.js'
 import { lookupByCode, linkImessageHandle } from './onboarding/pending-users.js'
@@ -134,6 +135,17 @@ app.get('/stats', adminAuth, async (_req, res) => {
 
 app.use(createWeChatRouter())
 
+// Admin usage dashboard: /admin/dashboard (static SPA) + /admin/api/* (gated by
+// ADMIN_TOKEN). OFF by default — this Express app is exposed to the public
+// internet via the Cloudflare tunnel (it serves /chat), so mounting the admin
+// surface here would make it publicly reachable, gated only by a token already
+// distributed to bia-roommate's Vercel relay. Opt in with ADMIN_DASHBOARD_ENABLED=true
+// for trusted/local hosts; otherwise view it via the standalone `npm run dashboard`.
+if (process.env.ADMIN_DASHBOARD_ENABLED === 'true') {
+  app.use(createAdminDashboardRouter(supabase, config.adminToken))
+  console.log('[admin] dashboard mounted at /admin/dashboard (ADMIN_DASHBOARD_ENABLED=true)')
+}
+
 // Dev test console endpoint — runs the full agent team end-to-end.
 // Gated by admin token so it isn't open to the public internet.
 app.post('/chat', adminAuth, async (req, res) => {
@@ -163,13 +175,17 @@ app.post('/chat', adminAuth, async (req, res) => {
     })
 
     let response = ''
+    let turnTelemetry: import('./agent/session-store.js').TurnTelemetry | undefined
     for await (const event of runOrchestrator({ userId, channel, text, sessionStore, profileStore: _profileStore ?? undefined })) {
       const e = event as {
         type?: string
         result?: string
+        telemetry?: import('./agent/session-store.js').TurnTelemetry
         message?: { content?: Array<{ type?: string; text?: string }> }
       }
-      if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
+      if (e.type === 'telemetry') {
+        turnTelemetry = e.telemetry
+      } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
         response = e.result
       } else if (e.type === 'assistant' && e.message?.content && response === '') {
         const text = e.message.content
@@ -180,10 +196,10 @@ app.post('/chat', adminAuth, async (req, res) => {
       }
     }
 
-    // Save assistant turn.
+    // Save assistant turn (with per-turn telemetry enrichment when available).
     await sessionStore.save(userId, {
       sessionId: userId,
-      messages: [{ role: 'assistant', content: response }],
+      messages: [{ role: 'assistant', content: response, telemetry: turnTelemetry }],
       systemContext: {},
     })
 
@@ -344,13 +360,17 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
       })
 
       let reply = ''
+      let turnTelemetry: import('./agent/session-store.js').TurnTelemetry | undefined
       for await (const event of runOrchestrator({ userId, channel: 'imessage', text, sessionStore, profileStore: _profileStore ?? undefined })) {
         const e = event as {
           type?: string
           result?: string
+          telemetry?: import('./agent/session-store.js').TurnTelemetry
           message?: { content?: Array<{ type?: string; text?: string }> }
         }
-        if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
+        if (e.type === 'telemetry') {
+          turnTelemetry = e.telemetry
+        } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
           reply = e.result
         } else if (e.type === 'assistant' && e.message?.content && reply === '') {
           const text = e.message.content
@@ -363,10 +383,10 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
 
       if (!reply) return // filtered as automated-message noise
 
-      // Save assistant turn.
+      // Save assistant turn (with per-turn telemetry enrichment when available).
       await sessionStore.save(userId, {
         sessionId: userId,
-        messages: [{ role: 'assistant', content: reply }],
+        messages: [{ role: 'assistant', content: reply, telemetry: turnTelemetry }],
         systemContext: {},
       })
 

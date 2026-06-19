@@ -6,6 +6,34 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  // Optional per-turn telemetry, attached to assistant turns by the orchestrator
+  // callers. Persisted into the messages table's existing (previously-unused)
+  // columns so the admin dashboard can show cost/model/routing. All optional and
+  // best-effort — never required for a turn to save.
+  telemetry?: TurnTelemetry;
+}
+
+// Captured from the SDK result message at the end of a turn. Written onto the
+// assistant `messages` row: `agent` = routed sub-agent, `tokens_used` = total
+// tokens, and the richer fields (model, cost, tools, per-model split) ride along
+// in the `tool_calls` jsonb column (which the live path never otherwise uses).
+export interface TurnTelemetry {
+  // NOTE: never written to the `platform` column — that column still carries a
+  // CHECK (platform in ('wechat','imessage')) from migration 001, so an
+  // out-of-enum value ('web'/'cron') would fail the insert and drop the row.
+  // Channel rides in the tool_calls jsonb instead.
+  channel?: string;
+  subAgent?: string | null;
+  model?: string | null;
+  tokensIn?: number;
+  tokensOut?: number;
+  tokensTotal?: number;
+  costUsd?: number;
+  durationMs?: number;
+  tools?: string[];
+  outcome?: string;
+  isError?: boolean;
+  perModel?: Record<string, unknown>;
 }
 
 export interface Session {
@@ -79,12 +107,36 @@ export class SupabaseSessionStore implements SessionStore {
   async save(sessionId: string, session: Session): Promise<void> {
     const lastMessage = session.messages[session.messages.length - 1];
     if (!lastMessage) return;
-    const { error } = await this.supabase.from('messages').insert({
+    // Phase-0 telemetry enrichment: when the caller attached telemetry to an
+    // assistant turn, persist it into the existing messages columns (agent /
+    // tokens_used / tool_calls / platform). Reactive turns previously dropped
+    // these — this is the "fix the dropped usage" wedge. Fully optional.
+    const t = lastMessage.telemetry;
+    const row: Record<string, unknown> = {
       user_id: sessionId,
       role: lastMessage.role,
       content: lastMessage.content,
       created_at: new Date().toISOString(),
-    });
+    };
+    if (t) {
+      // Only the `agent`, `tokens_used`, and `tool_calls` columns are touched.
+      // The `platform` column is deliberately left untouched (CHECK constraint).
+      if (t.subAgent !== undefined) row.agent = t.subAgent;
+      if (typeof t.tokensTotal === 'number') row.tokens_used = t.tokensTotal;
+      row.tool_calls = {
+        channel: t.channel ?? null,
+        model: t.model ?? null,
+        costUsd: t.costUsd ?? null,
+        tokensIn: t.tokensIn ?? null,
+        tokensOut: t.tokensOut ?? null,
+        durationMs: t.durationMs ?? null,
+        tools: t.tools ?? [],
+        outcome: t.outcome ?? null,
+        isError: t.isError ?? false,
+        perModel: t.perModel ?? null,
+      };
+    }
+    const { error } = await this.supabase.from('messages').insert(row);
     if (error) {
       // Intentional silent degradation: orchestrator must not crash on
       // DB write failures. A lost message is acceptable signal loss

@@ -12,7 +12,9 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "ingest:wechat": "tsx scripts/ingest-wechat.ts"
+    "ingest:wechat": "tsx scripts/ingest-wechat.ts",
+    "spike:sdk": "tsx scripts/spike-sdk-telemetry.ts",
+    "dashboard": "tsx scripts/dashboard-server.ts"
   },
   "keywords": [],
   "author": "",
