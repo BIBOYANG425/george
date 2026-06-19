@@ -34,7 +34,7 @@ export const config = {
   // DeepSeek via GEORGE_MODEL_FAST=deepseek-v4-flash / GEORGE_MODEL_SMART=deepseek-v4-pro
   // in .env (gitignored, never in the PR).
   models: {
-    fast: process.env.GEORGE_MODEL_FAST || 'claude-haiku-4-5-20251001',
+    fast: process.env.GEORGE_MODEL_FAST || 'claude-sonnet-4-6',
     smart: process.env.GEORGE_MODEL_SMART || 'claude-sonnet-4-6',
   },
   kimi: {
