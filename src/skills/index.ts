@@ -66,6 +66,25 @@ export function getSkillBody(name: string): string | null {
   return skillsByName.get(name)?.body ?? null
 }
 
+// Full catalog (orchestrator + every sub-agent's skills) for single-agent mode,
+// where one agent handles all domains and can load any playbook on demand.
+export function getFullCatalog(): string {
+  const lines: string[] = ['## Skill Catalog']
+  lines.push('When a situation matches one of these descriptions, call load_skill({ name }) to fetch the full playbook.')
+  if (orchestratorSkills.length > 0) {
+    lines.push('')
+    lines.push('Always available:')
+    for (const s of orchestratorSkills) lines.push(`- ${s.name}: ${s.description}`)
+  }
+  for (const [agent, list] of subAgentSkills.entries()) {
+    if (list.length === 0) continue
+    lines.push('')
+    lines.push(`${agent}:`)
+    for (const s of list) lines.push(`- ${s.name}: ${s.description}`)
+  }
+  return lines.join('\n')
+}
+
 export function getRegistryStats(): {
   orchestratorCount: number
   perSubAgent: Record<string, number>

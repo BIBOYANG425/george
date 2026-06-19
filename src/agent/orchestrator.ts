@@ -13,7 +13,8 @@
 // to become a per-invocation factory that takes a profile argument.
 
 import { query, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
-import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS } from './agents.config.js';
+import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS, ORCHESTRATOR_MODEL, UNIFIED_DOMAIN_PROMPT } from './agents.config.js';
+import { getFullCatalog } from '../skills/index.js';
 import { ALL_TOOLS } from '../tools/index.js';
 import type { SessionStore, TurnTelemetry } from './session-store.js';
 import type { Profile, ProfileStore } from '../memory/profile.js';
@@ -21,6 +22,8 @@ import { resolveStudentId } from '../db/students.js';
 import { log } from '../observability/logger.js';
 import { isWebSearchOverCap, recordWebSearchUse } from '../services/web-search-budget.js';
 import { trustedDomains } from '../services/web-search-config.js';
+import { renderMoodBlock } from './calendar-mood.js';
+import { fastReply } from './fast-path.js';
 import { checkUsageAllowed, resolveModelForUser } from '../admin/user-controls.js';
 
 // Register george's 23 tools as an in-process SDK MCP server so the model can
@@ -120,11 +123,68 @@ function buildStudentIdBlock(studentId?: string | null): string {
 
 export function buildOrchestratorPrompt(profile?: Profile | null, studentId?: string | null): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
+  // Calendar-mood overlay (master.md "Calendar mood overlay"): inject the current
+  // academic-calendar tone so finals/orientation/etc. actually changes behavior.
+  const moodBlock = renderMoodBlock();
+  if (moodBlock) parts.push(moodBlock);
   const userProfileBlock = buildUserProfileBlock(profile);
   if (userProfileBlock) parts.push(userProfileBlock);
   if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
   const studentIdBlock = buildStudentIdBlock(studentId);
   if (studentIdBlock) parts.push(studentIdBlock);
+  return parts.join('\n\n');
+}
+
+// L2 speed lever: push the single agent to gather data in ONE parallel batch
+// instead of calling tools one-at-a-time (each sequential call is a full model
+// round-trip ~2-4s). One batch + one generation beats 6-8 serial turns.
+const BATCH_TOOLS_GUIDANCE = [
+  '# GATHER DATA IN ONE BATCH (speed — important)',
+  'When a message needs data, decide up front EVERYTHING you will need and call all',
+  'those tools AT ONCE, in a single parallel batch — then write your reply from the',
+  'combined results. Do NOT call one tool, wait for it, then call the next; that is',
+  'slow. Example: for a course rec, call the course search AND the ratings lookup in',
+  'the same batch, not one after the other. Only do a second round if the first',
+  "results truly surface something you could not have predicted. Never narrate your",
+  'tool calls or self-corrections ("let me check again") — just gather, then answer.',
+].join('\n');
+
+// Course-rec fast lever: the shared facts (GE courses + RMP + open status) are
+// pre-built into a ranked candidate sheet, so one fast read + profile-based
+// personalization replaces chaining live USC/RMP lookups or the 45s recommender.
+const COURSE_FASTPATH_GUIDANCE = [
+  '# GE COURSE RECS — use the ready sheet',
+  'For "recommend an easy/good GE class" (or similar), call ge_candidates ONCE — it',
+  'returns a fast, rating-ranked list of GE courses already enriched with each',
+  "professor's RMP rating, difficulty, would-take-again, and open status. Do NOT",
+  'chain search_ge_courses + get_rmp_ratings, and do NOT call recommend_courses for',
+  'GE recs — those are slow. Then PERSONALIZE: from the full list, pick and order',
+  "the best handful FOR THIS STUDENT using their profile (major, year, interests,",
+  'what they have already taken). Offer a few real options with the rating + why it',
+  'fits them. If the student named a category, pass it; otherwise span categories.',
+  'Only fall back to search_ge_courses if ge_candidates returns nothing.',
+].join('\n');
+
+// Single-agent prompt (SINGLE_AGENT=true): master + orchestrator + ALL three
+// domain specializations inline + mood/profile/onboarding/studentId + web-search
+// guidance + the full skill catalog. One agent with all tools handles everything
+// in a single agentic loop, removing the orchestrator→sub-agent dispatch hop.
+export function buildSingleAgentPrompt(
+  profile?: Profile | null,
+  studentId?: string | null,
+  webAllowed: boolean = false,
+): string {
+  const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
+  const moodBlock = renderMoodBlock();
+  if (moodBlock) parts.push(moodBlock);
+  const userProfileBlock = buildUserProfileBlock(profile);
+  if (userProfileBlock) parts.push(userProfileBlock);
+  if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
+  const studentIdBlock = buildStudentIdBlock(studentId);
+  if (studentIdBlock) parts.push(studentIdBlock);
+  if (webAllowed) parts.push(webSearchGuidance());
+  const catalog = getFullCatalog();
+  if (catalog) parts.push(catalog);
   return parts.join('\n\n');
 }
 
@@ -155,7 +215,7 @@ export function buildAgentsConfig(
   profile?: Profile | null,
   studentId?: string | null,
   webAllowed: boolean = false,
-): Record<string, { description: string; prompt: string; tools: string[] }> {
+): Record<string, { description: string; prompt: string; tools: string[]; model?: string }> {
   // Inject the user profile into each sub-agent so it doesn't have to be
   // re-stated through the dispatch prompt (it often wasn't). Now know-things
   // always knows the student's major/year/interests and can personalize.
@@ -169,13 +229,15 @@ export function buildAgentsConfig(
   // orchestrator to relay it through the dispatch prompt is the loop's softest
   // seam. With it in-context the sub-agent passes the exact uuid without a relay.
   const studentIdBlock = buildStudentIdBlock(studentId);
-  const config: Record<string, { description: string; prompt: string; tools: string[] }> = {};
+  // Sub-agents craft the reply, so they need the calendar mood too.
+  const moodBlock = renderMoodBlock();
+  const config: Record<string, { description: string; prompt: string; tools: string[]; model?: string }> = {};
   for (const [name, def] of Object.entries(SUB_AGENTS)) {
     // WebSearch (an SDK built-in, un-namespaced) goes to the two info agents
     // only, and only when the user is under their daily web-search cap.
     const wantsWeb = name === 'whats-happening' || name === 'know-things';
     const webBlock = wantsWeb && webAllowed ? webSearchGuidance() : '';
-    const extras = [userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
+    const extras = [moodBlock, userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
     config[name] = {
       description: def.description,
       prompt: extras ? `${def.prompt}\n\n${extras}` : def.prompt,
@@ -186,6 +248,9 @@ export function buildAgentsConfig(
         ...def.tools.map(nsTool),
         ...(wantsWeb && webAllowed ? ['WebSearch'] : []),
       ],
+      // Forward the per-agent model tier (FAST/SMART). Previously dropped here, so
+      // every sub-agent silently ran on the env/default model instead.
+      model: def.model,
     };
   }
   return config;
@@ -243,15 +308,19 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   }
 
   // ── Admin usage gate (per-user controls, set from the dashboard) ──
-  // Hard-block or daily-limit a user BEFORE any LLM cost. checkUsageAllowed
-  // always supplies an in-voice (or admin-custom) message so a block/limit is
-  // never silent. Fail-open: a control-store error must never block a real
-  // conversation.
+  // Hard-block or daily-limit a user BEFORE any LLM cost. Returns an in-voice
+  // result so the caller still saves + sends a reply. Fail-open: a control-store
+  // error must never block a real conversation.
   try {
     const gate = await checkUsageAllowed(args.userId);
     if (!gate.allowed) {
       log('info', 'usage_gate_blocked', { userId: args.userId, reason: gate.reason });
-      yield { type: 'result', result: gate.message || '学长这边暂时没法回你消息了🥲' };
+      // checkUsageAllowed always supplies an in-voice (or admin-custom) message,
+      // so a block/limit is never silent. Fall back defensively just in case.
+      const msg = gate.message || '学长这边暂时没法回你消息了🥲';
+      yield { type: 'result', result: msg };
+      // Tag the row so the dashboard distinguishes a gated turn from a
+      // missing-telemetry one (no LLM call, so no token/cost).
       yield { type: 'telemetry', telemetry: { channel: args.channel, outcome: gate.reason === 'limit' ? 'limit_blocked' : 'blocked', isError: false, tools: [] } };
       return;
     }
@@ -262,6 +331,28 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // Load user profile early so it can be injected into the system prompt.
   // Silently falls back to no profile when profileStore is not provided.
   const profile = args.profileStore ? await args.profileStore.loadProfile(args.userId) : null;
+
+  // Conversation history (used by both the fast path and the full agent).
+  const historyPrefix = await buildHistoryPrefix(args.sessionStore, args.userId);
+
+  // FAST PATH: most messages (greetings, small talk, feelings, thanks) need no
+  // tools and no dispatch. Answer them with ONE direct flash call (~2-3s) instead
+  // of the full multi-hop engine (~50s). fastReply returns null — falling through
+  // to the full agent — for anything factual or uncertain, so anti-fabrication is
+  // preserved. (Skipped implicitly when it returns null.)
+  const fast = await fastReply({
+    text: args.text,
+    historyPrefix,
+    profileBlock: buildUserProfileBlock(profile),
+  });
+  if (fast !== null) {
+    yield { type: 'result', result: fast };
+    // Tag the turn as fast-path so the dashboard can tell it apart from a
+    // full-agent turn that lost telemetry. (fastReply doesn't expose token
+    // usage yet — wiring that through would let cost coverage include these.)
+    yield { type: 'telemetry', telemetry: { channel: args.channel, outcome: 'fast_path', model: 'fast', tools: [] } };
+    return;
+  }
 
   // Resolve the real students.id UUID so tools can receive it via the system
   // prompt. Fail-open: if the lookup errors, proceed with the raw userId so
@@ -287,16 +378,19 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed);
   const orchestratorTools = buildOrchestratorToolNames();
 
-  // Load conversation history from our custom SessionStore and prepend as context.
-  // The SDK's own sessionStore option mirrors transcripts to an external store —
-  // not the same concept. We handle session state ourselves.
-  const historyPrefix = await buildHistoryPrefix(args.sessionStore, args.userId);
+  // historyPrefix was loaded above (shared with the fast path). The SDK's own
+  // sessionStore option mirrors transcripts to an external store — not the same
+  // concept; we handle session state ourselves.
   const promptWithHistory = `${historyPrefix}${args.text}`;
 
-  // Per-user model control (set from the admin dashboard). Empty when the user
-  // has no valid override → we leave `model` unset so the SDK default applies
-  // (main's behavior unchanged).
-  const resolvedModel = resolveModelForUser(args.userId, '');
+  // One-time "checking…" interstitial: emitted the first time the model actually
+  // calls a tool, so the user sees George got the message and is working (esp. on
+  // slow, tool-heavy or reasoning turns). Language mirrors the user's input.
+  const userIsChinese = /[一-鿿]/.test(args.text);
+  const interstitialPool = userIsChinese
+    ? ['等我查一下哈 📖', '稍等,翻一下', '让我看看哈', '这个我想想,稍等']
+    : ['lemme check on that', 'one sec, looking it up', 'hold on, digging into this'];
+  let sentInterstitial = false;
 
   // Per-turn telemetry accumulator. Filled from the SDK stream (sub-agent
   // dispatch + tool_use names) and the final `result` message (tokens, cost,
@@ -305,45 +399,58 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   const turnTools = new Set<string>();
   const telemetry: TurnTelemetry = { channel: args.channel, tools: [], outcome: 'success' };
 
-  for await (const message of query({
-    prompt: promptWithHistory,
-    options: {
-      systemPrompt,
-      ...(resolvedModel ? { model: resolvedModel } : {}),
-      // Register george's tools so the model can actually invoke them. Keyed
-      // 'george' to match the mcp__george__* names in the allowlists above.
-      mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
-      tools: orchestratorTools,
-      // Auto-approve every george tool + the sub-agent dispatch tools, so they
-      // execute headlessly. Without this the SDK gates each call behind a
-      // permission prompt that no one answers on a server → tool_result errors
-      // ("you haven't granted it yet") and george hedges. `tools` (orchestrator)
-      // and each sub-agent's tool list still gate WHICH agent may call WHAT.
-      allowedTools: ['Task', 'Agent', 'WebSearch', ...Object.keys(ALL_TOOLS).map(nsTool)],
-      agents: agentsConfig,
-      maxTurns: args.maxTurns ?? 12,
-      // Abort handle for rapid-fire supersede (undefined = no external abort).
-      abortController: args.abortController,
-      // CRITICAL: isolation mode. Without this, the SDK inherits the host's
-      // ~/.claude/settings.json, project .claude/settings.json, MCP servers,
-      // hooks, AND slash commands. A USC freshman texting "/cost" or "/model"
-      // would get Claude Code's literal slash-command response, "/goal plz
-      // fuck me" would invoke Claude Code's /goal handler. settingSources:[]
-      // turns ALL of that off — george runs with only the tools we explicitly
-      // list and the prompt we explicitly write.
-      settingSources: [],
-      // Session persistence is not needed — george is stateless at the SDK level.
-      // Our SessionStore handles conversation memory via history injection above.
-      persistSession: false,
-    },
-  })) {
+  // SINGLE_AGENT=true collapses the orchestrator + 3 sub-agents into ONE agent
+  // that holds all tools and the unified domain prompt, so a tool query resolves
+  // in one agentic loop instead of orchestrator-decide → dispatch → sub-agent.
+  // Removes a full hop (and its per-hop thinking) per turn. Default off; the
+  // dispatch path is byte-for-byte unchanged when the flag is unset.
+  const singleAgent = process.env.SINGLE_AGENT === 'true';
+  // Per-user model control (set from the admin dashboard). Falls back to the
+  // global ORCHESTRATOR_MODEL when no override is configured for this user.
+  const resolvedModel = resolveModelForUser(args.userId, ORCHESTRATOR_MODEL);
+  const allToolsNs = [...Object.keys(ALL_TOOLS).map(nsTool), ...(webAllowed ? ['WebSearch'] : [])];
+  // settingSources:[] is CRITICAL in BOTH paths — without it the SDK inherits the
+  // host's ~/.claude + project settings, MCP servers, hooks, and slash commands,
+  // so a student texting "/model" would hit Claude Code's real handler. Empty =
+  // george runs only with the tools and prompt we set here.
+  const queryOptions = singleAgent
+    ? {
+        systemPrompt: buildSingleAgentPrompt(profile, studentId, webAllowed),
+        model: resolvedModel,
+        // Disable extended thinking on the agent loop — it adds ~7s PER tool-call
+        // turn (DeepSeek-v4 defaults it on). Tools provide the grounding; the
+        // thinking was the dominant cost on tool queries (~35s → much less).
+        thinking: { type: 'disabled' as const },
+        mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
+        tools: allToolsNs,
+        allowedTools: allToolsNs,
+        maxTurns: args.maxTurns ?? 8,
+        abortController: args.abortController,
+        settingSources: [],
+        persistSession: false,
+      }
+    : {
+        systemPrompt,
+        model: resolvedModel,
+        mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
+        tools: orchestratorTools,
+        allowedTools: ['Task', 'Agent', 'WebSearch', ...Object.keys(ALL_TOOLS).map(nsTool)],
+        agents: agentsConfig,
+        maxTurns: args.maxTurns ?? 12,
+        abortController: args.abortController,
+        settingSources: [],
+        persistSession: false,
+      };
+
+  for await (const message of query({ prompt: promptWithHistory, options: queryOptions })) {
     // Record actual web searches performed this turn (server-tool usage) against
     // the student's daily budget so the next turn's webAllowed check is accurate.
     const m = message as {
       type?: string;
       usage?: { server_tool_use?: { web_search_requests?: number } };
     };
-    // Accumulate routing/tool telemetry from every assistant tool_use block.
+    // Fire the interstitial the first time George decides to call a tool, and
+    // accumulate routing/tool telemetry from every assistant tool_use block.
     if (m.type === 'assistant') {
       const content =
         (message as { message?: { content?: Array<{ type?: string; name?: string; input?: any }> } }).message
@@ -355,9 +462,14 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
             const sub = c.input?.subagent_type ?? c.input?.subagentType;
             if (sub) telemetry.subAgent = String(sub);
           } else if (name) {
+            // strip the mcp__george__ namespace for a clean tool label
             turnTools.add(name.replace(/^mcp__[^_]+__/, ''));
           }
         }
+      }
+      if (!sentInterstitial && content.some((c) => c.type === 'tool_use')) {
+        sentInterstitial = true;
+        yield { type: 'interstitial', text: interstitialPool[Math.floor(Math.random() * interstitialPool.length)] };
       }
     }
     if (m.type === 'result') {

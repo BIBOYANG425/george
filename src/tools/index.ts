@@ -63,6 +63,7 @@ import { dpsZoneCheckTool } from './dps-zone-check.js'
 import { distanceCompareTool } from './distance-compare.js'
 import { safeRouteTool } from './safe-route.js'
 import { findPlacesTool } from './find-places.js'
+import { geCandidatesTool } from './ge-candidates.js'
 
 export const ALL_TOOLS = {
   create_squad_post: createSquadPostTool,
@@ -83,6 +84,7 @@ export const ALL_TOOLS = {
   get_rmp_ratings: getRmpRatingsTool,
   search_courses: searchCoursesTool,
   search_ge_courses: searchGeCoursesTool,
+  ge_candidates: geCandidatesTool,
   search_programs: searchProgramsTool,
   plan_schedule: planScheduleTool,
   get_student_academic_state: getStudentAcademicStateTool,

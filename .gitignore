@@ -7,4 +7,3 @@ data/ingest/
 # R session history junk
 .Rhistory
 data/user-controls.json
-node_modules

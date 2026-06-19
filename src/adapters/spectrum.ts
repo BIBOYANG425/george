@@ -12,6 +12,7 @@ import { createSpectrumClient } from './spectrum-client.js'
 import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS } from './split-response.js'
 import { log } from '../observability/logger.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
+import { captureFactsFromTurn } from '../memory/capture.js'
 import { supabase } from '../db/client.js'
 import { extractCodeFromStartMessage, runHandshake } from '../onboarding/handshake.js'
 import { lookupByCode, linkImessageHandle, lookupByImessageHandle, markGreeted } from '../onboarding/pending-users.js'
@@ -256,6 +257,12 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
           messages: [{ role: 'assistant', content: finalText, telemetry: turnTelemetry }],
           systemContext: {},
         })
+      }
+      // Fire-and-forget per-turn memory capture (no-op unless MEMORY_CAPTURE_ENABLED).
+      // Spectrum is the production iMessage path and bypasses the index.ts routes, so
+      // capture has to be wired here too (codex review P2).
+      if (deps.profileStore && finalText) {
+        void captureFactsFromTurn(deps.profileStore, userId, text, finalText)
       }
       log('info', 'spectrum_turn', {
         ms: Date.now() - turnStart,

@@ -49,6 +49,8 @@ import { createServiceRoleClient } from './memory/supabase-client.js'
 import { tryHandleUserCommand, setUserCommandRuntime } from './agent/user-command-router.js'
 import { draftSquadPost } from './services/squad-draft.js'
 import { checkRateLimit } from './adapters/rate-limiter.js'
+import { stripMarkdown } from './adapters/strip-markdown.js'
+import { captureFactsFromTurn } from './memory/capture.js'
 import { runCoordinatorOnce } from './jobs/squad-coordinator.js'
 import { buildCoordinatorDeps } from './services/squad-coordinator-deps.js'
 
@@ -203,7 +205,10 @@ app.post('/chat', adminAuth, async (req, res) => {
       systemContext: {},
     })
 
-    res.json({ response })
+    // Fire-and-forget per-turn memory capture (no-op unless MEMORY_CAPTURE_ENABLED).
+    if (_profileStore) void captureFactsFromTurn(_profileStore, userId, text, response)
+
+    res.json({ response: stripMarkdown(response) })
   } catch (err) {
     // Log the real error for diagnostics, return a generic message to the
     // caller so upstream stack traces, API keys in error strings (e.g.
@@ -211,6 +216,87 @@ app.post('/chat', adminAuth, async (req, res) => {
     // the chat client.
     log('error', 'chat_endpoint_error', { error: (err as Error).message })
     res.status(500).json({ error: 'internal_error' })
+  }
+})
+
+// Streaming variant of /chat (Server-Sent Events). ADDITIVE — leaves /chat
+// untouched so the existing web relay keeps working. Emits:
+//   event: interstitial  {text}   — the "checking…" bubble, as soon as George
+//                                    calls a tool (immediate "we got it" feedback)
+//   event: message       {response} — the final, markdown-stripped reply
+//   event: done          {}
+// Token-by-token streaming is a follow-up: in this multi-agent design the final
+// text arrives as one 'result' from the dispatched sub-agent, not clean
+// top-level token deltas, so smooth per-token streaming needs more plumbing.
+app.post('/chat/stream', adminAuth, async (req, res) => {
+  try {
+    const body = req.body as { userId?: string; text?: string; platform?: 'wechat' | 'imessage' }
+    if (!body?.text || typeof body.text !== 'string') {
+      return res.status(400).json({ error: 'text is required' })
+    }
+    const userId = body.userId || 'dev-console'
+    const text = body.text
+    const channel = body.platform === 'wechat' ? 'web' : 'imessage'
+
+    // Control commands short-circuit before the orchestrator (no LLM cost), same
+    // as /chat. Returned as a normal JSON body, not a stream.
+    const commandReply = await tryHandleUserCommand(userId, text)
+    if (commandReply !== null) {
+      return res.json({ response: commandReply })
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.flushHeaders?.()
+    const send = (event: string, data: unknown) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    }
+
+    await sessionStore.save(userId, {
+      sessionId: userId,
+      messages: [{ role: 'user', content: text }],
+      systemContext: {},
+    })
+
+    let response = ''
+    let turnTelemetry: import('./agent/session-store.js').TurnTelemetry | undefined
+    for await (const event of runOrchestrator({ userId, channel, text, sessionStore, profileStore: _profileStore ?? undefined })) {
+      const e = event as {
+        type?: string
+        result?: string
+        text?: string
+        telemetry?: import('./agent/session-store.js').TurnTelemetry
+        message?: { content?: Array<{ type?: string; text?: string }> }
+      }
+      if (e.type === 'telemetry') {
+        turnTelemetry = e.telemetry
+      } else if (e.type === 'interstitial' && e.text) {
+        send('interstitial', { text: e.text })
+      } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
+        response = e.result
+      } else if (e.type === 'assistant' && e.message?.content && response === '') {
+        const t = e.message.content
+          .filter((c) => c.type === 'text' && typeof c.text === 'string')
+          .map((c) => c.text as string)
+          .join('')
+        if (t) response = t
+      }
+    }
+
+    send('message', { response: stripMarkdown(response) })
+    send('done', {})
+    res.end()
+
+    await sessionStore.save(userId, {
+      sessionId: userId,
+      messages: [{ role: 'assistant', content: response, telemetry: turnTelemetry }],
+      systemContext: {},
+    })
+    if (_profileStore) void captureFactsFromTurn(_profileStore, userId, text, response)
+  } catch (err) {
+    log('error', 'chat_stream_endpoint_error', { error: (err as Error).message })
+    try { res.end() } catch { /* already closed */ }
   }
 })
 
@@ -365,12 +451,20 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
         const e = event as {
           type?: string
           result?: string
+          text?: string
           telemetry?: import('./agent/session-store.js').TurnTelemetry
           message?: { content?: Array<{ type?: string; text?: string }> }
         }
         if (e.type === 'telemetry') {
           turnTelemetry = e.telemetry
-        } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
+          continue
+        }
+        // "Checking…" interstitial — send it as its own bubble right away.
+        if (e.type === 'interstitial') {
+          if (e.text) await enqueueOutgoing(userId, e.text)
+          continue
+        }
+        if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
           reply = e.result
         } else if (e.type === 'assistant' && e.message?.content && reply === '') {
           const text = e.message.content
@@ -390,7 +484,10 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
         systemContext: {},
       })
 
-      await enqueueOutgoing(userId, reply)
+      await enqueueOutgoing(userId, stripMarkdown(reply))
+
+      // Fire-and-forget per-turn memory capture (no-op unless MEMORY_CAPTURE_ENABLED).
+      if (_profileStore) void captureFactsFromTurn(_profileStore, userId, text, reply)
     } catch (err) {
       log('error', 'phone_incoming_error', { error: (err as Error).message })
     }

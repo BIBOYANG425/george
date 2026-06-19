@@ -112,6 +112,8 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
         userId,
         saveBlock: (uid: string, block: BlockName, content: string) =>
           deps.profileStore.saveBlock(uid, block, content),
+        appendToBlock: (uid: string, block: BlockName, addition: string) =>
+          deps.profileStore.appendToBlock(uid, block, addition),
         logAction,
       }),
       createSendProactiveTool({

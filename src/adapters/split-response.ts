@@ -19,9 +19,13 @@
 // like spam and the user loses the thread. Merge the tail into the last part.
 const MAX_PARTS = 4
 
+import { stripMarkdown } from './strip-markdown.js'
+
 export function splitIntoMessages(response: string): string[] {
   if (!response) return []
-  const parts = response
+  // Strip markdown before splitting — WeChat / iMessage render it literally, and
+  // models sometimes emit it despite the prompt forbidding it.
+  const parts = stripMarkdown(response)
     .split(/\n\s*\n/) // blank-line boundary (tolerates trailing whitespace)
     .map((p) => p.trim())
     .filter((p) => p.length > 0)

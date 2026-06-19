@@ -78,6 +78,29 @@ export class ProfileStore {
     await this.cache.delete(this.cacheKey(userId));
   }
 
+  // Append a fact to a block WITHOUT clobbering existing content (saveBlock does a
+  // full overwrite, which silently destroys earlier facts). Dedupes against
+  // existing lines and caps at MAX_BLOCK_CHARS, keeping the most recent content.
+  // This is what per-turn capture + the heartbeat append mode use to accumulate
+  // memory safely.
+  async appendToBlock(userId: string, block: BlockName, addition: string): Promise<void> {
+    if (!BLOCK_NAMES.includes(block)) {
+      throw new Error(`Invalid block name: ${block}`);
+    }
+    const trimmed = addition.trim();
+    if (!trimmed) return;
+    const profile = await this.loadProfile(userId);
+    const current = (profile[block] ?? '').trim();
+    const existingLines = current.split('\n').map((l) => l.trim());
+    // Skip if this fact is already recorded (exact line or contained in one).
+    if (existingLines.some((l) => l === trimmed || l.includes(trimmed))) return;
+    let merged = current ? `${current}\n${trimmed}` : trimmed;
+    if (merged.length > MAX_BLOCK_CHARS) {
+      merged = merged.slice(merged.length - MAX_BLOCK_CHARS);
+    }
+    await this.saveBlock(userId, block, merged);
+  }
+
   renderForPrompt(profile: Profile): string {
     const sections = BLOCK_NAMES.map((name) => {
       const content = profile[name];
