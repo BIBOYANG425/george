@@ -39,4 +39,20 @@ describe('In-memory SessionStore', () => {
     await store.delete('u1');
     expect(await store.load('u1')).toBeNull();
   });
+
+  it('countUserMessages counts only user-role messages', async () => {
+    await store.save('u1', {
+      sessionId: 'u1',
+      messages: [
+        { role: 'user', content: 'a' },
+        { role: 'assistant', content: 'b' },
+        { role: 'user', content: 'c' },
+        { role: 'system', content: 'd' },
+        { role: 'user', content: 'e' },
+      ],
+      systemContext: {},
+    });
+    expect(await store.countUserMessages('u1')).toBe(3);
+    expect(await store.countUserMessages('unknown')).toBe(0);
+  });
 });

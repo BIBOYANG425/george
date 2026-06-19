@@ -1,8 +1,11 @@
-// LLM dispatch layer. Wraps Anthropic Claude (main) and Kimi/Moonshot (lightweight fallback)
-// behind a unified call signature. Sub-agents use Claude Sonnet 4.6; intent classifier,
-// proactive messages, and memory extraction use Kimi/Haiku. Single point to swap models.
+// LLM dispatch layer. Wraps Anthropic Claude (main) and Kimi/Moonshot (lightweight)
+// behind a unified call signature. Sub-agents use Claude Sonnet 4.6. Lightweight
+// calls (intent classify, capture, proactive, relationship note) go to Kimi when a
+// key is set, else the configured fast tier (config.models.fast). A caller passing
+// an Anthropic model id (e.g. the SMART tier) is ALWAYS routed to Claude, even with
+// a Kimi key. Single point to swap models.
 //
-// Header last reviewed: 2026-04-20
+// Header last reviewed: 2026-06-19
 
 import Anthropic from '@anthropic-ai/sdk'
 import { config } from '../config.js'
@@ -20,13 +23,21 @@ export async function callLightweightLLM(
 ): Promise<string> {
   const apiKey = config.kimi.apiKey
 
-  if (!apiKey) {
+  // A non-Moonshot model id is an Anthropic model (e.g. config.models.smart =
+  // claude-sonnet-4-6). Those MUST run on Claude even when a Kimi key is
+  // configured — otherwise the SMART tier the relationship evaluator asks for is
+  // silently downgraded to Kimi's moonshot-v1-8k. So route to Claude whenever
+  // there's no Kimi key OR the caller explicitly requested an Anthropic model.
+  const wantsAnthropicModel = !!options?.model && !options.model.startsWith('moonshot')
+
+  if (!apiKey || wantsAnthropicModel) {
     const response = await claude.messages.create({
-      // Defaults to the fast Haiku tier (classify/extract/capture). Callers that
-      // need more judgment (e.g. the relationship-memory evaluator) may pass a
-      // smarter model via options.model — e.g. config.models.smart. Unset keeps
-      // every existing caller on Haiku, byte-for-byte.
-      model: options?.model || 'claude-haiku-4-5-20251001',
+      // Defaults to the configured FAST tier (config.models.fast) for the
+      // lightweight tasks that reach this Claude path (classify/extract/capture).
+      // Callers needing more judgment (e.g. the relationship-memory evaluator)
+      // pass a smarter Anthropic model via options.model — e.g. config.models.smart
+      // — and it is honored here regardless of the Kimi key.
+      model: wantsAnthropicModel ? (options!.model as string) : config.models.fast,
       max_tokens: options?.maxTokens || 500,
       // Lightweight calls (classify, extract, capture) don't need extended
       // thinking; disabling it drops ~7s/call on the DeepSeek-backed fast tier.
@@ -41,9 +52,9 @@ export async function callLightweightLLM(
   }
 
   const body: Record<string, unknown> = {
-    // model override is only honored for Anthropic ids (the SMART tier is an
-    // Anthropic model). On the Kimi path keep the default 8k model unless a
-    // caller passes an explicit Kimi/Moonshot model id.
+    // We only reach the Kimi path with no model override or an explicit
+    // Moonshot id (Anthropic ids were routed to Claude above). Keep the default
+    // 8k model unless the caller named a specific Moonshot model.
     model: options?.model?.startsWith('moonshot') ? options.model : 'moonshot-v1-8k',
     messages,
     max_tokens: options?.maxTokens || 500,

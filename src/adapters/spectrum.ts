@@ -297,13 +297,16 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
         const sessions = deps.sessionStore
         void (async () => {
           try {
+            // Cadence keys off the CUMULATIVE user-message count (not the recent
+            // window), so "every Nth message" keeps advancing past the 20-message
+            // history cap instead of plateauing and firing every turn.
+            const userMessageCount = await sessions.countUserMessages(userId)
+            if (!shouldRunRelationshipEval(userMessageCount)) return
             const session = await sessions.load(userId)
             const recentMessages = (session?.messages ?? []).filter(
               (m): m is { role: 'user' | 'assistant'; content: string } =>
                 (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string',
             )
-            const userMessageCount = recentMessages.filter((m) => m.role === 'user').length
-            if (!shouldRunRelationshipEval(userMessageCount)) return
             await runRelationshipEval({ store, userId, recentMessages })
           } catch (err) {
             log('warn', 'relationship_eval_dispatch_failed', { error: (err as Error).message })
