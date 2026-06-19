@@ -3,7 +3,12 @@
 // to the unchanged downstream pipeline, the Find My location path, and outbound
 // replies via the conversation space. The ONLY file aware of Spectrum.
 //
-// Header last reviewed: 2026-06-13
+// Also tracks the per-sender last-reply time in-process so a long silence
+// followed by a fresh ping can hand the orchestrator a delay-context note
+// (renderDelayContext) — injected as a per-turn system note, NOT as response
+// delay. Default-off behind GEORGE_ACTIVITY_STATE_ENABLED ('' when unset).
+//
+// Header last reviewed: 2026-06-18
 
 import path from 'node:path'
 import type { SpectrumClient, ReplyHandle } from './spectrum-client.js'
@@ -17,6 +22,7 @@ import {
 } from './spectrum-stats.js'
 import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS, parseControlTokens, isNoReplyEnabled } from './split-response.js'
 import { log } from '../observability/logger.js'
+import { renderDelayContext } from '../agent/activity-state.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
 import { captureFactsFromTurn } from '../memory/capture.js'
 import {
@@ -44,7 +50,10 @@ export interface SpectrumAdapterDeps {
 
 export interface SpectrumHandlers {
   // Returns the reply text, or null to send nothing (filtered/handshake-consumed).
-  handleText: (userId: string, text: string, reply: ReplyHandle, abortController?: AbortController) => Promise<string | null>
+  // delayContext is an optional per-turn system note (e.g. "it's been ~9h since
+  // your last reply") injected into the orchestrator prompt; '' / undefined when
+  // there's nothing to add.
+  handleText: (userId: string, text: string, reply: ReplyHandle, abortController?: AbortController, delayContext?: string) => Promise<string | null>
   // Fire-and-forget: refresh the user's location into LocationContext.
   handleLocation: (userId: string) => Promise<void>
 }
@@ -79,6 +88,11 @@ export async function runSpectrumLoop(
   // message is already persisted to history). Keeps replies fast: no debounce
   // bump, just cancel-and-replace on a rapid follow-up.
   const inflight = new Map<string, AbortController>()
+  // Wall-clock of George's last reply per sender, kept in-process so a long
+  // silence followed by a fresh ping can hand the model delay context (see
+  // renderDelayContext). Default-off: empty/no-op unless the activity-state flag
+  // is on. In-memory only — a restart simply forgets the gap, which is fine.
+  const lastReplyAt = new Map<string, number>()
 
   const flush = async (senderId: string) => {
     const buf = buffers.get(senderId)
@@ -86,6 +100,11 @@ export async function runSpectrumLoop(
     buffers.delete(senderId)
     const ac = new AbortController()
     inflight.set(senderId, ac)
+    // If it's been a long time since George last replied to this sender, prepend
+    // a small situational note so he CAN acknowledge the gap naturally. This is
+    // pure context — no artificial delay is added; the reply still goes out fast.
+    const prev = lastReplyAt.get(senderId)
+    const delayContext = prev ? renderDelayContext(Date.now() - prev) : ''
     // Show the "…" typing bubble while the (slow) orchestrator turn runs.
     // Best-effort: a failed typing signal must never block or fail the reply.
     await buf.reply.startTyping().catch(() => {})
@@ -95,7 +114,11 @@ export async function runSpectrumLoop(
       if (!ac.signal.aborted) void buf.reply.sendText(pickStillThinking()).catch(() => {})
     }, interimDelayMs)
     try {
-      const out = await handlers.handleText(senderId, buf.texts.join('\n'), buf.reply, ac)
+      // delayContext (if any) rides into the orchestrator as a per-turn system
+      // note, NOT prepended to the user text — so it bypasses the injection /
+      // handshake / user-command gates and is never persisted as the user's
+      // message. '' by default (flag off / short gap).
+      const out = await handlers.handleText(senderId, buf.texts.join('\n'), buf.reply, ac, delayContext)
       clearTimeout(interimTimer)
       // One idea per bubble: split on blank-line boundaries and send each as a
       // separate iMessage with a pause, matching george's short-burst cadence
@@ -113,6 +136,9 @@ export async function runSpectrumLoop(
           toSend = noReply ? null : text
         }
         if (toSend) {
+          // Record this reply's time so the next ping can measure the gap (P2).
+          // Only on an actual send — a suppressed {{NO_REPLY}} is not a reply.
+          lastReplyAt.set(senderId, Date.now())
           const parts = splitIntoMessages(toSend)
           for (let i = 0; i < parts.length; i++) {
             if (i > 0) await sleep(INTER_MESSAGE_DELAY_MS)
@@ -168,19 +194,22 @@ export interface TextHandlerDeps {
   tryHandshake: (userId: string, text: string, reply: ReplyHandle) => Promise<boolean>
   // Returns a command reply string, or null if not a command.
   tryUserCommand: (userId: string, text: string) => Promise<string | null>
-  // Runs the orchestrator and returns the final reply text (or '').
-  runOrchestratorText: (userId: string, text: string, abortController?: AbortController) => Promise<string>
+  // Runs the orchestrator and returns the final reply text (or ''). delayContext
+  // is forwarded to the orchestrator as a per-turn system note; '' when none.
+  runOrchestratorText: (userId: string, text: string, abortController?: AbortController, delayContext?: string) => Promise<string>
   normalizeHandle: (raw: string) => string
 }
 
 export function buildTextHandler(deps: TextHandlerDeps) {
-  return async (rawUserId: string, text: string, reply: ReplyHandle, abortController?: AbortController): Promise<string | null> => {
+  return async (rawUserId: string, text: string, reply: ReplyHandle, abortController?: AbortController, delayContext?: string): Promise<string | null> => {
     const userId = deps.normalizeHandle(rawUserId)
+    // Gates run on the RAW user text only — delayContext is never part of what's
+    // checked, handshake-parsed, or command-matched; it only reaches the agent.
     if (deps.checkInjection(text).blocked) return deps.pickRejection()
     if (await deps.tryHandshake(userId, text, reply)) return null
     const cmd = await deps.tryUserCommand(userId, text)
     if (cmd !== null) return cmd
-    const out = await deps.runOrchestratorText(userId, text, abortController)
+    const out = await deps.runOrchestratorText(userId, text, abortController, delayContext)
     return out || null
   }
 }
@@ -233,7 +262,7 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
       return tryHandleUserCommand(userId, text)
     },
 
-    runOrchestratorText: async (userId: string, text: string, abortController?: AbortController): Promise<string> => {
+    runOrchestratorText: async (userId: string, text: string, abortController?: AbortController, delayContext?: string): Promise<string> => {
       const turnStart = Date.now()
       // Persist the user turn before running so it survives an orchestrator
       // failure, then run WITH the session + profile stores so george loads
@@ -254,6 +283,7 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
         sessionStore: deps.sessionStore,
         profileStore: deps.profileStore,
         abortController,
+        delayContext,
       })) {
         const e = event as {
           type?: string

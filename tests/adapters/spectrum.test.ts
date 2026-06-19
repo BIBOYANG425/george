@@ -105,7 +105,9 @@ describe('runSpectrumLoop', () => {
     const handle = vi.fn(async () => 'reply text')
     await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() })
     expect(handle).toHaveBeenCalledTimes(1)
-    expect(handle).toHaveBeenCalledWith('+15551234567', 'yo learn', expect.anything(), expect.anything())
+    // 5th arg is the delay-context note; '' on a first turn (no prior reply) and
+    // when the activity-state flag is off (default).
+    expect(handle).toHaveBeenCalledWith('+15551234567', 'yo learn', expect.anything(), expect.anything(), '')
   })
 
   it('dedups a repeated messageId', async () => {
