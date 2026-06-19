@@ -17,6 +17,7 @@ import {
   renderGroundedProactiveNote,
   raisedThreadLine,
   isGroundedProactiveEnabled,
+  GROUNDED_PROACTIVE_GUIDANCE,
   type OpenThread,
 } from './grounded-proactive.js';
 
@@ -100,7 +101,12 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
       deps.loadDueFollowups(userId),
     ]);
 
-    const systemPrompt = `${MASTER_PROMPT}\n\n${HEARTBEAT_PROMPT}`;
+    // The grounded-proactive guidance is part of the feature's prompt footprint,
+    // so it is appended ONLY when the flag is on. With the flag off the system
+    // prompt is byte-for-byte the pre-P4 prompt (master + heartbeat).
+    const systemPrompt = isGroundedProactiveEnabled()
+      ? `${MASTER_PROMPT}\n\n${HEARTBEAT_PROMPT}\n\n${GROUNDED_PROACTIVE_GUIDANCE}`
+      : `${MASTER_PROMPT}\n\n${HEARTBEAT_PROMPT}`;
     const profileBlock = deps.profileStore.renderForPrompt(profile);
 
     // P4 — grounded proactive (DEFAULT-OFF). When enabled, mine the already-loaded

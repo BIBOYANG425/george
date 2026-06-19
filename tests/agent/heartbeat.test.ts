@@ -131,6 +131,26 @@ describe('runHeartbeat — P4 grounded proactive (flag-gated)', () => {
     expect(userPrompt).not.toContain('# OPEN THREADS');
   });
 
+  it('keeps the grounded-proactive GUIDANCE out of the system prompt when the flag is OFF', async () => {
+    delete process.env.GROUNDED_PROACTIVE_ENABLED;
+    const { deps } = makeStores();
+    deps.loadRecentMessages = vi.fn(async () => openThreadMessages) as any;
+    const mockLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    const systemPrompt = mockLLM.mock.calls[0][0].systemPrompt as string;
+    expect(systemPrompt).not.toContain('Grounding a proactive in an open thread');
+  });
+
+  it('appends the grounded-proactive GUIDANCE to the system prompt only when ON', async () => {
+    process.env.GROUNDED_PROACTIVE_ENABLED = 'true';
+    const { deps } = makeStores();
+    deps.loadRecentMessages = vi.fn(async () => openThreadMessages) as any;
+    const mockLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    const systemPrompt = mockLLM.mock.calls[0][0].systemPrompt as string;
+    expect(systemPrompt).toContain('Grounding a proactive in an open thread');
+  });
+
   it('injects the OPEN THREADS section grounded on an unanswered question when ON', async () => {
     process.env.GROUNDED_PROACTIVE_ENABLED = 'true';
     const { deps } = makeStores();

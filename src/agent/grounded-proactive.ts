@@ -182,6 +182,39 @@ export function raisedThreadLine(key: string): string {
   return `${RAISED_PREFIX} ${key}`;
 }
 
+// Remove the RAISED_THREAD ledger lines from a george_notes block before it is
+// rendered for a human or a model. The stored block keeps the lines so
+// parseRaisedThreads can dedupe; this strips them only at the surface so the
+// audit trail never leaks into the reactive prompt, the heartbeat's profile
+// view, or the /profile command. Returns the input UNCHANGED when no ledger
+// line is present, so a profile that never used grounded-proactive renders
+// byte-for-byte as before this feature existed.
+export function stripRaisedThreadLines(georgeNotes: string): string {
+  if (!georgeNotes || !georgeNotes.includes(RAISED_PREFIX)) return georgeNotes;
+  return georgeNotes
+    .split('\n')
+    .filter((line) => !line.trim().startsWith(RAISED_PREFIX))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Static heartbeat guidance describing HOW to use the OPEN THREADS section. This
+// is part of the feature's prompt footprint, so it lives behind the DEFAULT-OFF
+// flag too: heartbeat.ts appends it to the system prompt ONLY when the flag is
+// on. When off, the heartbeat system prompt is byte-for-byte what it was before
+// P4 (it was previously baked unconditionally into prompts/heartbeat.md — that
+// was the leak this const fixes).
+export const GROUNDED_PROACTIVE_GUIDANCE = [
+  '## Grounding a proactive in an open thread',
+  '',
+  'A good unprompted message lands on something real that the user actually left hanging. A generic "here\'s what\'s happening this week" brief reads like a bot, so don\'t send one.',
+  '',
+  'When an `# OPEN THREADS (grounded proactive)` section is present in your context, it lists concrete open threads — a question you asked that they never answered, or a decision they told you they were mulling. If you send a proactive this tick, ground it in ONE of those threads, phrased in your own voice as if you simply remember it (e.g. "想好选 BUAD 280 还是等下学期了吗" if they were torn on that). Don\'t pick more than one thread; don\'t stack them.',
+  '',
+  'If none of the listed threads still feels worth reaching out about — or there\'s no `# OPEN THREADS` section at all and you\'d just be sending a generic check-in — prefer `heartbeat_ok()` and stay silent. A pending followup that is due now is still a valid reason to send even without an open thread; that path is unchanged.',
+].join('\n');
+
 // Filter to threads not yet raised.
 export function unraisedThreads(threads: OpenThread[], raised: Set<string>): OpenThread[] {
   return threads.filter((t) => !raised.has(t.key));
