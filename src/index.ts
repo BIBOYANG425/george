@@ -51,6 +51,7 @@ import { tryHandleUserCommand, setUserCommandRuntime } from './agent/user-comman
 import { draftSquadPost } from './services/squad-draft.js'
 import { checkRateLimit } from './adapters/rate-limiter.js'
 import { stripMarkdown } from './adapters/strip-markdown.js'
+import { parseControlTokens, isNoReplyEnabled } from './adapters/split-response.js'
 import { captureFactsFromTurn } from './memory/capture.js'
 import { runCoordinatorOnce } from './jobs/squad-coordinator.js'
 import { buildCoordinatorDeps } from './services/squad-coordinator-deps.js'
@@ -66,6 +67,20 @@ const sessionStore = createSupabaseSessionStore()
 // orchestrator. The user-command runtime (cache + supabase + sender) is
 // injected into ./agent/user-command-router via setUserCommandRuntime() there.
 let _profileStore: ProfileStore | null = null
+
+// Resolve a raw orchestrator reply into what the user should actually receive,
+// honoring the {{NO_REPLY}} output-format control token. Returns null to mean
+// "send nothing" — only when GEORGE_NOREPLY_ENABLED is on AND George emitted
+// {{NO_REPLY}}. Default OFF: with the flag unset this is exactly the previous
+// stripMarkdown(raw) — byte-for-byte unchanged, since the feature is gated. When
+// ON, the control token is stripped before stripMarkdown so it can never reach a
+// user even if the reply also carried real text.
+function resolveReply(raw: string): string | null {
+  if (!isNoReplyEnabled()) return stripMarkdown(raw)
+  const { noReply, text } = parseControlTokens(raw)
+  if (noReply) return null
+  return stripMarkdown(text)
+}
 
 const app = express()
 
@@ -212,7 +227,10 @@ app.post('/chat', adminAuth, async (req, res) => {
     // Fire-and-forget per-turn memory capture (no-op unless MEMORY_CAPTURE_ENABLED).
     if (_profileStore) void captureFactsFromTurn(_profileStore, userId, text, response)
 
-    res.json({ response: stripMarkdown(response) })
+    // Strip {{NO_REPLY}} (and any control token) before sending. On the HTTP
+    // /chat path a suppressed reply becomes an empty body — the relay contract is
+    // {response:string}, and the web client renders empty as "no reply".
+    res.json({ response: resolveReply(response) ?? '' })
   } catch (err) {
     // Log the real error for diagnostics, return a generic message to the
     // caller so upstream stack traces, API keys in error strings (e.g.
@@ -288,7 +306,9 @@ app.post('/chat/stream', adminAuth, async (req, res) => {
       }
     }
 
-    send('message', { response: stripMarkdown(response) })
+    // Strip {{NO_REPLY}} (and any control token); a suppressed reply streams an
+    // empty message so the SSE client still gets a clean 'message' then 'done'.
+    send('message', { response: resolveReply(response) ?? '' })
     send('done', {})
     res.end()
 
@@ -488,7 +508,11 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
         systemContext: {},
       })
 
-      await enqueueOutgoing(userId, stripMarkdown(reply))
+      // Strip {{NO_REPLY}} (and any control token). On this queue-backed iMessage
+      // path a suppressed reply means enqueue nothing — George stays silent, same
+      // as the empty-reply ("filtered as automated-message noise") case above.
+      const outgoing = resolveReply(reply)
+      if (outgoing) await enqueueOutgoing(userId, outgoing)
 
       // Fire-and-forget per-turn memory capture (no-op unless MEMORY_CAPTURE_ENABLED).
       if (_profileStore) void captureFactsFromTurn(_profileStore, userId, text, reply)

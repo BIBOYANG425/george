@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from '../config.js';
+import { applyNoReplyGate } from './noreply-gate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = path.resolve(__dirname, '../../prompts');
@@ -13,7 +14,10 @@ function readPrompt(name: string): string {
   return fs.readFileSync(path.join(PROMPTS_DIR, `${name}.md`), 'utf-8');
 }
 
-export const MASTER_PROMPT = readPrompt('master');
+// master.md carries the {{NO_REPLY}} opt-out instruction between sentinels;
+// applyNoReplyGate keeps it iff GEORGE_NOREPLY_ENABLED, else strips it (default
+// OFF → byte-for-byte unchanged). See ./noreply-gate.ts.
+export const MASTER_PROMPT = applyNoReplyGate(readPrompt('master'));
 export const ORCHESTRATOR_PROMPT = readPrompt('orchestrator');
 const FIND_PEOPLE_PROMPT = readPrompt('find-people');
 const WHATS_HAPPENING_PROMPT = readPrompt('whats-happening');

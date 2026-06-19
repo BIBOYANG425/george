@@ -15,7 +15,7 @@ import {
   recordSpectrumError,
   recordSpectrumReconnecting,
 } from './spectrum-stats.js'
-import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS } from './split-response.js'
+import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS, parseControlTokens, isNoReplyEnabled } from './split-response.js'
 import { log } from '../observability/logger.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
 import { captureFactsFromTurn } from '../memory/capture.js'
@@ -97,10 +97,22 @@ export async function runSpectrumLoop(
       // (same as the legacy adapter). A single-paragraph reply stays one bubble.
       // Suppress the send entirely if a rapid follow-up superseded this turn.
       if (out && !ac.signal.aborted) {
-        const parts = splitIntoMessages(out)
-        for (let i = 0; i < parts.length; i++) {
-          if (i > 0) await sleep(INTER_MESSAGE_DELAY_MS)
-          await buf.reply.sendText(parts[i])
+        // Output-format control: George may emit {{NO_REPLY}} to decline to reply
+        // (pure ack / automated text). When GEORGE_NOREPLY_ENABLED is on, suppress
+        // the send entirely; otherwise strip the token so it can never reach a
+        // user. Default OFF: this branch is exactly the previous send loop over
+        // splitIntoMessages(out), so behavior is byte-for-byte unchanged.
+        let toSend: string | null = out
+        if (isNoReplyEnabled()) {
+          const { noReply, text } = parseControlTokens(out)
+          toSend = noReply ? null : text
+        }
+        if (toSend) {
+          const parts = splitIntoMessages(toSend)
+          for (let i = 0; i < parts.length; i++) {
+            if (i > 0) await sleep(INTER_MESSAGE_DELAY_MS)
+            await buf.reply.sendText(parts[i])
+          }
         }
       }
     } catch (err) {

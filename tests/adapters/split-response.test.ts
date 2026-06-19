@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest'
-import { splitIntoMessages } from '../../src/adapters/split-response.js'
+import { describe, it, expect, afterEach } from 'vitest'
+import {
+  splitIntoMessages,
+  parseControlTokens,
+  stripControlTokens,
+  isNoReplyEnabled,
+} from '../../src/adapters/split-response.js'
 
 describe('splitIntoMessages', () => {
   it('returns single-element array for prose without blank lines', () => {
@@ -54,5 +59,90 @@ describe('splitIntoMessages', () => {
     const input = '一\n\n二\n\n三'
     const result = splitIntoMessages(input)
     expect(result).toEqual(['一', '二', '三'])
+  })
+})
+
+describe('parseControlTokens', () => {
+  it('returns noReply:false and trimmed text for an ordinary reply', () => {
+    expect(parseControlTokens('  BUAD 280 别上  ')).toEqual({
+      noReply: false,
+      text: 'BUAD 280 别上',
+    })
+  })
+
+  it('detects a lone {{NO_REPLY}} token and yields empty text', () => {
+    expect(parseControlTokens('{{NO_REPLY}}')).toEqual({ noReply: true, text: '' })
+  })
+
+  it('is case-insensitive and tolerates inner whitespace', () => {
+    expect(parseControlTokens('{{ no_reply }}').noReply).toBe(true)
+    expect(parseControlTokens('{{No_Reply}}').noReply).toBe(true)
+  })
+
+  it('strips the token even when the model pads it with stray words', () => {
+    const r = parseControlTokens('收到啦 {{NO_REPLY}}')
+    expect(r.noReply).toBe(true)
+    expect(r.text).toBe('收到啦')
+  })
+
+  it('strips every occurrence when the token repeats', () => {
+    const r = parseControlTokens('{{NO_REPLY}} a {{NO_REPLY}} b')
+    expect(r.noReply).toBe(true)
+    expect(r.text).toBe('a  b')
+  })
+
+  it('leaves a non-token reply untouched (no false positive on {{ }} prose)', () => {
+    const r = parseControlTokens('用 {{name}} 占位')
+    expect(r.noReply).toBe(false)
+    expect(r.text).toBe('用 {{name}} 占位')
+  })
+
+  it('is safe on empty / null-ish input', () => {
+    expect(parseControlTokens('')).toEqual({ noReply: false, text: '' })
+    // @ts-expect-error exercising the null-guard at runtime
+    expect(parseControlTokens(undefined)).toEqual({ noReply: false, text: '' })
+  })
+
+  it('is idempotent across calls (regex lastIndex is reset)', () => {
+    // The /g regex must not leak state between calls.
+    expect(parseControlTokens('{{NO_REPLY}}').noReply).toBe(true)
+    expect(parseControlTokens('{{NO_REPLY}}').noReply).toBe(true)
+    expect(parseControlTokens('hi').noReply).toBe(false)
+    expect(parseControlTokens('{{NO_REPLY}}').noReply).toBe(true)
+  })
+})
+
+describe('stripControlTokens', () => {
+  it('removes the token from outgoing text', () => {
+    expect(stripControlTokens('好的 {{NO_REPLY}}')).toBe('好的')
+  })
+
+  it('passes ordinary text through trimmed', () => {
+    expect(stripControlTokens('  hi  ')).toBe('hi')
+  })
+})
+
+describe('isNoReplyEnabled', () => {
+  const prev = process.env.GEORGE_NOREPLY_ENABLED
+  afterEach(() => {
+    if (prev === undefined) delete process.env.GEORGE_NOREPLY_ENABLED
+    else process.env.GEORGE_NOREPLY_ENABLED = prev
+  })
+
+  it('is OFF by default (unset)', () => {
+    delete process.env.GEORGE_NOREPLY_ENABLED
+    expect(isNoReplyEnabled()).toBe(false)
+  })
+
+  it('is OFF for any value other than the literal "true"', () => {
+    process.env.GEORGE_NOREPLY_ENABLED = '1'
+    expect(isNoReplyEnabled()).toBe(false)
+    process.env.GEORGE_NOREPLY_ENABLED = 'yes'
+    expect(isNoReplyEnabled()).toBe(false)
+  })
+
+  it('is ON only when set to "true"', () => {
+    process.env.GEORGE_NOREPLY_ENABLED = 'true'
+    expect(isNoReplyEnabled()).toBe(true)
   })
 })
