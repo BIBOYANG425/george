@@ -1,0 +1,29 @@
+# Standalone admin dashboard image — deploys ONLY scripts/dashboard-server.ts
+# (the read-only monitoring + controls UI), independent of the agent backend.
+#
+# It reads Supabase directly and imports none of the heavy native modules
+# (better-sqlite3 / photon-imessage-kit / spectrum-ts), so we skip their native
+# builds entirely (--ignore-scripts) — no python/make/g++ toolchain, fast image.
+#
+# Required env at runtime: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ADMIN_TOKEN.
+# PORT is injected by the platform (Railway / Cloudflare Container / Fly).
+#
+# Build:  docker build -f Dockerfile.dashboard -t george-dashboard .
+# Run:    docker run -p 3009:3009 --env-file .env george-dashboard
+FROM node:20-slim
+WORKDIR /app
+
+COPY package*.json tsconfig.json ./
+# Skip lifecycle scripts → no native compilation. tsx (devDep) is kept for the
+# runtime entrypoint, so we do NOT --omit=dev.
+RUN npm ci --ignore-scripts
+
+COPY src/ ./src/
+COPY scripts/ ./scripts/
+
+ENV NODE_ENV=production
+# Default; the platform overrides via PORT.
+EXPOSE 3009
+HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://localhost:'+(process.env.PORT||3009)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["npx", "tsx", "scripts/dashboard-server.ts"]

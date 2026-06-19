@@ -3,6 +3,11 @@ import { getStudentById, updateStudent } from '../db/students.js'
 import { log } from '../observability/logger.js'
 import { wrapTool } from './_wrap.js'
 
+// Canonical onboarding contract: @biboyang425/bia-shared/students
+// (ONBOARDING_REQUIRED_FIELDS + missingOnboardingFields/isOnboardingComplete).
+// Duplicated here on purpose — george is a plain-Node service and bia-shared ships raw
+// TS meant for Next consumers to transpile, so importing it at runtime isn't viable.
+// Keep these four fields and the completeness check below in sync with that contract.
 const REQUIRED_FIELDS = ['major', 'year', 'interests', 'notification_frequency'] as const
 
 const inputSchema = {

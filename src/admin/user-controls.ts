@@ -14,7 +14,20 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { supabase } from '../db/client.js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+
+// Lazily create our OWN service-role client from env instead of importing
+// ../db/client (which pulls in config.ts and would require ANTHROPIC_API_KEY).
+// Keeps the admin dashboard deployable standalone with only SUPABASE_* set.
+let _sb: SupabaseClient | null = null;
+function db(): SupabaseClient {
+  if (!_sb) {
+    _sb = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+      auth: { persistSession: false },
+    });
+  }
+  return _sb;
+}
 
 const STORE_PATH = path.resolve(process.cwd(), 'data', 'user-controls.json');
 
@@ -127,7 +140,7 @@ export function startOfLADayISO(): string {
 // orchestrator runs, so this includes the in-flight message.
 export async function countTodayUserMessages(userId: string): Promise<number> {
   const today = startOfLADayISO();
-  const { count } = await supabase
+  const { count } = await db()
     .from('messages')
     .select('*', { count: 'exact', head: true })
     .eq('user_id', userId)
