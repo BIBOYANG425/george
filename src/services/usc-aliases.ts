@@ -59,11 +59,11 @@ export const ALIASES: Alias[] = [
   // Neighborhoods
   { canonical: 'K-town', variants: ['k town', 'ktown', 'k-town', 'koreatown', 'korea town'], lat: 34.063, lng: -118.300, neighborhood: 'Koreatown' },
   { canonical: 'DTLA', variants: ['dtla', 'downtown', 'downtown la', 'downtown los angeles'], lat: 34.053, lng: -118.243, neighborhood: 'Downtown LA' },
-  { canonical: 'Arcadia', variants: ['arcadia', '626', 'sgv', 'san gabriel valley'], lat: 34.139, lng: -118.035, neighborhood: '626 / SGV' },
-  { canonical: 'San Gabriel', variants: ['san gabriel'], lat: 34.096, lng: -118.106, neighborhood: '626 / SGV' },
+  { canonical: 'Arcadia', variants: ['arcadia', 'sgv', 'san gabriel valley'], lat: 34.139, lng: -118.035, neighborhood: 'SGV' },
+  { canonical: 'San Gabriel', variants: ['san gabriel'], lat: 34.096, lng: -118.106, neighborhood: 'SGV' },
   { canonical: 'Santa Monica', variants: ['santa monica', 'sm'], lat: 34.020, lng: -118.491, neighborhood: 'West LA' },
   { canonical: 'Hollywood', variants: ['hollywood'], lat: 34.099, lng: -118.329, neighborhood: 'Hollywood' },
-  { canonical: 'Rowland Heights', variants: ['rowland heights', 'rowland'], lat: 33.978, lng: -117.905, neighborhood: '626 / SGV' },
+  { canonical: 'Rowland Heights', variants: ['rowland heights', 'rowland'], lat: 33.978, lng: -117.905, neighborhood: 'SGV' },
   { canonical: 'Irvine', variants: ['irvine', 'oc'], lat: 33.683, lng: -117.794, neighborhood: 'Orange County' },
 
   // Transit

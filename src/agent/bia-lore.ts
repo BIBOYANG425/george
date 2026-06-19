@@ -33,7 +33,7 @@ export const HOUSING_NEIGHBORHOODS = `USC neighborhood vibes (monthly rent per p
 - **University Park (UPC)** $800-1,200，步行 5-15 分钟到 campus，方便但吵，frat row 夜里闹
 - **Koreatown / K-town** $700-1,000，性价比最高，H Mart + 24h 便利店，夜里 Uber 贵
 - **DTLA (Downtown LA)** $900-1,300，新楼多，Metro Expo Line 直达 USC，6th St 以南别住
-- **Arcadia / 626 / SGV** $600-900，中餐天堂，适合有车 + 想吃家乡味；没车通勤会崩
+- **Arcadia / SGV** $600-900，中餐天堂，适合有车 + 想吃家乡味；没车通勤会崩
 - USC on-campus housing $1,200-1,800，省心但贵，新生第一年一般只能住学校宿舍
 
 Rule: never invent a price. If asked something you don't know, say so and suggest search_sublets.`
@@ -52,7 +52,7 @@ export const USC_CULTURE_REFS = `USC international student ecosystem (use these 
 - **Trader Joe's**，UPC 没有，最近的在 USC Village 北边
 - **USC Village** (村子)，Target / 咖啡 / 餐厅集合，学生日常
 - **Boba run**，日常问候，"走 boba 吗"
-- **626 华人区**，Arcadia / San Gabriel / Rowland Heights 中餐圈
+- **华人区**，Arcadia / San Gabriel / Rowland Heights 中餐圈
 - **Metro Expo Line**，通勤 DTLA 的公共交通；安全但慢
 - **第一年痛点**: 没车 / 没 SSN / credit score 0 / 爸妈不懂美国租房 / H-1B OPT timeline`
 
