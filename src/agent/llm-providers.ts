@@ -16,13 +16,17 @@ export function getClaudeClient(): Anthropic {
 
 export async function callLightweightLLM(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  options?: { maxTokens?: number; jsonMode?: boolean },
+  options?: { maxTokens?: number; jsonMode?: boolean; model?: string },
 ): Promise<string> {
   const apiKey = config.kimi.apiKey
 
   if (!apiKey) {
     const response = await claude.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      // Defaults to the fast Haiku tier (classify/extract/capture). Callers that
+      // need more judgment (e.g. the relationship-memory evaluator) may pass a
+      // smarter model via options.model — e.g. config.models.smart. Unset keeps
+      // every existing caller on Haiku, byte-for-byte.
+      model: options?.model || 'claude-haiku-4-5-20251001',
       max_tokens: options?.maxTokens || 500,
       // Lightweight calls (classify, extract, capture) don't need extended
       // thinking; disabling it drops ~7s/call on the DeepSeek-backed fast tier.
@@ -37,7 +41,10 @@ export async function callLightweightLLM(
   }
 
   const body: Record<string, unknown> = {
-    model: 'moonshot-v1-8k',
+    // model override is only honored for Anthropic ids (the SMART tier is an
+    // Anthropic model). On the Kimi path keep the default 8k model unless a
+    // caller passes an explicit Kimi/Moonshot model id.
+    model: options?.model?.startsWith('moonshot') ? options.model : 'moonshot-v1-8k',
     messages,
     max_tokens: options?.maxTokens || 500,
   }
