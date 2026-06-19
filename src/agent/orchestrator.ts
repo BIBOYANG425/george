@@ -27,6 +27,7 @@ import { extractRelationshipNote, upsertRelationshipNote } from '../memory/profi
 import { isRelationshipEvalEnabled } from './evaluators/relationship.js';
 import { stripRaisedThreadLines } from './grounded-proactive.js';
 import { renderActivityBlock } from './activity-state.js';
+import { getWorldStateStore, worldStateEnabled } from './world-state.js';
 import { fastReply } from './fast-path.js';
 import { checkUsageAllowed, resolveModelForUser } from '../admin/user-controls.js';
 
@@ -164,7 +165,15 @@ function buildStudentIdBlock(studentId?: string | null): string {
   ].join('\n');
 }
 
-export function buildOrchestratorPrompt(profile?: Profile | null, studentId?: string | null, delayContext?: string): string {
+// `delayContext` (long-gap note) and `worldStateBlock` (World Info timed-state
+// overlay) are optional per-turn overlays pre-rendered by the caller. Both empty
+// by default, so when their flags are off the prompt is byte-for-byte unchanged.
+export function buildOrchestratorPrompt(
+  profile?: Profile | null,
+  studentId?: string | null,
+  delayContext?: string,
+  worldStateBlock: string = '',
+): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
   // Calendar-mood overlay (master.md "Calendar mood overlay"): inject the current
   // academic-calendar tone so finals/orientation/etc. actually changes behavior.
@@ -177,6 +186,8 @@ export function buildOrchestratorPrompt(profile?: Profile | null, studentId?: st
   // Delay-context (long-gap note from the transport adapter): already self-gated
   // upstream — only non-empty when the flag is on and the gap was long.
   if (delayContext) parts.push(delayContext);
+  // World Info timed-state overlay (P5): pre-rendered by the caller; '' by default.
+  if (worldStateBlock) parts.push(worldStateBlock);
   const userProfileBlock = buildUserProfileBlock(profile);
   if (userProfileBlock) parts.push(userProfileBlock);
   const relationshipNoteBlock = buildRelationshipNoteBlock(profile);
@@ -226,6 +237,7 @@ export function buildSingleAgentPrompt(
   studentId?: string | null,
   webAllowed: boolean = false,
   delayContext?: string,
+  worldStateBlock: string = '',
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
   const moodBlock = renderMoodBlock();
@@ -236,6 +248,8 @@ export function buildSingleAgentPrompt(
   if (activityBlock) parts.push(activityBlock);
   // Delay-context (long-gap note): self-gated upstream; '' by default.
   if (delayContext) parts.push(delayContext);
+  // World Info timed-state overlay (P5): pre-rendered by the caller; '' by default.
+  if (worldStateBlock) parts.push(worldStateBlock);
   const userProfileBlock = buildUserProfileBlock(profile);
   if (userProfileBlock) parts.push(userProfileBlock);
   const relationshipNoteBlock = buildRelationshipNoteBlock(profile);
@@ -402,6 +416,19 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // Conversation history (used by both the fast path and the full agent).
   const historyPrefix = await buildHistoryPrefix(args.sessionStore, args.userId);
 
+  // World Info timed-state (P5) — OBSERVE every user turn, BEFORE the fast-path
+  // early-return below, so the per-user turn counter advances and a charged
+  // keyword warms its topic even on turns the fast path answers. Skipping this on
+  // fast-path turns would stall decay and miss warmth. The overlay is rendered
+  // further down for the full-agent prompt. Default-OFF + fail-open.
+  if (worldStateEnabled()) {
+    try {
+      getWorldStateStore().observe(args.userId, args.text);
+    } catch (err) {
+      log('warn', 'world_state_error', { error: (err as Error).message });
+    }
+  }
+
   // FAST PATH: most messages (greetings, small talk, feelings, thanks) need no
   // tools and no dispatch. Answer them with ONE direct flash call (~2-3s) instead
   // of the full multi-hop engine (~50s). fastReply returns null — falling through
@@ -438,10 +465,24 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     }
   }
 
+  // World Info timed-state (P5): RENDER the overlay (the turn was already observed
+  // above, before the fast-path return). Injected so George stays attuned to a
+  // charged topic the student raised (visa / finals / homesick / job-hunt).
+  // Default-OFF: when WORLD_STATE_ENABLED is unset this stays '' and the prompt is
+  // byte-for-byte unchanged. Fail-open — never block a turn on it.
+  let worldStateBlock = '';
+  if (worldStateEnabled()) {
+    try {
+      worldStateBlock = getWorldStateStore().render(args.userId);
+    } catch (err) {
+      log('warn', 'world_state_error', { error: (err as Error).message });
+    }
+  }
+
   // Web search is rationed per student/day; when over cap, it's omitted from the
   // turn's tool set and the guidance block is dropped (find_places stays free).
   const webAllowed = !isWebSearchOverCap(studentId);
-  const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext);
+  const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext, worldStateBlock);
   const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed, args.delayContext);
   const orchestratorTools = buildOrchestratorToolNames();
 
@@ -482,7 +523,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // george runs only with the tools and prompt we set here.
   const queryOptions = singleAgent
     ? {
-        systemPrompt: buildSingleAgentPrompt(profile, studentId, webAllowed, args.delayContext),
+        systemPrompt: buildSingleAgentPrompt(profile, studentId, webAllowed, args.delayContext, worldStateBlock),
         model: resolvedModel,
         // Disable extended thinking on the agent loop — it adds ~7s PER tool-call
         // turn (DeepSeek-v4 defaults it on). Tools provide the grounding; the
