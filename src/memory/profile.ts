@@ -2,6 +2,7 @@
 // Per-user 6-block profile load/save with KV cache.
 
 import { KVCache } from './kv-cache.js';
+import { stripRaisedThreadLines } from '../agent/grounded-proactive.js';
 
 export const BLOCK_NAMES = [
   'identity',
@@ -142,7 +143,9 @@ export class ProfileStore {
 
   renderForPrompt(profile: Profile): string {
     const sections = BLOCK_NAMES.map((name) => {
-      const content = profile[name];
+      // Hide the grounded-proactive RAISED_THREAD ledger from the heartbeat's
+      // profile view; it's an internal dedupe trail, not memory about the user.
+      const content = name === 'george_notes' ? stripRaisedThreadLines(profile[name]) : profile[name];
       const label = name.toUpperCase().replace('_', ' ');
       return `## ${label}\n${content || '(empty)'}`;
     });

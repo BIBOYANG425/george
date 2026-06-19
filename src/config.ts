@@ -77,6 +77,11 @@ export const config = {
     enabled: process.env.PROACTIVE_ENABLED !== 'false',
     rolloutPct: parseInt(process.env.PROACTIVE_ROLLOUT_PCT || '10'),
   },
+  // NOTE: the P4 grounded-proactive flag (GROUNDED_PROACTIVE_ENABLED) is read at
+  // call time by isGroundedProactiveEnabled() in src/agent/grounded-proactive.ts
+  // (same precedent as MEMORY_CAPTURE_ENABLED in src/memory/capture.ts), so it is
+  // intentionally NOT surfaced here — that keeps the heartbeat module free of
+  // this file's eager required-env validation. DEFAULT-OFF when unset.
 }
 
 export type TransportMode = 'spectrum' | 'legacy'

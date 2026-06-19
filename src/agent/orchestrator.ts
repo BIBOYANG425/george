@@ -25,6 +25,7 @@ import { trustedDomains } from '../services/web-search-config.js';
 import { renderMoodBlock } from './calendar-mood.js';
 import { extractRelationshipNote, upsertRelationshipNote } from '../memory/profile.js';
 import { isRelationshipEvalEnabled } from './evaluators/relationship.js';
+import { stripRaisedThreadLines } from './grounded-proactive.js';
 import { fastReply } from './fast-path.js';
 import { checkUsageAllowed, resolveModelForUser } from '../admin/user-controls.js';
 
@@ -72,8 +73,13 @@ function buildUserProfileBlock(profile?: Profile | null): string {
   const relEvalOn = isRelationshipEvalEnabled();
   const sections = blocks.map((name) => {
     let content = profile[name];
-    if (name === 'george_notes' && relEvalOn && content) {
-      content = upsertRelationshipNote(content, '');
+    if (name === 'george_notes') {
+      // Strip the grounded-proactive RAISED_THREAD ledger (internal audit trail),
+      // and when the relationship eval is on, the sentinel-fenced prose note
+      // (surfaced in its own labeled section). Both are no-ops when their markers
+      // are absent, so an untouched george_notes block renders unchanged.
+      content = stripRaisedThreadLines(content);
+      if (relEvalOn && content) content = upsertRelationshipNote(content, '');
     }
     const label = name.toUpperCase().replace('_', ' ');
     return `## ${label}\n${content || '(empty)'}`;
