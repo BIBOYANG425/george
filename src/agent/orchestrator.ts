@@ -13,7 +13,7 @@
 // to become a per-invocation factory that takes a profile argument.
 
 import { query, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
-import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS, ORCHESTRATOR_MODEL, UNIFIED_DOMAIN_PROMPT } from './agents.config.js';
+import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS, ORCHESTRATOR_MODEL, UNIFIED_DOMAIN_PROMPT, KNOW_THINGS_PROMPT, TRUNK_TOOLS, TRUNK_MODEL } from './agents.config.js';
 import { getFullCatalog } from '../skills/index.js';
 import { ALL_TOOLS } from '../tools/index.js';
 import type { SessionStore, TurnTelemetry } from './session-store.js';
@@ -263,6 +263,117 @@ export function buildSingleAgentPrompt(
   return parts.join('\n\n');
 }
 
+// ── Trunk-hybrid path (GEORGE_TRUNK_HYBRID, default-OFF) ──
+// Purpose-built routing prompt for the TRUNK (must-fix 2). It deliberately does
+// NOT reuse prompts/orchestrator.md (ORCHESTRATOR_PROMPT) — that file says
+// "delegate to ONE of these three" incl. know-things and references
+// Agent('know-things', ...), which contradicts the trunk having NO know-things
+// sub-agent. Injecting it verbatim + a short addendum would fight itself and make
+// the model narrate or attempt a non-existent dispatch. So the trunk gets THIS
+// self-contained routing prompt instead, and prompts/orchestrator.md stays
+// byte-for-byte unchanged for the OFF path (it is never read on the trunk path).
+const TRUNK_ROUTING_PROMPT = [
+  '# How you operate',
+  '',
+  "You are George. You receive a USC student's message and respond directly in",
+  'your own voice. You answer USC knowledge yourself with your own tools, and you',
+  'dispatch to a specialist sub-agent ONLY for two specific intents.',
+  '',
+  '## Answer directly (do NOT dispatch)',
+  '',
+  'You hold the full USC-knowledge toolset. Handle these yourself, end to end, by',
+  'calling your tools and writing the reply — never hand them off:',
+  '- Courses, professors, RMP, GE requirements, schedule planning, course tips.',
+  '- Housing, dorms, sublets, roommates search, neighborhood price ranges.',
+  '- Immigration / OIS, tuition payment, campus services, dining, study spots.',
+  '- Walkability / DPS-zone safety questions (you have dps_zone_check + find_places).',
+  '- Small talk, feelings, thanks, refusal categories — answer directly, no tools.',
+  '',
+  '## Dispatch to a sub-agent (exactly these two intents, 0-or-1 per turn)',
+  '',
+  'You have a sub-agent dispatch tool. Use it ONLY for:',
+  '- **find-people** — squad organizing / joining (找搭子): the student wants to',
+  '  organize or post a group activity ("想组个局", "找几个人去吃韩烤", "发个帖"),',
+  '  find open 局s to join, or join one. You hold ZERO squad tools, so you cannot',
+  '  fulfill this yourself — dispatch it.',
+  "- **whats-happening** — events discovery: parties, club events, weekend ideas,",
+  '  what BIA events are coming up. Dispatch it.',
+  '',
+  'CRITICAL: actually INVOKE the sub-agent via your dispatch tool. NEVER write the',
+  'dispatch as text (do NOT reply with "Agent(\'find-people\', ...)" or "dispatching',
+  'to ..."). The user must only ever see the actual answer. Pass the sub-agent\'s',
+  'reply through UNCHANGED — it already inherits your voice. There is no know-things',
+  'sub-agent: knowledge questions are yours to answer with your own tools.',
+  '',
+  '## Routing rules',
+  '',
+  '- Most messages: answer directly with your tools (knowledge) or no tools (talk).',
+  '- Squad organizing/joining → dispatch find-people. Events discovery → dispatch',
+  '  whats-happening. A message that needs squad AND events can dispatch both.',
+  "- Never second-guess a sub-agent's refusal. If it refuses, surface the refusal.",
+].join('\n');
+
+// Trunk system prompt: MASTER (voice + anti-fabrication, universal) + the trunk
+// routing prompt + the know-things domain rules inlined verbatim (so the trunk
+// keeps every course/housing/immigration/campus rule that used to live in the
+// dispatched know-things sub-agent) + batch/course-fastpath speed levers + the
+// SAME overlay stack the orchestrator builds (mood→activity→delay→worldState→
+// userProfile→relationship→onboarding→studentId) + web guidance (when allowed) +
+// the skill catalog. Mirrors buildSingleAgentPrompt's structure, narrowed to the
+// one inlined domain. Extended thinking is disabled at the query layer (step 4),
+// matching the single-agent path, because the trunk does all tool work in one loop.
+export function buildTrunkPrompt(
+  profile?: Profile | null,
+  studentId?: string | null,
+  webAllowed: boolean = false,
+  delayContext?: string,
+  worldStateBlock: string = '',
+): string {
+  const parts = [
+    `${MASTER_PROMPT}\n\n${TRUNK_ROUTING_PROMPT}`,
+    KNOW_THINGS_PROMPT,
+    BATCH_TOOLS_GUIDANCE,
+    COURSE_FASTPATH_GUIDANCE,
+  ];
+  // Overlay stack — copied verbatim from buildOrchestratorPrompt / buildSingleAgentPrompt
+  // so the overlays are byte-identical for the same inputs.
+  const moodBlock = renderMoodBlock();
+  if (moodBlock) parts.push(moodBlock);
+  const activityBlock = renderActivityBlock();
+  if (activityBlock) parts.push(activityBlock);
+  if (delayContext) parts.push(delayContext);
+  if (worldStateBlock) parts.push(worldStateBlock);
+  const userProfileBlock = buildUserProfileBlock(profile);
+  if (userProfileBlock) parts.push(userProfileBlock);
+  const relationshipNoteBlock = buildRelationshipNoteBlock(profile);
+  if (relationshipNoteBlock) parts.push(relationshipNoteBlock);
+  if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
+  const studentIdBlock = buildStudentIdBlock(studentId);
+  if (studentIdBlock) parts.push(studentIdBlock);
+  if (webAllowed) parts.push(webSearchGuidance());
+  const catalog = getFullCatalog();
+  if (catalog) parts.push(catalog);
+  return parts.join('\n\n');
+}
+
+// Trunk agents config (must-fix 5): a THIN WRAPPER over buildAgentsConfig that
+// keeps only the two dispatched sub-agents (find-people + whats-happening) and
+// drops know-things (the trunk answers that domain directly). It deliberately does
+// NOT change buildAgentsConfig's signature or default 3-agent shape — the OFF
+// multi-agent path and tests/agent/orchestrator.test.ts both depend on its current
+// output, including know-things' WebSearch/find_places wiring.
+export function buildTrunkAgentsConfig(
+  profile?: Profile | null,
+  studentId?: string | null,
+  webAllowed: boolean = false,
+  delayContext?: string,
+): Record<string, { description: string; prompt: string; tools: string[]; model?: string }> {
+  const full = buildAgentsConfig(profile, studentId, webAllowed, delayContext);
+  const { ['know-things']: _knowThings, ...kept } = full;
+  void _knowThings;
+  return kept;
+}
+
 // Dynamic WebSearch guidance — injected into the info sub-agents (whats-happening,
 // know-things) only while the user is under their daily web-search cap. Carries
 // the trusted-domain list the agent must pass as allowed_domains (allowed_domains
@@ -352,6 +463,121 @@ function buildOrchestratorToolNames(): string[] {
   // both "Task" and "Agent" — include both so whichever the runtime exposes
   // is permitted. The direct tools are namespaced to their MCP names.
   return ['Task', 'Agent', ...ORCHESTRATOR_DIRECT_TOOLS.map(nsTool)];
+}
+
+// Resolved per-turn inputs the query-options builder needs. Kept as a plain
+// argument bag so the builder is a pure function of its inputs — that is what lets
+// the OFF-path equivalence test assert byte-identical options across flag flips.
+export interface QueryOptionsInputs {
+  trunkHybrid: boolean;
+  singleAgent: boolean;
+  profile?: Profile | null;
+  studentId?: string | null;
+  webAllowed: boolean;
+  delayContext?: string;
+  worldStateBlock: string;
+  // Already resolved by the caller. OFF path uses resolveModelForUser(userId,
+  // ORCHESTRATOR_MODEL); trunk path uses resolveModelForUser(userId, TRUNK_MODEL).
+  resolvedModel: string;
+  trunkModel: string;
+  // Pre-built for the OFF branches (kept identical to today's call sites).
+  systemPrompt: string;
+  agentsConfig: Record<string, { description: string; prompt: string; tools: string[]; model?: string }>;
+  orchestratorTools: string[];
+  maxTurns?: number;
+  abortController?: AbortController;
+}
+
+/**
+ * Build the SDK query() options for the turn. Three mutually-exclusive paths,
+ * selected by GEORGE_TRUNK_HYBRID (highest precedence) → SINGLE_AGENT → default
+ * multi-agent dispatch.
+ *
+ * Extracted as an exported pure function so the OFF-path equivalence test
+ * (must-fix 4) can assert that, with GEORGE_TRUNK_HYBRID unset, the singleAgent
+ * and multi branches are byte-identical to today's behavior — and so the ON path
+ * is inspectable without invoking the real SDK.
+ *
+ * INVARIANT: when trunkHybrid is false the returned options come from the SAME
+ * two branches as before (moved verbatim into the else-if/else), so the OFF path
+ * is byte-for-byte unchanged. settingSources:[] is preserved in ALL THREE branches
+ * (the CRITICAL sandbox invariant).
+ */
+export function buildQueryOptions(inputs: QueryOptionsInputs) {
+  const allToolsNs = [...Object.keys(ALL_TOOLS).map(nsTool), ...(inputs.webAllowed ? ['WebSearch'] : [])];
+  if (inputs.trunkHybrid) {
+    // ── Trunk-hybrid (GEORGE_TRUNK_HYBRID=true) ──
+    // ONE trunk agent answers general convo + USC knowledge directly (holding the
+    // know-things toolset + the 2 ex-orchestrator direct tools + ge_candidates) and
+    // dispatches ONLY to find-people / whats-happening. Thinking is disabled to
+    // match the single-agent path (the trunk does all tool work in one loop —
+    // exactly the case thinking was disabled for: ~7s/tool-turn saved).
+    const trunkAllow = [
+      'Task',
+      'Agent',
+      ...TRUNK_TOOLS.map(nsTool),
+      ...(inputs.webAllowed ? ['WebSearch'] : []),
+    ];
+    return {
+      systemPrompt: buildTrunkPrompt(
+        inputs.profile,
+        inputs.studentId,
+        inputs.webAllowed,
+        inputs.delayContext,
+        inputs.worldStateBlock,
+      ),
+      model: inputs.trunkModel,
+      thinking: { type: 'disabled' as const },
+      mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
+      tools: trunkAllow,
+      allowedTools: trunkAllow,
+      agents: buildTrunkAgentsConfig(
+        inputs.profile,
+        inputs.studentId,
+        inputs.webAllowed,
+        inputs.delayContext,
+      ),
+      maxTurns: inputs.maxTurns ?? 10,
+      abortController: inputs.abortController,
+      settingSources: [],
+      persistSession: false,
+    };
+  }
+  if (inputs.singleAgent) {
+    return {
+      systemPrompt: buildSingleAgentPrompt(
+        inputs.profile,
+        inputs.studentId,
+        inputs.webAllowed,
+        inputs.delayContext,
+        inputs.worldStateBlock,
+      ),
+      model: inputs.resolvedModel,
+      // Disable extended thinking on the agent loop — it adds ~7s PER tool-call
+      // turn (DeepSeek-v4 defaults it on). Tools provide the grounding; the
+      // thinking was the dominant cost on tool queries (~35s → much less).
+      thinking: { type: 'disabled' as const },
+      mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
+      tools: allToolsNs,
+      allowedTools: allToolsNs,
+      maxTurns: inputs.maxTurns ?? 8,
+      abortController: inputs.abortController,
+      settingSources: [],
+      persistSession: false,
+    };
+  }
+  return {
+    systemPrompt: inputs.systemPrompt,
+    model: inputs.resolvedModel,
+    mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
+    tools: inputs.orchestratorTools,
+    allowedTools: ['Task', 'Agent', 'WebSearch', ...Object.keys(ALL_TOOLS).map(nsTool)],
+    agents: inputs.agentsConfig,
+    maxTurns: inputs.maxTurns ?? 12,
+    abortController: inputs.abortController,
+    settingSources: [],
+    persistSession: false,
+  };
 }
 
 /**
@@ -507,6 +733,18 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   const turnTools = new Set<string>();
   const telemetry: TurnTelemetry = { channel: args.channel, tools: [], outcome: 'success' };
 
+  // Three-way path precedence (default-OFF flags read as `=== 'true'`, exactly like
+  // SINGLE_AGENT / WORLD_STATE_ENABLED / etc.):
+  //   GEORGE_TRUNK_HYBRID → trunk + 2-sub-agent path (trunk answers USC knowledge
+  //     directly, dispatches only to find-people / whats-happening).
+  //   else SINGLE_AGENT → existing single-agent path (untouched).
+  //   else → existing multi-agent 3-sub-agent dispatch (untouched, the default).
+  // When GEORGE_TRUNK_HYBRID is unset the code uses the SAME two branches as today
+  // (moved verbatim into buildQueryOptions' else-if/else), so the produced options
+  // are byte-for-byte what they are today. settingSources:[] is preserved in all
+  // three branches — without it the SDK inherits the host's ~/.claude + project
+  // settings, MCP servers, hooks, and slash commands.
+  const trunkHybrid = process.env.GEORGE_TRUNK_HYBRID === 'true';
   // SINGLE_AGENT=true collapses the orchestrator + 3 sub-agents into ONE agent
   // that holds all tools and the unified domain prompt, so a tool query resolves
   // in one agentic loop instead of orchestrator-decide → dispatch → sub-agent.
@@ -514,41 +752,26 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // dispatch path is byte-for-byte unchanged when the flag is unset.
   const singleAgent = process.env.SINGLE_AGENT === 'true';
   // Per-user model control (set from the admin dashboard). Falls back to the
-  // global ORCHESTRATOR_MODEL when no override is configured for this user.
+  // global ORCHESTRATOR_MODEL (OFF/single paths) or TRUNK_MODEL (trunk path) when
+  // no override is configured for this user.
   const resolvedModel = resolveModelForUser(args.userId, ORCHESTRATOR_MODEL);
-  const allToolsNs = [...Object.keys(ALL_TOOLS).map(nsTool), ...(webAllowed ? ['WebSearch'] : [])];
-  // settingSources:[] is CRITICAL in BOTH paths — without it the SDK inherits the
-  // host's ~/.claude + project settings, MCP servers, hooks, and slash commands,
-  // so a student texting "/model" would hit Claude Code's real handler. Empty =
-  // george runs only with the tools and prompt we set here.
-  const queryOptions = singleAgent
-    ? {
-        systemPrompt: buildSingleAgentPrompt(profile, studentId, webAllowed, args.delayContext, worldStateBlock),
-        model: resolvedModel,
-        // Disable extended thinking on the agent loop — it adds ~7s PER tool-call
-        // turn (DeepSeek-v4 defaults it on). Tools provide the grounding; the
-        // thinking was the dominant cost on tool queries (~35s → much less).
-        thinking: { type: 'disabled' as const },
-        mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
-        tools: allToolsNs,
-        allowedTools: allToolsNs,
-        maxTurns: args.maxTurns ?? 8,
-        abortController: args.abortController,
-        settingSources: [],
-        persistSession: false,
-      }
-    : {
-        systemPrompt,
-        model: resolvedModel,
-        mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
-        tools: orchestratorTools,
-        allowedTools: ['Task', 'Agent', 'WebSearch', ...Object.keys(ALL_TOOLS).map(nsTool)],
-        agents: agentsConfig,
-        maxTurns: args.maxTurns ?? 12,
-        abortController: args.abortController,
-        settingSources: [],
-        persistSession: false,
-      };
+  const trunkModel = resolveModelForUser(args.userId, TRUNK_MODEL);
+  const queryOptions = buildQueryOptions({
+    trunkHybrid,
+    singleAgent,
+    profile,
+    studentId,
+    webAllowed,
+    delayContext: args.delayContext,
+    worldStateBlock,
+    resolvedModel,
+    trunkModel,
+    systemPrompt,
+    agentsConfig,
+    orchestratorTools,
+    maxTurns: args.maxTurns,
+    abortController: args.abortController,
+  });
 
   for await (const message of query({ prompt: promptWithHistory, options: queryOptions })) {
     // Record actual web searches performed this turn (server-tool usage) against

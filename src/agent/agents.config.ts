@@ -21,7 +21,11 @@ export const MASTER_PROMPT = applyNoReplyGate(readPrompt('master'));
 export const ORCHESTRATOR_PROMPT = readPrompt('orchestrator');
 const FIND_PEOPLE_PROMPT = readPrompt('find-people');
 const WHATS_HAPPENING_PROMPT = readPrompt('whats-happening');
-const KNOW_THINGS_PROMPT = readPrompt('know-things');
+// Exported for the trunk-hybrid path (GEORGE_TRUNK_HYBRID): buildTrunkPrompt inlines
+// the know-things domain rules verbatim (same technique buildSingleAgentPrompt uses
+// for UNIFIED_DOMAIN_PROMPT, just narrowed to one domain) so the trunk answers USC
+// knowledge directly. Still consumed by UNIFIED_DOMAIN_PROMPT below for the OFF path.
+export const KNOW_THINGS_PROMPT = readPrompt('know-things');
 
 // Single-agent mode: all three specializations merged into one prompt so ONE
 // agent (no orchestrator→sub-agent dispatch) can handle every domain. The agent
@@ -111,3 +115,26 @@ export const SUB_AGENTS = {
 export const ORCHESTRATOR_DIRECT_TOOLS = ['set_reminder', 'load_skill'] as const;
 
 export type SubAgentName = keyof typeof SUB_AGENTS;
+
+// ── Trunk-hybrid path (GEORGE_TRUNK_HYBRID, default-OFF) ──
+// The trunk model tier. The trunk now owns the high-stakes know-things reasoning
+// directly (no FAST-orchestrator → SMART-know-things hop), so it runs on SMART.
+// With the defaults (config.models.fast === config.models.smart === 'claude-sonnet-4-6')
+// this is the same model the orchestrator already uses; it diverges only if a
+// deployment overrides GEORGE_MODEL_SMART.
+export const TRUNK_MODEL = SMART_MODEL;
+
+// The tool set the trunk owns DIRECTLY (no dispatch). It is the know-things domain
+// tools + the 2 ex-orchestrator direct tools (set_reminder, load_skill). It does
+// NOT include find-people or what's-happening tools — those stay behind their
+// dispatched sub-agents. ge_candidates is added EXPLICITLY: it is named by the
+// inlined COURSE_FASTPATH guidance ("call ge_candidates ONCE") but is NOT in
+// SUB_AGENTS['know-things'].tools (it only lives in ALL_TOOLS), so without this the
+// GE fast path would tell the trunk to call a tool absent from its allowlist.
+// Used ONLY by the trunk-hybrid path; SUB_AGENTS / ORCHESTRATOR_DIRECT_TOOLS are
+// left untouched so the OFF path imports the same symbols as before.
+export const TRUNK_TOOLS = [
+  ...SUB_AGENTS['know-things'].tools,
+  'ge_candidates',
+  ...ORCHESTRATOR_DIRECT_TOOLS,
+] as const;
