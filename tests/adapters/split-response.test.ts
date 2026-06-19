@@ -4,6 +4,8 @@ import {
   parseControlTokens,
   stripControlTokens,
   isNoReplyEnabled,
+  isReadReceiptDelayEnabled,
+  getReadReceiptDelayMs,
 } from '../../src/adapters/split-response.js'
 
 describe('splitIntoMessages', () => {
@@ -144,5 +146,50 @@ describe('isNoReplyEnabled', () => {
   it('is ON only when set to "true"', () => {
     process.env.GEORGE_NOREPLY_ENABLED = 'true'
     expect(isNoReplyEnabled()).toBe(true)
+  })
+})
+
+describe('isReadReceiptDelayEnabled', () => {
+  const prev = process.env.GEORGE_READRECEIPT_DELAY_ENABLED
+  afterEach(() => {
+    if (prev === undefined) delete process.env.GEORGE_READRECEIPT_DELAY_ENABLED
+    else process.env.GEORGE_READRECEIPT_DELAY_ENABLED = prev
+  })
+
+  it('is OFF by default (unset)', () => {
+    delete process.env.GEORGE_READRECEIPT_DELAY_ENABLED
+    expect(isReadReceiptDelayEnabled()).toBe(false)
+  })
+
+  it('is ON only for the literal "true"', () => {
+    process.env.GEORGE_READRECEIPT_DELAY_ENABLED = 'true'
+    expect(isReadReceiptDelayEnabled()).toBe(true)
+    process.env.GEORGE_READRECEIPT_DELAY_ENABLED = '1'
+    expect(isReadReceiptDelayEnabled()).toBe(false)
+  })
+})
+
+describe('getReadReceiptDelayMs', () => {
+  const prev = process.env.GEORGE_READRECEIPT_DELAY_MS
+  afterEach(() => {
+    if (prev === undefined) delete process.env.GEORGE_READRECEIPT_DELAY_MS
+    else process.env.GEORGE_READRECEIPT_DELAY_MS = prev
+  })
+
+  it('is 0 when unset', () => {
+    delete process.env.GEORGE_READRECEIPT_DELAY_MS
+    expect(getReadReceiptDelayMs()).toBe(0)
+  })
+
+  it('reads a positive integer', () => {
+    process.env.GEORGE_READRECEIPT_DELAY_MS = '800'
+    expect(getReadReceiptDelayMs()).toBe(800)
+  })
+
+  it('clamps NaN / negative to 0', () => {
+    process.env.GEORGE_READRECEIPT_DELAY_MS = 'abc'
+    expect(getReadReceiptDelayMs()).toBe(0)
+    process.env.GEORGE_READRECEIPT_DELAY_MS = '-100'
+    expect(getReadReceiptDelayMs()).toBe(0)
   })
 })

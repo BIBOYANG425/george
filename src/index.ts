@@ -55,6 +55,10 @@ import { parseControlTokens, isNoReplyEnabled } from './adapters/split-response.
 import { captureFactsFromTurn } from './memory/capture.js'
 import { runCoordinatorOnce } from './jobs/squad-coordinator.js'
 import { buildCoordinatorDeps } from './services/squad-coordinator-deps.js'
+import { CRON_EVALUATORS, dispatchEvaluators } from './agent/evaluators/registry.js'
+import { setReachEvalDeps } from './agent/evaluators/reach.js'
+import { buildReachEvalDeps } from './services/reach-eval-deps.js'
+import type { EvalContext } from './agent/evaluators/types.js'
 
 // ALL_TOOLS (imported above) registers all 23 tools as a side effect.
 
@@ -645,6 +649,33 @@ if (process.env.SQUAD_COORDINATION_ENABLED === 'true') {
     }
   })
   console.log(`[squad-coordinator] enabled (${interval})`)
+}
+
+// Re-reach evaluator (Track 2): cron-only nudge for STALLED squad candidates,
+// 100% additive and separate from the live coordinator above. Off by default;
+// reuses the Spectrum proactive seam via buildReachEvalDeps. Cloned from the
+// SQUAD_COORDINATION_ENABLED block (own interval, own running flag, own
+// try/catch/log). When the flag is unset this block is never registered — zero
+// new cron, zero new queries (incl. the new rereached_at column), zero sends.
+if (process.env.SQUAD_REREACH_EVAL_ENABLED === 'true') {
+  const interval = process.env.SQUAD_REREACH_EVAL_INTERVAL_CRON || '0 * * * *'
+  setReachEvalDeps(buildReachEvalDeps())
+  let running = false
+  cron.schedule(interval, async () => {
+    if (running) { console.log('[rereach-eval] previous tick still running, skipping'); return }
+    running = true
+    const t0 = Date.now()
+    try {
+      const ctx: EvalContext = { now: new Date(), trigger: 'cron' }
+      await dispatchEvaluators(CRON_EVALUATORS, ctx)
+      console.log(`[rereach-eval] tick complete in ${Date.now() - t0}ms`)
+    } catch (err) {
+      console.error('[rereach-eval] tick failed:', err)
+    } finally {
+      running = false
+    }
+  })
+  console.log(`[rereach-eval] enabled (${interval})`)
 }
 
 // ==========================================

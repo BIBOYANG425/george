@@ -195,3 +195,101 @@ describe('runRelationshipEval', () => {
     expect(p.george_notes).toBe('');
   });
 });
+
+// ── relationshipEvaluator adapter (thin delegate over the functions above) ──
+describe('relationshipEvaluator adapter', () => {
+  const orig = process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED;
+  beforeEach(() => {
+    vi.mocked(callLightweightLLM).mockReset();
+  });
+  afterEach(() => {
+    if (orig === undefined) delete process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED;
+    else process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED = orig;
+  });
+
+  it('has the stable shape (name / kind / trigger)', () => {
+    expect(rel.relationshipEvaluator.name).toBe('relationship_eval');
+    expect(rel.relationshipEvaluator.kind).toBe('llm');
+    expect(rel.relationshipEvaluator.trigger).toBe('turn');
+  });
+
+  it('isEnabled tracks the existing flag exactly', () => {
+    delete process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED;
+    expect(rel.relationshipEvaluator.isEnabled()).toBe(rel.isRelationshipEvalEnabled());
+    expect(rel.relationshipEvaluator.isEnabled()).toBe(false);
+    process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED = 'true';
+    expect(rel.relationshipEvaluator.isEnabled()).toBe(true);
+  });
+
+  it('shouldRun delegates to shouldRunRelationshipEval with ctx.userMessageCount', () => {
+    // Cadence source: the CUMULATIVE count passed through ctx (NOT a window len).
+    expect(rel.relationshipEvaluator.shouldRun({ trigger: 'turn', userMessageCount: rel.RELATIONSHIP_EVAL_EVERY }))
+      .toBe(true);
+    expect(rel.relationshipEvaluator.shouldRun({ trigger: 'turn', userMessageCount: rel.RELATIONSHIP_EVAL_EVERY - 1 }))
+      .toBe(false);
+    // Missing count defaults to 0 -> never runs.
+    expect(rel.relationshipEvaluator.shouldRun({ trigger: 'turn' })).toBe(false);
+  });
+
+  it('run() is a no-op when the flag is OFF (delegates to runRelationshipEval gate)', async () => {
+    delete process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED;
+    const { store } = makeStore();
+    const sessionStore = {
+      load: vi.fn(async () => ({ sessionId: 'u', messages: [{ role: 'user' as const, content: 'hi' }], systemContext: {} })),
+      save: vi.fn(async () => {}),
+      list: vi.fn(async () => []),
+      delete: vi.fn(async () => {}),
+      countUserMessages: vi.fn(async () => 5),
+    };
+    await rel.relationshipEvaluator.run({
+      trigger: 'turn',
+      userId: 'u',
+      sessionStore,
+      profileStore: store,
+      userMessageCount: 5,
+    });
+    expect(callLightweightLLM).not.toHaveBeenCalled();
+  });
+
+  it('run() loads the session, filters, and calls runRelationshipEval when ON', async () => {
+    process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED = 'true';
+    vi.mocked(callLightweightLLM).mockResolvedValue('warm rapport, terse late texter');
+    const { store } = makeStore();
+    const sessionStore = {
+      load: vi.fn(async () => ({
+        sessionId: 'u9',
+        messages: [
+          { role: 'user' as const, content: '凌晨在赶 due' },
+          { role: 'assistant' as const, content: '狠狠共情' },
+          { role: 'system' as const, content: 'should be filtered out' },
+        ],
+        systemContext: {},
+      })),
+      save: vi.fn(async () => {}),
+      list: vi.fn(async () => []),
+      delete: vi.fn(async () => {}),
+      countUserMessages: vi.fn(async () => rel.RELATIONSHIP_EVAL_EVERY),
+    };
+    await rel.relationshipEvaluator.run({
+      trigger: 'turn',
+      userId: 'u9',
+      sessionStore,
+      profileStore: store,
+      userMessageCount: rel.RELATIONSHIP_EVAL_EVERY,
+    });
+    expect(sessionStore.load).toHaveBeenCalledWith('u9');
+    expect(callLightweightLLM).toHaveBeenCalledTimes(1);
+    // Only user/assistant string messages reach the transcript (system filtered).
+    const userPrompt = vi.mocked(callLightweightLLM).mock.calls[0][0][1].content as string;
+    expect(userPrompt).toContain('凌晨在赶 due');
+    expect(userPrompt).not.toContain('should be filtered out');
+  });
+
+  it('run() returns (no throw) when stores are missing', async () => {
+    process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED = 'true';
+    await expect(
+      rel.relationshipEvaluator.run({ trigger: 'turn', userId: 'u' }),
+    ).resolves.toBeUndefined();
+    expect(callLightweightLLM).not.toHaveBeenCalled();
+  });
+});

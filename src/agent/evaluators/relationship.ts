@@ -23,6 +23,7 @@ import { callLightweightLLM } from '../llm-providers.js';
 import { config } from '../../config.js';
 import { ProfileStore, upsertRelationshipNote, extractRelationshipNote } from '../../memory/profile.js';
 import { log } from '../../observability/logger.js';
+import type { Evaluator, EvalContext } from './types.js';
 
 export function isRelationshipEvalEnabled(): boolean {
   return process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED === 'true';
@@ -99,6 +100,35 @@ export async function runRelationshipEval(args: RelationshipEvalArgs): Promise<v
     log('warn', 'relationship_eval_failed', { error: (err as Error).message });
   }
 }
+
+// ── Evaluator adapter ───────────────────────────────────────────────────
+// Thin delegate that exposes the existing relationship functions through the
+// shared Evaluator contract. ADDITIVE: all of the above exports stay byte-for-
+// byte so the existing tests + the orchestrator's buildRelationshipNoteBlock
+// import keep passing; this adapter just lets the registry dispatch it.
+//
+// It encapsulates the exact dispatch block previously inlined in spectrum.ts
+// (countUserMessages -> shouldRun -> load session -> filter -> runRelationshipEval).
+// Cadence STILL keys off the cumulative user-message count, sourced into
+// EvalContext.userMessageCount by the per-turn hook from countUserMessages
+// (NOT the recent-window length), so "every Nth message" keeps advancing.
+export const relationshipEvaluator: Evaluator = {
+  name: 'relationship_eval',
+  kind: 'llm',
+  trigger: 'turn',
+  isEnabled: isRelationshipEvalEnabled,
+  shouldRun: (ctx: EvalContext): boolean => shouldRunRelationshipEval(ctx.userMessageCount ?? 0),
+  run: async (ctx: EvalContext): Promise<void> => {
+    const { userId, sessionStore, profileStore } = ctx;
+    if (!userId || !sessionStore || !profileStore) return;
+    const session = await sessionStore.load(userId);
+    const recentMessages = (session?.messages ?? []).filter(
+      (m): m is { role: 'user' | 'assistant'; content: string } =>
+        (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string',
+    );
+    await runRelationshipEval({ store: profileStore, userId, recentMessages });
+  },
+};
 
 // Defensive cleanup: strip any stray fencing/quotes the model added and clamp
 // length. Pure so it unit-tests.

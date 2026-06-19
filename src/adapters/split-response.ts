@@ -102,3 +102,20 @@ export const INTER_MESSAGE_DELAY_MS = 600
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
+
+// Read-receipt delay: an OPTIONAL, default-OFF pause BEFORE George composes a
+// reply, simulating "reading" the message before answering. This is the only
+// sanctioned intentional delay and it is PRE-generation (it never delays an
+// already-composed reply — that is forbidden). Gated by
+// GEORGE_READRECEIPT_DELAY_ENABLED; the duration is GEORGE_READRECEIPT_DELAY_MS
+// (NaN / negative -> 0). When the flag is off or the duration is 0, the stage
+// is a no-op so flush() is byte-for-byte unchanged.
+export function isReadReceiptDelayEnabled(): boolean {
+  return process.env.GEORGE_READRECEIPT_DELAY_ENABLED === 'true'
+}
+
+export function getReadReceiptDelayMs(): number {
+  const raw = process.env.GEORGE_READRECEIPT_DELAY_MS
+  const n = raw ? parseInt(raw, 10) : NaN
+  return Number.isFinite(n) && n > 0 ? n : 0
+}

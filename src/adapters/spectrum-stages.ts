@@ -1,0 +1,113 @@
+// src/adapters/spectrum-stages.ts
+//
+// The three timing stages extracted from spectrum.ts flush(), so they unit-test
+// without a live SpectrumClient. flush() becomes a thin composer over these.
+// This is a PURE refactor: each stage holds the exact statements that lived
+// inline in flush(), with the same timing constants and abort semantics. The
+// control-token suppression, lastReplyAt-only-on-send, and abort-vs-error log
+// distinction stay in flush() (NOT pushed into the stages) so suppression
+// semantics are preserved exactly.
+//
+// Header last reviewed: 2026-06-19
+
+import type { ReplyHandle } from './spectrum-client.js'
+import {
+  splitIntoMessages,
+  sleep,
+  INTER_MESSAGE_DELAY_MS,
+  isReadReceiptDelayEnabled,
+} from './split-response.js'
+
+// "Still thinking" interim nudges — moved here with pickStillThinking so the
+// generate stage owns the long-turn nudge. Sent once if the orchestrator turn
+// runs long (e.g. the course recommender ~30s) so the user knows george is
+// working rather than dead. Short, in-voice; the real reply follows when ready.
+export const STILL_THINKING = ['等我一下哈，还在翻 🔍', 'gimme a sec, still digging on this', '稍等，马上给你']
+export const pickStillThinking = (): string =>
+  STILL_THINKING[Math.floor(Math.random() * STILL_THINKING.length)]
+
+// Default interim nudge delay (9s). Same constant flush() used before.
+export const INTERIM_DELAY_MS_DEFAULT = 9000
+
+export interface StageReadReceiptOptions {
+  // Pre-generation "reading" pause in ms. 0 / unset => no-op.
+  readReceiptDelayMs?: number
+}
+
+// stageReadReceiptDelay: OPTIONAL, default-OFF pause BEFORE generation, so it
+// simulates reading the message — never delaying an already-composed reply.
+// No-op (returns immediately) when the flag is off or the duration is <= 0, so
+// flush() is byte-for-byte unchanged when the feature is unused.
+export async function stageReadReceiptDelay(opts: StageReadReceiptOptions = {}): Promise<void> {
+  const ms = opts.readReceiptDelayMs ?? 0
+  if (!isReadReceiptDelayEnabled() || !(ms > 0)) return
+  await sleep(ms)
+}
+
+export interface StageGenerateOptions {
+  interimDelayMs?: number
+}
+
+// stageGenerate: owns startTyping (best-effort), the interim "still thinking"
+// nudge (guarded by !ac.signal.aborted), and awaits handleText. clearTimeout on
+// BOTH success AND throw (try/finally). Returns the model output string or null.
+// startTyping is best-effort with .catch(()=>{}) so a failed typing signal never
+// blocks or fails the reply. Same timing constants and abort semantics as the
+// original inline flush() body.
+export async function stageGenerate(
+  senderId: string,
+  texts: string[],
+  reply: ReplyHandle,
+  ac: AbortController,
+  handleText: (
+    userId: string,
+    text: string,
+    reply: ReplyHandle,
+    abortController?: AbortController,
+    delayContext?: string,
+  ) => Promise<string | null>,
+  delayContext: string,
+  opts: StageGenerateOptions = {},
+): Promise<string | null> {
+  const interimDelayMs = opts.interimDelayMs ?? INTERIM_DELAY_MS_DEFAULT
+  // Show the "…" typing bubble while the (slow) orchestrator turn runs.
+  // Best-effort: a failed typing signal must never block or fail the reply.
+  await reply.startTyping().catch(() => {})
+  // If the turn runs long, send one "still thinking" nudge so the user isn't
+  // left staring at a typing bubble. Skipped if the turn was already superseded.
+  const interimTimer = setTimeout(() => {
+    if (!ac.signal.aborted) void reply.sendText(pickStillThinking()).catch(() => {})
+  }, interimDelayMs)
+  try {
+    // delayContext (if any) rides into the orchestrator as a per-turn system
+    // note, NOT prepended to the user text — so it bypasses the injection /
+    // handshake / user-command gates and is never persisted as the user's
+    // message. '' by default (flag off / short gap).
+    const out = await handleText(senderId, texts.join('\n'), reply, ac, delayContext)
+    return out
+  } finally {
+    clearTimeout(interimTimer)
+  }
+}
+
+export interface StageSendOptions {
+  interMessageDelayMs?: number
+}
+
+// stageSend: split the reply into bubbles and send each with the inter-message
+// pause. Skipped entirely if the turn was superseded (aborted). Same 600ms
+// pacing and same MAX_PARTS=4 split (via splitIntoMessages) as before.
+export async function stageSend(
+  toSend: string,
+  reply: ReplyHandle,
+  ac: AbortController,
+  opts: StageSendOptions = {},
+): Promise<void> {
+  if (ac.signal.aborted) return
+  const delay = opts.interMessageDelayMs ?? INTER_MESSAGE_DELAY_MS
+  const parts = splitIntoMessages(toSend)
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) await sleep(delay)
+    await reply.sendText(parts[i])
+  }
+}
