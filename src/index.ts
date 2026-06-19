@@ -21,6 +21,7 @@ import cors from 'cors'
 import cron from 'node-cron'
 import { config, loadTransportConfig } from './config.js'
 import { createWeChatRouter } from './adapters/wechat.js'
+import { getSpectrumHealth } from './adapters/spectrum-stats.js'
 import { startIMessageAdapter, stopIMessageAdapter } from './adapters/imessage.js'
 import { runOrchestrator } from './agent/orchestrator.js'
 import { createSupabaseSessionStore } from './agent/session-store.js'
@@ -101,6 +102,9 @@ app.get('/health', (_req, res) => {
     build: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? 'local',
     deployedBranch: process.env.RAILWAY_GIT_BRANCH ?? null,
     transport: process.env.TRANSPORT === 'spectrum' ? 'spectrum' : 'legacy',
+    // Spectrum inbound-stream liveness. A large secondsSinceInbound while
+    // state is 'connected' is the silent-deafness signal a monitor can alert on.
+    ...(process.env.TRANSPORT === 'spectrum' ? { spectrum: getSpectrumHealth() } : {}),
   })
 })
 
