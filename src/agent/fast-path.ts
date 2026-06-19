@@ -3,15 +3,16 @@
 // Fast path for the no-lookup majority. A greeting routed through the full
 // orchestrator engine took ~53s (multi-hop dispatch + per-hop extended thinking).
 // Most messages — greetings, small talk, feelings, thanks — need zero tools and
-// zero dispatch. This answers them with ONE direct flash call (thinking disabled),
-// ~2-3s, and bails to the full agent for anything that needs a real fact.
+// zero dispatch. This answers them with ONE direct call on the lightweight tier
+// (Kimi when KIMI_API_KEY is set, else the Claude fast fallback), ~2-3s, and bails
+// to the full agent for anything that needs a real fact. The orchestrator and the
+// two sub-agents stay on Claude — only this no-lookup reply runs on the cheap tier.
 //
 // Safety: anti-fabrication is preserved by being CONSERVATIVE. The model is told
 // to emit NEEDS_AGENT (and nothing else) for anything factual or uncertain; the
 // caller then runs the full tool-using agent. The fast path never invents facts.
 
-import { getClaudeClient } from './llm-providers.js';
-import { config } from '../config.js';
+import { callLightweightLLM } from './llm-providers.js';
 import { MASTER_PROMPT } from './agents.config.js';
 import { renderMoodBlock } from './calendar-mood.js';
 import { log } from '../observability/logger.js';
@@ -48,18 +49,17 @@ export async function fastReply(args: {
     .filter(Boolean)
     .join('\n\n');
   try {
-    const client = getClaudeClient();
-    const resp = await client.messages.create({
-      model: config.models.fast,
-      max_tokens: 350,
-      system,
-      // Disable extended thinking — on the fast tier it adds ~7s/call for no gain
-      // on small talk. (DeepSeek-v4 defaults thinking ON; Claude is off by default.)
-      thinking: { type: 'disabled' },
-      messages: [{ role: 'user', content: `${args.historyPrefix}${args.text}` }],
-    });
-    const block = resp.content.find((b) => b.type === 'text');
-    const text = (block && 'text' in block ? block.text : '').trim();
+    // Lightweight tier: Kimi (moonshot) when KIMI_API_KEY is set, else the Claude
+    // fast fallback (config.models.fast) — callLightweightLLM picks the path and
+    // disables extended thinking on the Claude leg. No tools, one turn, ~2-3s.
+    const raw = await callLightweightLLM(
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: `${args.historyPrefix}${args.text}` },
+      ],
+      { maxTokens: 350 },
+    );
+    const text = (raw ?? '').trim();
     if (!text || text.toUpperCase().includes(NEEDS_AGENT)) return null;
     return text;
   } catch (err) {
