@@ -20,16 +20,14 @@ import {
   recordSpectrumError,
   recordSpectrumReconnecting,
 } from './spectrum-stats.js'
-import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS, parseControlTokens, isNoReplyEnabled } from './split-response.js'
+import { parseControlTokens, isNoReplyEnabled, getReadReceiptDelayMs } from './split-response.js'
+import { stageReadReceiptDelay, stageGenerate, stageSend } from './spectrum-stages.js'
 import { log } from '../observability/logger.js'
 import { renderDelayContext } from '../agent/activity-state.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
 import { captureFactsFromTurn } from '../memory/capture.js'
-import {
-  isRelationshipEvalEnabled,
-  shouldRunRelationshipEval,
-  runRelationshipEval,
-} from '../agent/evaluators/relationship.js'
+import { TURN_EVALUATORS, dispatchEvaluators } from '../agent/evaluators/registry.js'
+import type { EvalContext } from '../agent/evaluators/types.js'
 import { supabase } from '../db/client.js'
 import { extractCodeFromStartMessage, runHandshake } from '../onboarding/handshake.js'
 import { lookupByCode, linkImessageHandle, lookupByImessageHandle, markGreeted } from '../onboarding/pending-users.js'
@@ -59,13 +57,6 @@ export interface SpectrumHandlers {
 }
 
 const DEDUP_CAP = 2000
-
-// Sent once if the orchestrator turn runs long (e.g. the course recommender
-// agent ~30s), so the user knows george is working rather than dead. Short,
-// in-voice. The real reply follows when ready.
-const STILL_THINKING = ['等我一下哈，还在翻 🔍', 'gimme a sec, still digging on this', '稍等，马上给你']
-const pickStillThinking = (): string =>
-  STILL_THINKING[Math.floor(Math.random() * STILL_THINKING.length)]
 
 export interface LoopOptions {
   debounceMs?: number
@@ -105,21 +96,14 @@ export async function runSpectrumLoop(
     // pure context — no artificial delay is added; the reply still goes out fast.
     const prev = lastReplyAt.get(senderId)
     const delayContext = prev ? renderDelayContext(Date.now() - prev) : ''
-    // Show the "…" typing bubble while the (slow) orchestrator turn runs.
-    // Best-effort: a failed typing signal must never block or fail the reply.
-    await buf.reply.startTyping().catch(() => {})
-    // If the turn runs long, send one "still thinking" nudge so the user isn't
-    // left staring at a typing bubble. Skipped if the turn was already superseded.
-    const interimTimer = setTimeout(() => {
-      if (!ac.signal.aborted) void buf.reply.sendText(pickStillThinking()).catch(() => {})
-    }, interimDelayMs)
+    // Optional, default-OFF "reading" pause BEFORE generation (no-op when off).
+    // Pre-generation only: this never delays an already-composed reply.
+    await stageReadReceiptDelay({ readReceiptDelayMs: getReadReceiptDelayMs() })
     try {
-      // delayContext (if any) rides into the orchestrator as a per-turn system
-      // note, NOT prepended to the user text — so it bypasses the injection /
-      // handshake / user-command gates and is never persisted as the user's
-      // message. '' by default (flag off / short gap).
-      const out = await handlers.handleText(senderId, buf.texts.join('\n'), buf.reply, ac, delayContext)
-      clearTimeout(interimTimer)
+      // stageGenerate owns startTyping + the long-turn "still thinking" nudge +
+      // the handleText await + clearTimeout on success/throw. delayContext rides
+      // into the orchestrator as a per-turn system note. Returns out | null.
+      const out = await stageGenerate(senderId, buf.texts, buf.reply, ac, handlers.handleText, delayContext, { interimDelayMs })
       // One idea per bubble: split on blank-line boundaries and send each as a
       // separate iMessage with a pause, matching george's short-burst cadence
       // (same as the legacy adapter). A single-paragraph reply stays one bubble.
@@ -139,11 +123,7 @@ export async function runSpectrumLoop(
           // Record this reply's time so the next ping can measure the gap (P2).
           // Only on an actual send — a suppressed {{NO_REPLY}} is not a reply.
           lastReplyAt.set(senderId, Date.now())
-          const parts = splitIntoMessages(toSend)
-          for (let i = 0; i < parts.length; i++) {
-            if (i > 0) await sleep(INTER_MESSAGE_DELAY_MS)
-            await buf.reply.sendText(parts[i])
-          }
+          await stageSend(toSend, buf.reply, ac)
         }
       }
     } catch (err) {
@@ -151,7 +131,6 @@ export async function runSpectrumLoop(
       // nothing. Only a genuine failure is logged.
       if (!ac.signal.aborted) log('error', 'spectrum_turn_error', { senderId, error: (err as Error).message })
     } finally {
-      clearTimeout(interimTimer)
       if (inflight.get(senderId) === ac) inflight.delete(senderId)
       await buf.reply.stopTyping().catch(() => {})
     }
@@ -318,28 +297,33 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
       if (deps.profileStore && finalText) {
         void captureFactsFromTurn(deps.profileStore, userId, text, finalText)
       }
-      // Fire-and-forget prose relationship-memory rewrite (no-op unless
-      // GEORGE_RELATIONSHIP_EVAL_ENABLED). Runs roughly every Nth user message on
-      // the SMART tier, off the recent history we just persisted. Same fire-and-
-      // forget shape as capture so it never slows or blocks the reply.
-      if (deps.profileStore && deps.sessionStore && finalText && isRelationshipEvalEnabled()) {
-        const store = deps.profileStore
+      // Fire-and-forget per-turn evaluator dispatch (relationship-note rewrite +
+      // activity-phase telemetry). Each evaluator is default-OFF and gated inside
+      // the dispatcher, so this is a no-op loop when no turn-evaluator is enabled.
+      //
+      // Off-path discipline: gate the WHOLE context build behind "any turn
+      // evaluator enabled" so an all-flags-off turn never pays the extra
+      // countUserMessages DB read — byte-for-byte the same as before this hook.
+      if (deps.profileStore && deps.sessionStore && finalText && TURN_EVALUATORS.some((e) => e.isEnabled())) {
         const sessions = deps.sessionStore
+        const store = deps.profileStore
         void (async () => {
           try {
             // Cadence keys off the CUMULATIVE user-message count (not the recent
             // window), so "every Nth message" keeps advancing past the 20-message
             // history cap instead of plateauing and firing every turn.
             const userMessageCount = await sessions.countUserMessages(userId)
-            if (!shouldRunRelationshipEval(userMessageCount)) return
-            const session = await sessions.load(userId)
-            const recentMessages = (session?.messages ?? []).filter(
-              (m): m is { role: 'user' | 'assistant'; content: string } =>
-                (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string',
-            )
-            await runRelationshipEval({ store, userId, recentMessages })
+            const ctx: EvalContext = {
+              userId,
+              now: new Date(),
+              sessionStore: sessions,
+              profileStore: store,
+              userMessageCount,
+              trigger: 'turn',
+            }
+            await dispatchEvaluators(TURN_EVALUATORS, ctx)
           } catch (err) {
-            log('warn', 'relationship_eval_dispatch_failed', { error: (err as Error).message })
+            log('warn', 'turn_evaluator_dispatch_failed', { error: (err as Error).message })
           }
         })()
       }
