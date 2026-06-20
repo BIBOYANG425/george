@@ -1,4 +1,35 @@
 import { supabase } from './client.js'
+import type { SupabaseClient } from '@supabase/supabase-js'
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// Resolve a channel handle (phone / wechat openid) to the student's `user_id` —
+// the uuid that `user_profiles` is keyed by. The conversation path only ever has
+// the handle (e.g. "+17474638880"), but user_profiles.user_id is students.user_id
+// (a uuid), so loading/saving memory by the raw handle always misses. This bridges
+// the two. Returns null when there's no onboarded student behind the handle (no
+// uuid → no profile). An already-uuid input is passed through (heartbeat already
+// keys by uuid). `sb` is injectable for tests.
+export async function resolveProfileUserId(
+  handle: string,
+  sb: SupabaseClient = supabase,
+): Promise<string | null> {
+  if (!handle) return null
+  if (UUID_RE.test(handle)) return handle
+  // Two scoped equality lookups (never interpolate the handle into an .or() filter,
+  // and never .eq the uuid user_id column with a phone string — that throws).
+  for (const column of ['imessage_id', 'wechat_open_id'] as const) {
+    const { data } = await sb
+      .from('students')
+      .select('user_id')
+      .eq(column, handle)
+      .not('user_id', 'is', null)
+      .limit(1)
+      .maybeSingle()
+    if (data?.user_id) return data.user_id as string
+  }
+  return null
+}
 
 export async function getStudentById(id: string) {
   const { data } = await supabase.from('students').select('*').eq('id', id).single()

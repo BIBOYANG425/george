@@ -15,6 +15,7 @@
 
 import { callLightweightLLM } from '../agent/llm-providers.js';
 import { ProfileStore, BLOCK_NAMES, BlockName } from './profile.js';
+import { resolveProfileUserId } from '../db/students.js';
 import { log } from '../observability/logger.js';
 
 export function isCaptureEnabled(): boolean {
@@ -56,6 +57,12 @@ export async function captureFactsFromTurn(
   assistantText: string,
 ): Promise<void> {
   if (!isCaptureEnabled()) return;
+  // user_profiles is keyed by students.user_id (uuid); userId here is the channel
+  // handle. Resolve it so captured facts MERGE into the student's real profile
+  // instead of failing a uuid-typed write. No onboarded student → nothing to
+  // write to (the column can't hold a handle), so skip.
+  const profileKey = await resolveProfileUserId(userId);
+  if (!profileKey) return;
   try {
     const raw = await callLightweightLLM(
       [
@@ -69,7 +76,7 @@ export async function captureFactsFromTurn(
     for (const f of facts) {
       const block = f.block as BlockName;
       if (!f.fact || !CAPTURE_BLOCKS.includes(block)) continue;
-      await store.appendToBlock(userId, block, f.fact.trim());
+      await store.appendToBlock(profileKey, block, f.fact.trim());
       written++;
     }
     if (written) log('info', 'memory_capture', { userId, written });
