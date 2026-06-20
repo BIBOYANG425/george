@@ -47,7 +47,7 @@ export function isGroundedProactiveEnabled(): boolean {
 const MAX_THREADS = 3;
 const GIST_MAX_CHARS = 120;
 // Marker line stored in george_notes. Kept deliberately boring so a human
-// reading /profile sees an obvious audit trail and voiceLint never trips on it.
+// reading /profile sees an obvious audit trail.
 const RAISED_PREFIX = 'RAISED_THREAD:';
 
 // Normalize a gist into a short stable key: lowercase, collapse whitespace,
