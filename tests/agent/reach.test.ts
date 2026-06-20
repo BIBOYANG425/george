@@ -3,9 +3,9 @@
 // Unit tests for the re-reach evaluator engine. Covers the PURE candidacy gate
 // (shouldReachCandidate), the flag-off no-op, fire-and-forget error swallowing,
 // the dedup stamp (alreadyReached / markReached only-on-send), and the tone-
-// variant voiceLint fallback. All deps are mocked — no DB, no Spectrum, no LLM.
+// variant voice-guard fallback. All deps are mocked — no DB, no Spectrum, no LLM.
 
-// Stub env BEFORE config.ts loads (reach.ts imports bia-lore -> config). Lazy-
+// Stub env BEFORE config.ts loads. Lazy-
 // import-after-stub pattern, same as relationship.test.ts.
 process.env.ANTHROPIC_API_KEY ||= 'test-key';
 process.env.SUPABASE_URL ||= 'http://localhost';
@@ -205,12 +205,12 @@ describe('runReachEval', () => {
     expect(String(deps.sendProactive.mock.calls[0][1])).toContain('那个局还考虑吗');
   });
 
-  it('falls back to the template when the tone variant fails voiceLint', async () => {
-    // A banned phrase ("加油！") must be rejected and replaced by the template.
-    const deps = makeDeps({ composeTone: vi.fn(async () => '加油！希望对你有帮助') });
+  it('falls back to the template when the tone variant trips a voice hard-ban', async () => {
+    // An em-dash (a banned voice tell) must be rejected and replaced by the template.
+    const deps = makeDeps({ composeTone: vi.fn(async () => '诶 那个局 — 还考虑吗') });
     await reach.runReachEval(deps);
     expect(String(deps.sendProactive.mock.calls[0][1])).toContain('拼车'); // template, grounded
-    expect(String(deps.sendProactive.mock.calls[0][1])).not.toContain('加油');
+    expect(String(deps.sendProactive.mock.calls[0][1])).not.toContain('—');
   });
 
   it('falls back to the template when composeTone throws', async () => {

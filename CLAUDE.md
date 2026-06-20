@@ -179,7 +179,7 @@ Plan: `docs/superpowers/plans/2026-06-10-slice-a-spatial.md`.
 
 ## Guardrails
 
-- **Persona is the product.** The rules in `AGENT.md` are non-negotiable. Read it before editing `prompts/master.md` or `src/agent/bia-lore.ts`. The founder voice was distilled from real WeChat messages. Don't smooth it out.
+- **Persona is the product.** The rules in `AGENT.md` are non-negotiable. Read it before editing `prompts/master.md` (the voice source of truth; em-dash + negation-contrast hard-enforced by `src/agent/voice-guard.ts`). The founder voice was distilled from real WeChat messages. Don't smooth it out.
 - **No invented facts.** Course numbers, professor names, event dates, prices. If George doesn't know, he says "戳到知识盲区了😢" and uses a tool.
 - **Tool registration is declarative.** Every new tool file must be listed in `src/tools/index.ts` and wired into `src/agent/agents.config.ts`. The Agent SDK's dispatch is automatic; you define tools and the orchestrator routes them.
 - **Supabase service-role key has full DB access.** Use it only inside `src/db/*` helpers. Never expose via HTTP. Never log it.
@@ -237,7 +237,7 @@ Env vars: `ONBOARDING_PROFILE_URL_BASE`, `ONBOARDING_ASSET_BASE_URL`, `ONBOARDIN
 
 ## Persona source map
 
-For voice and persona edits, see the "Prompt source map" section in `AGENT.md`. All voice changes go through `prompts/master.md` and `src/agent/bia-lore.ts`. The orchestrator in `src/agent/orchestrator.ts` is wiring (routing, tool dispatch, conversation memory). Voice does not belong there.
+For voice and persona edits, see the "Prompt source map" section in `AGENT.md`. All voice changes go through `prompts/master.md` (em-dash + negation-contrast hard-enforced by `src/agent/voice-guard.ts`). The orchestrator in `src/agent/orchestrator.ts` is wiring (routing, tool dispatch, conversation memory). Voice does not belong there.
 
 ## Skill routing
 

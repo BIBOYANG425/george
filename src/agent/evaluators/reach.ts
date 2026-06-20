@@ -18,9 +18,9 @@
 // Candidacy is PURE (shouldReachCandidate) and separate from any LLM tone
 // rewrite, so it unit-tests without the API. The bubble is a grounded George-
 // voice template (no invented event/decision content). A tone variant keyed off
-// the relationship note is the only LLM path and runs through voiceLint + the
-// banned-phrase check before send; if lint fails, we fall back to the safe
-// template. The spectrum send seam (getActiveSpectrumClient().sendProactive)
+// the relationship note is the only LLM path and runs through the voice hard-bans
+// (no em-dash / negation-contrast) before send; if a banned tell appears, we fall
+// back to the safe template. The spectrum send seam (getActiveSpectrumClient().sendProactive)
 // is reused via the deps; cron IS the retry mechanism (a failed send leaves the
 // candidate un-stamped for the next tick).
 //
@@ -29,7 +29,7 @@
 
 import type { Evaluator, EvalContext } from './types.js';
 import { log } from '../../observability/logger.js';
-import { voiceLint } from '../bia-lore.js';
+import { bannedVoiceHits } from '../voice-guard.js';
 
 export function isReachEvalEnabled(): boolean {
   return process.env.SQUAD_REREACH_EVAL_ENABLED === 'true';
@@ -141,9 +141,9 @@ export async function runReachEval(deps: ReachEvalDeps): Promise<void> {
   }
 }
 
-// Pick the outgoing bubble: a lint-clean tone variant when the optional composer
-// yields one, otherwise the safe grounded template. The variant is the only LLM
-// path and is gated by voiceLint + the banned-phrase check; a lint failure or a
+// Pick the outgoing bubble: a tone variant when the optional composer yields one
+// that passes the voice hard-bans (no em-dash, no negation-contrast), otherwise
+// the safe grounded template. The variant is the only LLM path; a banned tell or a
 // throw falls back to the template (anti-fabrication / voice safety preserved).
 async function composeReachBubble(deps: ReachEvalDeps, c: ReachCandidate): Promise<string> {
   const fallback = reachBubble(c.category, c.location);
@@ -153,9 +153,9 @@ async function composeReachBubble(deps: ReachEvalDeps, c: ReachCandidate): Promi
     if (!variant) return fallback;
     const trimmed = variant.trim();
     if (!trimmed) return fallback;
-    const lint = voiceLint(trimmed);
-    if (!lint.ok) {
-      log('warn', 'rereach_eval_tone_lint_failed', { postId: c.postId, violations: lint.violations });
+    const banned = bannedVoiceHits(trimmed);
+    if (banned.length) {
+      log('warn', 'rereach_eval_tone_banned', { postId: c.postId, hits: banned });
       return fallback;
     }
     return trimmed;
