@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { runOrchestrator, buildOrchestratorPrompt, isProfileEmpty, buildAgentsConfig } from '../../src/agent/orchestrator.js';
+import { runOrchestrator, buildOrchestratorPrompt, isProfileEmpty, buildAgentsConfig, buildOrchestratorToolNames } from '../../src/agent/orchestrator.js';
 import type { Profile } from '../../src/memory/profile.js';
 import { upsertRelationshipNote } from '../../src/memory/profile.js';
 
@@ -212,5 +212,17 @@ describe('web search wiring (search Phase 1)', () => {
     const cfg = buildAgentsConfig(null, null, true);
     expect(cfg['whats-happening'].prompt).toMatch(/allowed_domains/);
     expect(cfg['whats-happening'].prompt).toMatch(/xiaohongshu\.com/);
+  });
+  it('gives the orchestrator itself WebSearch when allowed (so it can search general/current-web queries it answers directly, instead of punting)', () => {
+    expect(buildOrchestratorToolNames(true)).toContain('WebSearch');
+    expect(buildOrchestratorToolNames(true)).toContain('Agent');
+  });
+  it('omits WebSearch from the orchestrator when over the daily cap', () => {
+    expect(buildOrchestratorToolNames(false)).not.toContain('WebSearch');
+    expect(buildOrchestratorToolNames()).not.toContain('WebSearch');
+  });
+  it('injects web-search guidance into the orchestrator prompt only when allowed', () => {
+    expect(buildOrchestratorPrompt(null, null, undefined, '', true)).toMatch(/WEB SEARCH/);
+    expect(buildOrchestratorPrompt(null, null, undefined, '', false)).not.toMatch(/WEB SEARCH/);
   });
 })
