@@ -18,7 +18,7 @@ import { getFullCatalog } from '../skills/index.js';
 import { ALL_TOOLS } from '../tools/index.js';
 import type { SessionStore, TurnTelemetry } from './session-store.js';
 import type { Profile, ProfileStore } from '../memory/profile.js';
-import { resolveStudentId } from '../db/students.js';
+import { resolveStudentId, resolveProfileUserId } from '../db/students.js';
 import { log } from '../observability/logger.js';
 import { isWebSearchOverCap, recordWebSearchUse } from '../services/web-search-budget.js';
 import { trustedDomains } from '../services/web-search-config.js';
@@ -653,8 +653,13 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   }
 
   // Load user profile early so it can be injected into the system prompt.
-  // Silently falls back to no profile when profileStore is not provided.
-  const profile = args.profileStore ? await args.profileStore.loadProfile(args.userId) : null;
+  // user_profiles is keyed by students.user_id (a uuid), but args.userId is the
+  // channel handle (phone/openid) — loading by the raw handle always misses, so
+  // an onboarded student's saved memory never reached the prompt. Resolve the
+  // handle → user_id first, then load by that. Null key (no onboarded student)
+  // → no profile. Silently falls back to no profile when profileStore is absent.
+  const profileKey = await resolveProfileUserId(args.userId);
+  const profile = args.profileStore && profileKey ? await args.profileStore.loadProfile(profileKey) : null;
 
   // Conversation history (used by both the fast path and the full agent).
   const historyPrefix = await buildHistoryPrefix(args.sessionStore, args.userId);
