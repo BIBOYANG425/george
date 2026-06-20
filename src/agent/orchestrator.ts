@@ -620,7 +620,7 @@ async function buildHistoryPrefix(sessionStore: SessionStore | undefined, userId
   return `<conversation_history>\n${historyLines}\n</conversation_history>\n\n`;
 }
 
-export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerator<{ type: string; text?: string; result?: string; telemetry?: TurnTelemetry }> {
+export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerator<{ type: string; text?: string; result?: string; telemetry?: TurnTelemetry; emoji?: string }> {
   if (args.mockMode) {
     // For tests: return a synthetic response without calling the real LLM.
     if (args.text.toLowerCase().match(/doctor|sick|medical/)) {
@@ -812,6 +812,15 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
           } else if (name) {
             // strip the mcp__george__ namespace for a clean tool label
             turnTools.add(name.replace(/^mcp__[^_]+__/, ''));
+            // iMessage tapback: surface George's react_to_user call as a
+            // reaction event so the transport (Spectrum) can apply the native
+            // tapback. No-op on channels that don't consume the event.
+            if (name.replace(/^mcp__[^_]+__/, '') === 'react_to_user') {
+              const emoji = (c.input?.emoji ?? '') as string;
+              if (typeof emoji === 'string' && emoji.trim()) {
+                yield { type: 'reaction', emoji: emoji.trim() };
+              }
+            }
           }
         }
       }

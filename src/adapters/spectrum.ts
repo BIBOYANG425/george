@@ -175,7 +175,9 @@ export interface TextHandlerDeps {
   tryUserCommand: (userId: string, text: string) => Promise<string | null>
   // Runs the orchestrator and returns the final reply text (or ''). delayContext
   // is forwarded to the orchestrator as a per-turn system note; '' when none.
-  runOrchestratorText: (userId: string, text: string, abortController?: AbortController, delayContext?: string) => Promise<string>
+  // `reply` is passed so an in-turn { type:'reaction' } event (George tapping
+  // back via react_to_user) can be applied to the inbound message immediately.
+  runOrchestratorText: (userId: string, text: string, abortController?: AbortController, delayContext?: string, reply?: ReplyHandle) => Promise<string>
   normalizeHandle: (raw: string) => string
 }
 
@@ -188,7 +190,7 @@ export function buildTextHandler(deps: TextHandlerDeps) {
     if (await deps.tryHandshake(userId, text, reply)) return null
     const cmd = await deps.tryUserCommand(userId, text)
     if (cmd !== null) return cmd
-    const out = await deps.runOrchestratorText(userId, text, abortController, delayContext)
+    const out = await deps.runOrchestratorText(userId, text, abortController, delayContext, reply)
     return out || null
   }
 }
@@ -241,7 +243,7 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
       return tryHandleUserCommand(userId, text)
     },
 
-    runOrchestratorText: async (userId: string, text: string, abortController?: AbortController, delayContext?: string): Promise<string> => {
+    runOrchestratorText: async (userId: string, text: string, abortController?: AbortController, delayContext?: string, reply?: ReplyHandle): Promise<string> => {
       const turnStart = Date.now()
       // Persist the user turn before running so it survives an orchestrator
       // failure, then run WITH the session + profile stores so george loads
@@ -267,10 +269,15 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
         const e = event as {
           type?: string
           result?: string
+          emoji?: string
           telemetry?: import('../agent/session-store.js').TurnTelemetry
           message?: { content?: Array<{ type?: string; text?: string }> }
         }
-        if (e.type === 'telemetry') {
+        if (e.type === 'reaction' && typeof e.emoji === 'string' && e.emoji && reply?.react) {
+          // George tapped back (react_to_user). Apply the native iMessage
+          // tapback to the inbound message; best-effort, never blocks the reply.
+          void reply.react(e.emoji).catch(() => {})
+        } else if (e.type === 'telemetry') {
           turnTelemetry = e.telemetry
         } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
           finalText = e.result
