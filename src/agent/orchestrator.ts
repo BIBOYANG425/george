@@ -173,6 +173,7 @@ export function buildOrchestratorPrompt(
   studentId?: string | null,
   delayContext?: string,
   worldStateBlock: string = '',
+  webAllowed: boolean = false,
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
   // Calendar-mood overlay (master.md "Calendar mood overlay"): inject the current
@@ -195,6 +196,12 @@ export function buildOrchestratorPrompt(
   if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
   const studentIdBlock = buildStudentIdBlock(studentId);
   if (studentIdBlock) parts.push(studentIdBlock);
+  // Web-search guidance reaches the orchestrator only while the student is under
+  // their daily cap (paired with the WebSearch tool in buildOrchestratorToolNames).
+  // The orchestrator answers general / current-web queries directly (e.g. "recent
+  // movies"), which don't route to a sub-agent — without the tool + this guidance it
+  // could only admit it didn't know and punt the user off to go search themselves.
+  if (webAllowed) parts.push(webSearchGuidance());
   return parts.join('\n\n');
 }
 
@@ -382,8 +389,11 @@ function webSearchGuidance(): string {
   return [
     '# WEB SEARCH',
     'You have a WebSearch tool for open-web facts you do not already have. It is',
-    'rationed — use it only after find_places and your own data come up empty, and',
-    'not for things you already know.',
+    'rationed; use it only after your own tools and data come up empty, and not for',
+    'things you already know. For a current / recent / trending question (new movies,',
+    "shows, music, what's popular now, this week's events, current prices) you MUST",
+    'call it and answer from the results. Do NOT tell the student to go look it up',
+    'themselves instead of searching; that hand-off is a lazy bail.',
     `When you call WebSearch, pass allowed_domains: ${JSON.stringify(trustedDomains())}`,
     'so results come from trusted sources. Cite the source in your reply; never state',
     'a fact, name, address, or price that is not in the results.',
@@ -454,7 +464,7 @@ export function buildAgentsConfig(
  * SDK shape: options.tools is string[] | { type: 'preset'; preset: 'claude_code' }.
  * We pass just the names for the orchestrator's direct tools.
  */
-function buildOrchestratorToolNames(): string[] {
+export function buildOrchestratorToolNames(webAllowed: boolean = false): string[] {
   // The `tools` option is a RESTRICTION allowlist (SDK: "to restrict which
   // tools are available, use the tools option"). Without the sub-agent
   // dispatch tool here, the orchestrator can only call its 2 direct tools and
@@ -462,7 +472,14 @@ function buildOrchestratorToolNames(): string[] {
   // instead of actually invoking a sub-agent. The SDK names the dispatch tool
   // both "Task" and "Agent" — include both so whichever the runtime exposes
   // is permitted. The direct tools are namespaced to their MCP names.
-  return ['Task', 'Agent', ...ORCHESTRATOR_DIRECT_TOOLS.map(nsTool)];
+  //
+  // WebSearch (an SDK built-in, un-namespaced) is added when the student is under
+  // their daily web-search cap. General / current-web queries ("recent movies",
+  // news, trending) are answered by the orchestrator DIRECTLY (they don't fit any
+  // sub-agent), so without WebSearch in this restriction list the orchestrator had
+  // no way to search and could only punt. It was already in `allowedTools`
+  // (auto-approve) but missing here, so the SDK blocked the call.
+  return ['Task', 'Agent', ...ORCHESTRATOR_DIRECT_TOOLS.map(nsTool), ...(webAllowed ? ['WebSearch'] : [])];
 }
 
 // Resolved per-turn inputs the query-options builder needs. Kept as a plain
@@ -708,9 +725,9 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // Web search is rationed per student/day; when over cap, it's omitted from the
   // turn's tool set and the guidance block is dropped (find_places stays free).
   const webAllowed = !isWebSearchOverCap(studentId);
-  const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext, worldStateBlock);
+  const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext, worldStateBlock, webAllowed);
   const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed, args.delayContext);
-  const orchestratorTools = buildOrchestratorToolNames();
+  const orchestratorTools = buildOrchestratorToolNames(webAllowed);
 
   // historyPrefix was loaded above (shared with the fast path). The SDK's own
   // sessionStore option mirrors transcripts to an external store — not the same
