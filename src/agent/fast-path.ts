@@ -61,12 +61,19 @@ const FAST_INSTRUCTION = [
 
 // Returns George's reply for a no-lookup message, or null to signal "run the
 // full agent" (the message needs tools, or the fast call failed).
+//
+// `recallBlock` is the P6 observational-memory block ("## THINGS YOU REMEMBER"),
+// pre-fetched once per turn by the caller (recallForTurn). '' when
+// GEORGE_RECALL_ENABLED is unset, so the OFF path is byte-for-byte unchanged. It is
+// placed right after the profile block so the fast model sees identity + memories
+// together, matching the full-agent paths.
 export async function fastReply(args: {
   text: string;
   historyPrefix: string;
   profileBlock: string;
+  recallBlock?: string;
 }): Promise<string | null> {
-  const system = [MASTER_PROMPT, renderDateBlock(), renderMoodBlock(), args.profileBlock, FAST_INSTRUCTION]
+  const system = [MASTER_PROMPT, renderDateBlock(), renderMoodBlock(), args.profileBlock, args.recallBlock, FAST_INSTRUCTION]
     .filter(Boolean)
     .join('\n\n');
   try {

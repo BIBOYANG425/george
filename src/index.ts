@@ -45,6 +45,7 @@ import { startPendingUsersCleanupCron } from './jobs/pending-users-cleanup-cron.
 import { runHeartbeat } from './agent/heartbeat.js'
 import { createSupabaseRaisedThreadDB } from './agent/grounded-proactive.js'
 import { ProfileStore, createSupabaseProfileDB } from './memory/profile.js'
+import { createSupabaseObservationDB } from './memory/observations.js'
 import { InstructionsStore, createSupabaseInstructionsDB } from './memory/instructions.js'
 import { getKVCache } from './memory/kv-cache.js'
 import { createDeepSeekClient } from './agent/llm-clients.js'
@@ -711,6 +712,9 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
     profileStore,
     instructionsStore,
     raisedThreadDb: createSupabaseRaisedThreadDB(),
+    // P6 observational-memory — Reflector seam. Harmless when GEORGE_REFLECT_ENABLED
+    // is off (the flag gates execution in runHeartbeat).
+    observationDB: createSupabaseObservationDB(),
     async loadConfig(userId: string) {
       const { data, error } = await supabase
         .from('user_heartbeat_config')
