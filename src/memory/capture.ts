@@ -70,6 +70,16 @@ interface RawObservation {
   kind?: string;
 }
 
+// The shape returned by ONE Observer extraction call: durable facts +
+// episodic observations. Salience stays `unknown`-ish here (number|undefined)
+// because clamping happens at write time (clampSalience), not at extract time —
+// both the per-turn capturer and the backfill share this raw shape and clamp
+// before insert.
+export interface ExtractedMemory {
+  facts: Array<{ block?: string; fact?: string }>;
+  observations: Array<{ content?: string; salience?: number; kind?: string }>;
+}
+
 // callLightweightLLM's non-Kimi fallback does not force JSON, so be tolerant:
 // pull the first {...} object out of whatever came back. One parse, both arrays.
 function parseExtract(raw: string): {
@@ -93,8 +103,33 @@ function parseExtract(raw: string): {
   }
 }
 
+// The single Observer extraction step: ONE callLightweightLLM(EXTRACT_SYSTEM,…)
+// call + parseExtract, with no env gating, no resolution, and no writes. Both
+// the per-turn capturer (captureFactsFromTurn) and the offline backfill
+// (scripts/backfill-observations.ts) go through this ONE code path so the
+// extraction prompt + parsing never drift between the two. Callers clamp
+// salience and validate kind before persisting.
+export async function extractMemoryFromTurn(
+  userText: string,
+  assistantText: string,
+): Promise<ExtractedMemory> {
+  const raw = await callLightweightLLM(
+    [
+      { role: 'system', content: EXTRACT_SYSTEM },
+      { role: 'user', content: `STUDENT: ${userText}\n\nGEORGE: ${assistantText}` },
+    ],
+    { maxTokens: 400, jsonMode: true },
+  );
+  const { facts, observations } = parseExtract(raw);
+  // parseExtract keeps salience as `unknown` (the raw LLM value may be a string,
+  // float, or out of range); the ExtractedMemory contract narrows it to number?
+  // for consumers, and both consumers re-clamp via clampSalience (which takes
+  // unknown) before persisting, so the narrowing is safe at the boundary.
+  return { facts, observations: observations as ExtractedMemory['observations'] };
+}
+
 // Clamp to an integer in [1,5]; default 3 if missing / NaN / out of range.
-function clampSalience(value: unknown): number {
+export function clampSalience(value: unknown): number {
   const n = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(n)) return SALIENCE_DEFAULT;
   const floored = Math.floor(n);
@@ -105,7 +140,7 @@ function clampSalience(value: unknown): number {
 
 // Allowed kinds map straight through; anything else (or missing) → undefined so
 // the DB stores null.
-function validateKind(kind: string | undefined): string | undefined {
+export function validateKind(kind: string | undefined): string | undefined {
   return kind && (OBSERVATION_KINDS as readonly string[]).includes(kind) ? kind : undefined;
 }
 
@@ -132,14 +167,7 @@ export async function captureFactsFromTurn(
   // was injected — so capture-only mode never spins up a Supabase client.
   const observationDB = observe ? deps.observationDB ?? createSupabaseObservationDB() : undefined;
   try {
-    const raw = await callLightweightLLM(
-      [
-        { role: 'system', content: EXTRACT_SYSTEM },
-        { role: 'user', content: `STUDENT: ${userText}\n\nGEORGE: ${assistantText}` },
-      ],
-      { maxTokens: 400, jsonMode: true },
-    );
-    const { facts, observations } = parseExtract(raw);
+    const { facts, observations } = await extractMemoryFromTurn(userText, assistantText);
 
     let written = 0;
     if (capture) {
