@@ -43,6 +43,11 @@ export interface InboundMessage {
 export interface ReplyHandle {
   sendText(text: string): Promise<void>
   sendAttachment(localPath: string): Promise<void>
+  // Native iMessage tapback on the inbound message (👍/❤️/😂/👎/‼️/❓ …).
+  // Best-effort — resolves silently when the platform has no reaction support
+  // (the SDK's message.react() returns undefined and warns). Never throws into
+  // the reply path: a failed tapback must not break the text reply.
+  react(emoji: string): Promise<void>
   // Typing indicator ("…" bubble). Best-effort — platforms without a typing
   // API silently no-op. Used to show activity during the ~10s orchestrator turn.
   startTyping(): Promise<void>
@@ -160,6 +165,18 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
             } catch (err) {
               console.error(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=attachment FAILED: ${(err as Error).message}`)
               throw err
+            }
+          },
+          // Apply a native tapback to the inbound message. message.react()
+          // resolves undefined (warns) when the platform lacks reactions, so a
+          // miss is silent. Best-effort: never throw — a failed tapback must not
+          // break the text reply that follows.
+          react: async (emoji: string) => {
+            try {
+              await (message as unknown as { react(e: string): Promise<unknown> }).react(emoji)
+              console.log(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=reaction emoji=${emoji} ok`)
+            } catch (err) {
+              console.error(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=reaction FAILED: ${(err as Error).message}`)
             }
           },
           startTyping: async () => { await space.startTyping() },

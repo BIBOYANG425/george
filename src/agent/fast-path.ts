@@ -15,7 +15,7 @@
 import { callLightweightLLM } from './llm-providers.js';
 import { doubaoChat, isDoubaoConfigured } from './doubao-client.js';
 import { MASTER_PROMPT } from './agents.config.js';
-import { renderMoodBlock } from './calendar-mood.js';
+import { renderMoodBlock, renderDateBlock } from './calendar-mood.js';
 import { log } from '../observability/logger.js';
 
 const NEEDS_AGENT = 'NEEDS_AGENT';
@@ -48,7 +48,7 @@ export async function fastReply(args: {
   historyPrefix: string;
   profileBlock: string;
 }): Promise<string | null> {
-  const system = [MASTER_PROMPT, renderMoodBlock(), args.profileBlock, FAST_INSTRUCTION]
+  const system = [MASTER_PROMPT, renderDateBlock(), renderMoodBlock(), args.profileBlock, FAST_INSTRUCTION]
     .filter(Boolean)
     .join('\n\n');
   try {

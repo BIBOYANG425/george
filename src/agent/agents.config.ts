@@ -112,7 +112,7 @@ export const SUB_AGENTS = {
   },
 } as const;
 
-export const ORCHESTRATOR_DIRECT_TOOLS = ['set_reminder', 'load_skill'] as const;
+export const ORCHESTRATOR_DIRECT_TOOLS = ['set_reminder', 'load_skill', 'react_to_user'] as const;
 
 export type SubAgentName = keyof typeof SUB_AGENTS;
 

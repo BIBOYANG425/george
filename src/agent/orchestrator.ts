@@ -22,7 +22,8 @@ import { resolveStudentId, resolveProfileUserId } from '../db/students.js';
 import { log } from '../observability/logger.js';
 import { isWebSearchOverCap, recordWebSearchUse } from '../services/web-search-budget.js';
 import { trustedDomains } from '../services/web-search-config.js';
-import { renderMoodBlock } from './calendar-mood.js';
+import { providerOptionsForModel } from './model-providers.js';
+import { renderMoodBlock, renderDateBlock } from './calendar-mood.js';
 import { extractRelationshipNote, upsertRelationshipNote } from '../memory/profile.js';
 import { isRelationshipEvalEnabled } from './evaluators/relationship.js';
 import { stripRaisedThreadLines } from './grounded-proactive.js';
@@ -176,6 +177,7 @@ export function buildOrchestratorPrompt(
   webAllowed: boolean = false,
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
+  parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
   // Calendar-mood overlay (master.md "Calendar mood overlay"): inject the current
   // academic-calendar tone so finals/orientation/etc. actually changes behavior.
   const moodBlock = renderMoodBlock();
@@ -247,6 +249,7 @@ export function buildSingleAgentPrompt(
   worldStateBlock: string = '',
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
+  parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
   const moodBlock = renderMoodBlock();
   if (moodBlock) parts.push(moodBlock);
   // Activity-state overlay (see buildOrchestratorPrompt): self-gated to '' when
@@ -344,6 +347,7 @@ export function buildTrunkPrompt(
   ];
   // Overlay stack — copied verbatim from buildOrchestratorPrompt / buildSingleAgentPrompt
   // so the overlays are byte-identical for the same inputs.
+  parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
   const moodBlock = renderMoodBlock();
   if (moodBlock) parts.push(moodBlock);
   const activityBlock = renderActivityBlock();
@@ -390,13 +394,21 @@ function webSearchGuidance(): string {
     '# WEB SEARCH',
     'You have a WebSearch tool for open-web facts you do not already have. It is',
     'rationed; use it only after your own tools and data come up empty, and not for',
-    'things you already know. For a current / recent / trending question (new movies,',
-    "shows, music, what's popular now, this week's events, current prices) you MUST",
-    'call it and answer from the results. Do NOT tell the student to go look it up',
-    'themselves instead of searching; that hand-off is a lazy bail.',
-    `When you call WebSearch, pass allowed_domains: ${JSON.stringify(trustedDomains())}`,
-    'so results come from trusted sources. Cite the source in your reply; never state',
-    'a fact, name, address, or price that is not in the results.',
+    "things you already know. For ANY question about what's current, recent, showing,",
+    'playing, out, or available right now (new movies, shows, music, events, prices)',
+    'you MUST search and answer from the results. Telling the student to go look it up',
+    'themselves is a lazy bail.',
+    'This includes a follow-up that just NARROWS an earlier current question',
+    '(合家欢一点 / 便宜点 / 恐怖的 / something closer): narrowing it does NOT make it',
+    "answerable from memory. Reuse THIS conversation's search results (filter them), or",
+    'search again. NEVER list movie / show / event titles from your own memory as if',
+    'they are out now; your training is stale and the titles WILL be wrong.',
+    `When you call WebSearch, pass allowed_domains: ${JSON.stringify(trustedDomains())}.`,
+    'Then deliver it AS GEORGE: weave what you found into the reply in your own voice',
+    '(e.g. 「AMC官网说今晚有场」), and curate to 1 or 2 picks. Do NOT paste a numbered',
+    'or bulleted list, a "Sources:" section, a bibliography, or bare URLs. One link max,',
+    'only if it genuinely helps. Never state a fact, name, address, or price that is not',
+    'in the results.',
   ].join('\n');
 }
 
@@ -431,6 +443,7 @@ export function buildAgentsConfig(
   // tone (self-gated to '' unless GEORGE_ACTIVITY_STATE_ENABLED), and the long-gap
   // delay-context note. Without these the legacy multi-agent path silently dropped
   // the activity/delay overlays the other two paths inject.
+  const dateBlock = renderDateBlock(); // real current date — anchors "now" past the training cutoff
   const moodBlock = renderMoodBlock();
   const activityBlock = renderActivityBlock();
   const config: Record<string, { description: string; prompt: string; tools: string[]; model?: string }> = {};
@@ -439,7 +452,7 @@ export function buildAgentsConfig(
     // only, and only when the user is under their daily web-search cap.
     const wantsWeb = name === 'whats-happening' || name === 'know-things';
     const webBlock = wantsWeb && webAllowed ? webSearchGuidance() : '';
-    const extras = [moodBlock, activityBlock, delayContext, userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
+    const extras = [dateBlock, moodBlock, activityBlock, delayContext, userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
     config[name] = {
       description: def.description,
       prompt: extras ? `${def.prompt}\n\n${extras}` : def.prompt,
@@ -544,6 +557,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.worldStateBlock,
       ),
       model: inputs.trunkModel,
+      ...providerOptionsForModel(inputs.trunkModel),
       thinking: { type: 'disabled' as const },
       mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
       tools: trunkAllow,
@@ -570,6 +584,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.worldStateBlock,
       ),
       model: inputs.resolvedModel,
+      ...providerOptionsForModel(inputs.resolvedModel),
       // Disable extended thinking on the agent loop — it adds ~7s PER tool-call
       // turn (DeepSeek-v4 defaults it on). Tools provide the grounding; the
       // thinking was the dominant cost on tool queries (~35s → much less).
@@ -586,6 +601,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
   return {
     systemPrompt: inputs.systemPrompt,
     model: inputs.resolvedModel,
+    ...providerOptionsForModel(inputs.resolvedModel),
     mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
     tools: inputs.orchestratorTools,
     allowedTools: ['Task', 'Agent', 'WebSearch', ...Object.keys(ALL_TOOLS).map(nsTool)],
@@ -620,7 +636,7 @@ async function buildHistoryPrefix(sessionStore: SessionStore | undefined, userId
   return `<conversation_history>\n${historyLines}\n</conversation_history>\n\n`;
 }
 
-export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerator<{ type: string; text?: string; result?: string; telemetry?: TurnTelemetry }> {
+export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerator<{ type: string; text?: string; result?: string; telemetry?: TurnTelemetry; emoji?: string }> {
   if (args.mockMode) {
     // For tests: return a synthetic response without calling the real LLM.
     if (args.text.toLowerCase().match(/doctor|sick|medical/)) {
@@ -682,11 +698,19 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // of the full multi-hop engine (~50s). fastReply returns null — falling through
   // to the full agent — for anything factual or uncertain, so anti-fabrication is
   // preserved. (Skipped implicitly when it returns null.)
-  const fast = await fastReply({
-    text: args.text,
-    historyPrefix,
-    profileBlock: buildUserProfileBlock(profile),
-  });
+  //
+  // GEORGE_DISABLE_FAST_PATH (default off) forces every turn through the full
+  // agent. The eval harness sets it so an A/B over the agent TOPOLOGY (trunk vs
+  // multi-agent) isn't diluted by fast-path turns, which are identical on both
+  // arms and carry zero topology signal.
+  const fastPathDisabled = process.env.GEORGE_DISABLE_FAST_PATH === 'true';
+  const fast = fastPathDisabled
+    ? null
+    : await fastReply({
+        text: args.text,
+        historyPrefix,
+        profileBlock: buildUserProfileBlock(profile),
+      });
   if (fast !== null) {
     yield { type: 'result', result: fast };
     // Tag the turn as fast-path so the dashboard can tell it apart from a
@@ -817,6 +841,15 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
           } else if (name) {
             // strip the mcp__george__ namespace for a clean tool label
             turnTools.add(name.replace(/^mcp__[^_]+__/, ''));
+            // iMessage tapback: surface George's react_to_user call as a
+            // reaction event so the transport (Spectrum) can apply the native
+            // tapback. No-op on channels that don't consume the event.
+            if (name.replace(/^mcp__[^_]+__/, '') === 'react_to_user') {
+              const emoji = (c.input?.emoji ?? '') as string;
+              if (typeof emoji === 'string' && emoji.trim()) {
+                yield { type: 'reaction', emoji: emoji.trim() };
+              }
+            }
           }
         }
       }
