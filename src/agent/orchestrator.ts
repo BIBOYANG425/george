@@ -30,6 +30,7 @@ import { stripRaisedThreadLines } from './grounded-proactive.js';
 import { renderActivityBlock } from './activity-state.js';
 import { getWorldStateStore, worldStateEnabled } from './world-state.js';
 import { fastReply } from './fast-path.js';
+import { detectUnsourcedClaim } from './fast-path-guard.js';
 import { checkUsageAllowed, resolveModelForUser } from '../admin/user-controls.js';
 
 // Register george's 23 tools as an in-process SDK MCP server so the model can
@@ -885,6 +886,23 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
       const models = Object.keys(r.modelUsage ?? {});
       if (models.length) telemetry.model = models.join(',');
       telemetry.perModel = (r.modelUsage as Record<string, unknown>) ?? undefined;
+
+      // Anti-fabrication backstop: if this turn ran NO tool AND dispatched NO
+      // sub-agent, yet the final reply cites a "(source: …)" or names a course
+      // code, the model answered from its own head and dressed it with false
+      // authority (the eval caught "MUSC 102 … (source: usc catalogue)"). Strip the
+      // fake citation in place; log either trigger. Gated on "no tool AND no
+      // dispatch" so a grounded turn is never touched (sub-agent tool calls may not
+      // surface in this stream). The prompt rules are the primary fix; this is the
+      // deterministic backstop.
+      const rr = message as { result?: string };
+      if (turnTools.size === 0 && !telemetry.subAgent && typeof rr.result === 'string' && rr.result) {
+        const claim = detectUnsourcedClaim(rr.result);
+        if (claim.hit) {
+          log('warn', 'full_agent_unsourced_claim', { ids: claim.ids, sample: rr.result.slice(0, 80) });
+          if (claim.cleaned !== rr.result) rr.result = claim.cleaned;
+        }
+      }
     }
     yield message as { type: string; text?: string };
   }
