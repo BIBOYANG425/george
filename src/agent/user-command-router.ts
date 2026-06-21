@@ -66,8 +66,8 @@ function buildUserCommandDeps(): UserCommandDeps | null {
         supabase.from('heartbeat_log').delete().eq('user_id', userId),
         supabase.from('student_followups').delete().eq('user_id', userId),
         supabase.from('messages').delete().eq('user_id', userId),
-        // P6 observation log — keyed by the same students.user_id uuid as
-        // user_profiles, so a deletion request must clear it too.
+        // P6 observation log — deleted by the same raw userId handle as every
+        // sibling table above, so a deletion request clears it too.
         supabase.from('user_observations').delete().eq('user_id', userId),
       ]);
       await cache.delete(`user:${userId}:profile`);

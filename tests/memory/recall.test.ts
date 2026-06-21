@@ -44,11 +44,11 @@ function row(content: string, over: Partial<RecalledObservation> = {}): Recalled
 // A fake ObservationDB whose recall() returns the configured rows (and records
 // the args it was called with). All other methods are unused no-ops.
 function makeDB(rows: RecalledObservation[] | (() => Promise<RecalledObservation[]>)) {
-  const calls: Array<{ userId: string; embedding: number[]; matchCount: number; minSalience: number }> = [];
+  const calls: Array<{ userId: string; embedding: number[]; matchCount: number; minSalience: number; halfLifeDays: number }> = [];
   const db: ObservationDB = {
     async insert() {},
-    async recall(userId, embedding, matchCount, minSalience) {
-      calls.push({ userId, embedding, matchCount, minSalience });
+    async recall(userId, embedding, matchCount, minSalience, halfLifeDays) {
+      calls.push({ userId, embedding, matchCount, minSalience, halfLifeDays });
       return typeof rows === 'function' ? rows() : rows;
     },
     async loadUnconsolidated() { return []; },
@@ -65,6 +65,7 @@ beforeEach(() => {
   delete process.env.GEORGE_RECALL_ENABLED;
   delete process.env.RECALL_TOP_K;
   delete process.env.RECALL_MIN_SALIENCE;
+  delete process.env.RECALL_HALF_LIFE_DAYS;
   resolveMock.mockResolvedValue(UID);
 });
 
@@ -72,6 +73,7 @@ afterEach(() => {
   delete process.env.GEORGE_RECALL_ENABLED;
   delete process.env.RECALL_TOP_K;
   delete process.env.RECALL_MIN_SALIENCE;
+  delete process.env.RECALL_HALF_LIFE_DAYS;
 });
 
 describe('isRecallEnabled', () => {
@@ -160,6 +162,7 @@ describe('recallForTurn — rendering', () => {
       embedding: EMB,
       matchCount: 4,
       minSalience: 2,
+      halfLifeDays: 14,
     });
   });
 
@@ -223,6 +226,34 @@ describe('recallForTurn — env overrides', () => {
     await recallForTurn(HANDLE, 'hi', { db, embed });
     expect(calls[0].matchCount).toBe(4);
     expect(calls[0].minSalience).toBe(2);
+  });
+
+  it('passes the default halfLifeDays(14) when RECALL_HALF_LIFE_DAYS is unset', async () => {
+    const embed = vi.fn(async () => EMB);
+    const { db, calls } = makeDB([row('a')]);
+    await recallForTurn(HANDLE, 'hi', { db, embed });
+    expect(calls[0].halfLifeDays).toBe(14);
+  });
+
+  it('reads RECALL_HALF_LIFE_DAYS and passes it through to db.recall', async () => {
+    process.env.RECALL_HALF_LIFE_DAYS = '7';
+    const embed = vi.fn(async () => EMB);
+    const { db, calls } = makeDB([row('a')]);
+    await recallForTurn(HANDLE, 'hi', { db, embed });
+    expect(calls[0].halfLifeDays).toBe(7);
+  });
+
+  it('floors halfLifeDays at 1 and falls back to default on unparseable env', async () => {
+    process.env.RECALL_HALF_LIFE_DAYS = '0';
+    const embed = vi.fn(async () => EMB);
+    const { db, calls } = makeDB([row('a')]);
+    await recallForTurn(HANDLE, 'hi', { db, embed });
+    expect(calls[0].halfLifeDays).toBe(1);
+
+    process.env.RECALL_HALF_LIFE_DAYS = 'nope';
+    const { db: db2, calls: calls2 } = makeDB([row('a')]);
+    await recallForTurn(HANDLE, 'hi', { db: db2, embed });
+    expect(calls2[0].halfLifeDays).toBe(14);
   });
 });
 

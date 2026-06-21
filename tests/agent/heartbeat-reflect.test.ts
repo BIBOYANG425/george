@@ -44,7 +44,7 @@ function obs(id: number, content: string, salience = 3): UnconsolidatedObservati
   return { id, content, salience, kind: 'event', created_at: '2026-06-21T00:00:00Z' };
 }
 
-const ENV_KEYS = ['GEORGE_REFLECT_ENABLED', 'REFLECT_PRUNE_DAYS'] as const;
+const ENV_KEYS = ['GEORGE_REFLECT_ENABLED', 'REFLECT_PRUNE_DAYS', 'RECALL_MIN_SALIENCE'] as const;
 let savedEnv: Record<string, string | undefined>;
 
 beforeEach(() => {
@@ -103,6 +103,26 @@ describe('reflectObservations', () => {
     await reflectObservations(store as any, db as any, 'u1', reflect);
 
     expect(db.calls.pruned).toEqual([['u1', 7]]);
+  });
+
+  it('honors a normal REFLECT_PRUNE_DAYS override (15) and defaults to 30 when unset', async () => {
+    process.env.REFLECT_PRUNE_DAYS = '15';
+    const db15 = makeObsDB([obs(9, 'x')]);
+    await reflectObservations(makeStore() as any, db15 as any, 'u1', (async () => []) as ObservationReflector);
+    expect(db15.calls.pruned).toEqual([['u1', 15]]);
+
+    delete process.env.REFLECT_PRUNE_DAYS;
+    const dbDefault = makeObsDB([obs(9, 'x')]);
+    await reflectObservations(makeStore() as any, dbDefault as any, 'u1', (async () => []) as ObservationReflector);
+    expect(dbDefault.calls.pruned).toEqual([['u1', 30]]);
+  });
+
+  it('honors RECALL_MIN_SALIENCE=0 (finite-checked parse, not || default)', async () => {
+    process.env.RECALL_MIN_SALIENCE = '0';
+    const db = makeObsDB([]);
+    await reflectObservations(makeStore() as any, db as any, 'u1', (async () => []) as ObservationReflector);
+    // Old `parseInt(...) || 2` turned a valid 0 into 2; finite-checked parse keeps 0.
+    expect(db.calls.loaded).toEqual([['u1', 0, 50]]);
   });
 
   it('still prunes when there are no observations (no append, markConsolidated([]) or skipped)', async () => {

@@ -35,6 +35,11 @@ const MIN_SALIENCE_DEFAULT = 2;
 const MIN_SALIENCE_FLOOR = 1;
 const MIN_SALIENCE_CEIL = 5;
 
+// Recency-decay half-life passed to the recall_observations RPC (p_half_life_days,
+// SQL default 14). Floored at 1 — a sub-day half-life would decay everything to ~0.
+const HALF_LIFE_DAYS_DEFAULT = 14;
+const HALF_LIFE_DAYS_FLOOR = 1;
+
 // Hard cap on the rendered block, in characters. We append whole lines until the
 // next line would exceed this; the header + 1 line is always kept if any row
 // exists (a single oversized row is allowed through rather than dropping recall
@@ -58,6 +63,13 @@ function resolveTopK(): number {
 function resolveMinSalience(): number {
   const n = parseIntEnv(process.env.RECALL_MIN_SALIENCE, MIN_SALIENCE_DEFAULT);
   return Math.min(MIN_SALIENCE_CEIL, Math.max(MIN_SALIENCE_FLOOR, n));
+}
+
+function resolveHalfLifeDays(): number {
+  return Math.max(
+    HALF_LIFE_DAYS_FLOOR,
+    parseIntEnv(process.env.RECALL_HALF_LIFE_DAYS, HALF_LIFE_DAYS_DEFAULT),
+  );
 }
 
 // Render the header + one "- <content>" line per row, in the order given
@@ -104,7 +116,13 @@ export async function recallForTurn(
     // 5. Lazy default DB: only construct the real Supabase client when enabled
     //    and no fake was injected.
     const db = deps?.db ?? createSupabaseObservationDB();
-    const rows = await db.recall(profileKey, embedding, resolveTopK(), resolveMinSalience());
+    const rows = await db.recall(
+      profileKey,
+      embedding,
+      resolveTopK(),
+      resolveMinSalience(),
+      resolveHalfLifeDays(),
+    );
 
     // 6. No matches → empty block.
     if (rows.length === 0) return '';

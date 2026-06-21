@@ -689,17 +689,20 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   const profileKey = await resolveProfileUserId(args.userId);
   const profile = args.profileStore && profileKey ? await args.profileStore.loadProfile(profileKey) : null;
 
-  // P6 observational-memory recall: fetch the per-turn "## THINGS YOU REMEMBER"
-  // block ONCE here, with the RAW channel handle + RAW user message (recallForTurn
-  // resolves the handle → uuid and embeds internally). Shared by the fast path AND
-  // every full-agent path below so recall reaches the model on all four routes.
-  // recallForTurn is internally gated by GEORGE_RECALL_ENABLED (returns '' when
-  // unset, before any resolve/embed/DB work) and NEVER throws — so OFF is byte-for-
-  // byte unchanged and a recall failure can never block a reply.
-  const recallBlock = await recallForTurn(args.userId, args.text);
-
-  // Conversation history (used by both the fast path and the full agent).
-  const historyPrefix = await buildHistoryPrefix(args.sessionStore, args.userId);
+  // P6 observational-memory recall + conversation history, fetched in parallel.
+  // recall: the per-turn "## THINGS YOU REMEMBER" block, fetched ONCE here with the
+  // RAW channel handle + RAW user message (recallForTurn resolves the handle → uuid
+  // and embeds internally). Shared by the fast path AND every full-agent path below
+  // so recall reaches the model on all four routes. recallForTurn is internally
+  // gated by GEORGE_RECALL_ENABLED (returns '' synchronously when unset, before any
+  // resolve/embed/DB work) and NEVER throws — so OFF is byte-for-byte unchanged and
+  // a recall failure can never block a reply. history: used by both the fast path
+  // and the full agent. The two are independent reads (no shared mutable state,
+  // neither consumes the other), so they run concurrently to shave one round-trip.
+  const [recallBlock, historyPrefix] = await Promise.all([
+    recallForTurn(args.userId, args.text),
+    buildHistoryPrefix(args.sessionStore, args.userId),
+  ]);
 
   // World Info timed-state (P5) — OBSERVE every user turn, BEFORE the fast-path
   // early-return below, so the per-user turn counter advances and a charged

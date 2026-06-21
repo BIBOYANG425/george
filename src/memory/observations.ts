@@ -38,6 +38,7 @@ export interface ObservationDB {
     queryEmbedding: number[],
     matchCount: number,
     minSalience: number,
+    halfLifeDays: number,
   ): Promise<RecalledObservation[]>;
   loadUnconsolidated(
     userId: string,
@@ -72,12 +73,13 @@ export function createObservationDB(supabase: SupabaseLike): ObservationDB {
       if (error) throw new Error(`insert observation failed: ${error.message}`);
     },
 
-    async recall(userId, queryEmbedding, matchCount, minSalience) {
+    async recall(userId, queryEmbedding, matchCount, minSalience, halfLifeDays) {
       const { data, error } = await supabase.rpc('recall_observations', {
         p_user_id: userId,
         p_query_embedding: queryEmbedding,
         p_match_count: matchCount,
         p_min_salience: minSalience,
+        p_half_life_days: halfLifeDays,
       });
       if (error) throw new Error(`recall observations failed: ${error.message}`);
       return (data ?? []) as RecalledObservation[];

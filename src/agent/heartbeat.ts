@@ -167,6 +167,15 @@ export function isReflectEnabled(): boolean {
   return process.env.GEORGE_REFLECT_ENABLED === 'true';
 }
 
+// Parse an int env var, falling back to `fallback` on missing / NaN. Mirrors the
+// finite-checked parseIntEnv in recall.ts so the Reflector reads RECALL_MIN_SALIENCE
+// the same way Recall does — a valid 0 is honored rather than silently coerced to
+// the default by the old `parseInt(...) || DEFAULT` idiom.
+function parseIntEnv(raw: string | undefined, fallback: number): number {
+  const n = Number.parseInt(raw ?? '', 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 // Valid fold targets: every BLOCK_NAME except the george_notes scratchpad.
 const REFLECT_TARGET_BLOCKS = new Set<BlockName>(
   BLOCK_NAMES.filter((b) => b !== 'george_notes'),
@@ -195,10 +204,8 @@ export async function reflectObservations(
   reflect: ObservationReflector,
 ): Promise<void> {
   try {
-    const minSalience =
-      parseInt(process.env.RECALL_MIN_SALIENCE ?? '', 10) || REFLECT_MIN_SALIENCE_DEFAULT;
-    const pruneDays =
-      parseInt(process.env.REFLECT_PRUNE_DAYS ?? '', 10) || REFLECT_PRUNE_DAYS_DEFAULT;
+    const minSalience = parseIntEnv(process.env.RECALL_MIN_SALIENCE, REFLECT_MIN_SALIENCE_DEFAULT);
+    const pruneDays = parseIntEnv(process.env.REFLECT_PRUNE_DAYS, REFLECT_PRUNE_DAYS_DEFAULT);
 
     const obs = await observationDB.loadUnconsolidated(userId, minSalience, REFLECT_LOAD_LIMIT);
 

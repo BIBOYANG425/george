@@ -112,7 +112,7 @@ describe('ObservationDB.recall', () => {
     ];
     const fake = makeFakeClient({ data: rows, error: null });
     const db = createObservationDB(fake.client);
-    const out = await db.recall(UID, [0.1, 0.2], 8, 2);
+    const out = await db.recall(UID, [0.1, 0.2], 8, 2, 14);
     expect(fake.rpcCall).toEqual({
       name: 'recall_observations',
       params: {
@@ -120,6 +120,7 @@ describe('ObservationDB.recall', () => {
         p_query_embedding: [0.1, 0.2],
         p_match_count: 8,
         p_min_salience: 2,
+        p_half_life_days: 14,
       },
     });
     expect(out).toEqual(rows);
@@ -128,13 +129,13 @@ describe('ObservationDB.recall', () => {
   it('returns [] when data is null', async () => {
     const fake = makeFakeClient({ data: null, error: null });
     const db = createObservationDB(fake.client);
-    expect(await db.recall(UID, [0], 1, 1)).toEqual([]);
+    expect(await db.recall(UID, [0], 1, 1, 14)).toEqual([]);
   });
 
   it('throws on recall error', async () => {
     const fake = makeFakeClient({ error: { message: 'rpc fail' } });
     const db = createObservationDB(fake.client);
-    await expect(db.recall(UID, [0], 1, 1)).rejects.toThrow(/rpc fail/);
+    await expect(db.recall(UID, [0], 1, 1, 14)).rejects.toThrow(/rpc fail/);
   });
 });
 
