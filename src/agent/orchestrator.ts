@@ -16,6 +16,7 @@ import { query, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS, ORCHESTRATOR_MODEL, UNIFIED_DOMAIN_PROMPT, KNOW_THINGS_PROMPT, TRUNK_TOOLS, TRUNK_MODEL } from './agents.config.js';
 import { getFullCatalog } from '../skills/index.js';
 import { ALL_TOOLS } from '../tools/index.js';
+import { isRecallToolEnabled } from '../tools/recall-memory.js';
 import type { SessionStore, TurnTelemetry } from './session-store.js';
 import type { Profile, ProfileStore } from '../memory/profile.js';
 import { recallForTurn } from '../memory/recall.js';
@@ -157,6 +158,24 @@ function buildStudentIdBlock(studentId?: string | null): string {
   ].join('\n');
 }
 
+// P6 Phase 5 (post-MVP): context for the deliberate recall_memory tool. The tool
+// keys observations by the RAW channel handle (resolved internally via
+// resolveProfileUserId → students.user_id), NOT by the students.id in
+// buildStudentIdBlock — those are different columns, so we must hand the model the
+// handle to pass as recall_memory's user_id. Gated by GEORGE_RECALL_TOOL_ENABLED:
+// '' when the flag is off, so the prompt is byte-identical to pre-feature behavior
+// (and the tool itself is absent from the allowlist on that path anyway).
+function buildRecallToolContextBlock(handle?: string | null): string {
+  if (!isRecallToolEnabled() || !handle) return '';
+  return [
+    '# RECALL MEMORY TOOL',
+    'You can deliberately search your memory of this student with the recall_memory',
+    `tool. When you call it, pass user_id: ${handle} (exactly this value) plus a`,
+    'query describing what to recall. It returns only real stored observations; an',
+    'empty result means you genuinely have nothing on it — say so, never invent one.',
+  ].join('\n');
+}
+
 // `delayContext` (long-gap note), `worldStateBlock` (World Info timed-state
 // overlay) and `recallBlock` (P6 observational-memory "## THINGS YOU REMEMBER")
 // are optional per-turn overlays pre-rendered by the caller. All empty by default,
@@ -168,6 +187,7 @@ export function buildOrchestratorPrompt(
   worldStateBlock: string = '',
   webAllowed: boolean = false,
   recallBlock: string = '',
+  handle?: string | null,
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
   parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
@@ -196,6 +216,10 @@ export function buildOrchestratorPrompt(
   if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
   const studentIdBlock = buildStudentIdBlock(studentId);
   if (studentIdBlock) parts.push(studentIdBlock);
+  // recall_memory tool context (P6 Phase 5): '' unless GEORGE_RECALL_TOOL_ENABLED
+  // is on AND a handle is supplied, so OFF is byte-identical.
+  const recallToolBlock = buildRecallToolContextBlock(handle);
+  if (recallToolBlock) parts.push(recallToolBlock);
   // Web-search guidance reaches the orchestrator only while the student is under
   // their daily cap (paired with the WebSearch tool in buildOrchestratorToolNames).
   // The orchestrator answers general / current-web queries directly (e.g. "recent
@@ -246,6 +270,7 @@ export function buildSingleAgentPrompt(
   delayContext?: string,
   worldStateBlock: string = '',
   recallBlock: string = '',
+  handle?: string | null,
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
   parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
@@ -269,6 +294,9 @@ export function buildSingleAgentPrompt(
   if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
   const studentIdBlock = buildStudentIdBlock(studentId);
   if (studentIdBlock) parts.push(studentIdBlock);
+  // recall_memory tool context (P6 Phase 5): '' unless the flag is on, byte-identical OFF.
+  const recallToolBlock = buildRecallToolContextBlock(handle);
+  if (recallToolBlock) parts.push(recallToolBlock);
   if (webAllowed) parts.push(webSearchGuidance());
   const catalog = getFullCatalog();
   if (catalog) parts.push(catalog);
@@ -341,6 +369,7 @@ export function buildTrunkPrompt(
   delayContext?: string,
   worldStateBlock: string = '',
   recallBlock: string = '',
+  handle?: string | null,
 ): string {
   const parts = [
     `${MASTER_PROMPT}\n\n${TRUNK_ROUTING_PROMPT}`,
@@ -367,6 +396,9 @@ export function buildTrunkPrompt(
   if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
   const studentIdBlock = buildStudentIdBlock(studentId);
   if (studentIdBlock) parts.push(studentIdBlock);
+  // recall_memory tool context (P6 Phase 5): '' unless the flag is on, byte-identical OFF.
+  const recallToolBlock = buildRecallToolContextBlock(handle);
+  if (recallToolBlock) parts.push(recallToolBlock);
   if (webAllowed) parts.push(webSearchGuidance());
   const catalog = getFullCatalog();
   if (catalog) parts.push(catalog);
@@ -516,6 +548,11 @@ export interface QueryOptionsInputs {
   // (recallForTurn). '' when GEORGE_RECALL_ENABLED is unset, so the OFF path stays
   // byte-for-byte unchanged across all three branches below.
   recallBlock?: string;
+  // Raw channel handle (args.userId) for the deliberate recall_memory tool context
+  // block (P6 Phase 5). Threaded so the model can pass it as recall_memory's
+  // user_id (resolved internally → students.user_id). Only surfaces in the prompt
+  // when GEORGE_RECALL_TOOL_ENABLED is on; '' / unset → byte-identical OFF.
+  handle?: string | null;
   // Already resolved by the caller. OFF path uses resolveModelForUser(userId,
   // ORCHESTRATOR_MODEL); trunk path uses resolveModelForUser(userId, TRUNK_MODEL).
   resolvedModel: string;
@@ -566,6 +603,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.delayContext,
         inputs.worldStateBlock,
         inputs.recallBlock,
+        inputs.handle,
       ),
       model: inputs.trunkModel,
       ...providerOptionsForModel(inputs.trunkModel),
@@ -594,6 +632,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.delayContext,
         inputs.worldStateBlock,
         inputs.recallBlock,
+        inputs.handle,
       ),
       model: inputs.resolvedModel,
       ...providerOptionsForModel(inputs.resolvedModel),
@@ -779,7 +818,9 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // Web search is rationed per student/day; when over cap, it's omitted from the
   // turn's tool set and the guidance block is dropped (find_places stays free).
   const webAllowed = !isWebSearchOverCap(studentId);
-  const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext, worldStateBlock, webAllowed, recallBlock);
+  // args.userId is the RAW channel handle — threaded as the recall_memory tool's
+  // user_id context (P6 Phase 5). Only surfaces when GEORGE_RECALL_TOOL_ENABLED is on.
+  const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext, worldStateBlock, webAllowed, recallBlock, args.userId);
   const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed, args.delayContext);
   const orchestratorTools = buildOrchestratorToolNames(webAllowed);
 
@@ -836,6 +877,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     delayContext: args.delayContext,
     worldStateBlock,
     recallBlock,
+    handle: args.userId,
     resolvedModel,
     trunkModel,
     systemPrompt,

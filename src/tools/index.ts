@@ -31,6 +31,7 @@ export { dpsZoneCheckTool } from './dps-zone-check.js'
 export { distanceCompareTool } from './distance-compare.js'
 export { safeRouteTool } from './safe-route.js'
 export { findPlacesTool } from './find-places.js'
+export { recallMemoryTool, isRecallToolEnabled } from './recall-memory.js'
 
 import { createSquadPostTool } from './create-squad-post.js'
 import { findSquadPostsTool } from './find-squad-posts.js'
@@ -66,6 +67,7 @@ import { distanceCompareTool } from './distance-compare.js'
 import { safeRouteTool } from './safe-route.js'
 import { findPlacesTool } from './find-places.js'
 import { geCandidatesTool } from './ge-candidates.js'
+import { recallMemoryTool, isRecallToolEnabled } from './recall-memory.js'
 
 export const ALL_TOOLS = {
   create_squad_post: createSquadPostTool,
@@ -102,4 +104,11 @@ export const ALL_TOOLS = {
   distance_compare: distanceCompareTool,
   safe_route: safeRouteTool,
   find_places: findPlacesTool,
+  // P6 Phase 5 (post-MVP) deliberate recall tool, gated by GEORGE_RECALL_TOOL_ENABLED
+  // (default-OFF). When OFF the key is absent, so the in-process MCP server and every
+  // path's ALL_TOOLS-derived allowlist are byte-identical to pre-feature behavior.
+  // Spread is evaluated once at module load — the orchestrator's flag-gated allowlist
+  // inclusion (ORCHESTRATOR_DIRECT_TOOLS / TRUNK_TOOLS) reads the same flag at the
+  // same time, so registration and allowlisting stay in lockstep.
+  ...(isRecallToolEnabled() ? { recall_memory: recallMemoryTool } : {}),
 }

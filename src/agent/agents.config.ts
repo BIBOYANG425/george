@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from '../config.js';
 import { applyNoReplyGate } from './noreply-gate.js';
+import { isRecallToolEnabled } from '../tools/recall-memory.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = path.resolve(__dirname, '../../prompts');
@@ -112,7 +113,14 @@ export const SUB_AGENTS = {
   },
 } as const;
 
-export const ORCHESTRATOR_DIRECT_TOOLS = ['set_reminder', 'load_skill', 'react_to_user'] as const;
+// The orchestrator's own direct tools (no sub-agent dispatch needed). recall_memory
+// (P6 Phase 5, post-MVP) is appended ONLY when GEORGE_RECALL_TOOL_ENABLED is on —
+// deliberate recall of THIS student's personal memory fits the main/orchestrator
+// agent (it owns small-talk + personal continuity), not a domain sub-agent. When
+// the flag is OFF the array is byte-identical to before, so every allowlist derived
+// from it (orchestrator restriction list, TRUNK_TOOLS) is unchanged → tool absent.
+const RECALL_TOOL_DIRECT: readonly string[] = isRecallToolEnabled() ? ['recall_memory'] : [];
+export const ORCHESTRATOR_DIRECT_TOOLS = ['set_reminder', 'load_skill', 'react_to_user', ...RECALL_TOOL_DIRECT] as const;
 
 export type SubAgentName = keyof typeof SUB_AGENTS;
 
