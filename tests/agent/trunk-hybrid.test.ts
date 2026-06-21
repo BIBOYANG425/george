@@ -21,6 +21,7 @@ import {
   ORCHESTRATOR_MODEL,
   KNOW_THINGS_PROMPT,
   SUB_AGENTS,
+  ORCHESTRATOR_DIRECT_TOOLS,
 } from '../../src/agent/agents.config.js';
 import { ALL_TOOLS } from '../../src/tools/index.js';
 import { loadAllSkills, _resetForTest, getFullCatalog } from '../../src/skills/index.js';
@@ -187,9 +188,11 @@ describe('must-fix 1 — every tool named in batch/course-fastpath guidance is o
     expect(opts.allowedTools).toContain(NS('ge_candidates'));
   });
 
-  it('TRUNK_TOOLS = the 18 know-things tools + ge_candidates + set_reminder + load_skill', () => {
+  it('TRUNK_TOOLS = the know-things tools + ge_candidates + the orchestrator direct tools', () => {
+    // Spread ORCHESTRATOR_DIRECT_TOOLS rather than hardcode it, so adding a direct
+    // tool (e.g. react_to_user) flows through without this assertion going stale.
     expect([...TRUNK_TOOLS].sort()).toEqual(
-      [...KNOW_THINGS_TOOLS, 'ge_candidates', 'set_reminder', 'load_skill'].sort(),
+      [...KNOW_THINGS_TOOLS, 'ge_candidates', ...ORCHESTRATOR_DIRECT_TOOLS].sort(),
     );
     // No find-people / whats-happening exclusive tools leak in.
     expect(TRUNK_TOOLS).not.toContain('create_squad_post');

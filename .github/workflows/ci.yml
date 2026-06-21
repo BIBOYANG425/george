@@ -1,0 +1,46 @@
+name: CI
+
+# Gate every PR (and pushes to main) on a clean type-check + test run, so a merge
+# can't land red the way the react_to_user/tapback change did (3 failing tests +
+# an em-dash voice regression reached prod unnoticed).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel an in-progress run when a newer commit is pushed to the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    env:
+      # src/config.ts requires these at module load. CI uses placeholders so the
+      # suite can import the real modules. The paid real-LLM suites stay SKIPPED
+      # because their extra gates (GEORGE_EVAL_CONVO_ENABLED / GEORGE_EVAL_JUDGE_ENABLED
+      # / DEEPSEEK_API_KEY) are intentionally left unset — so CI makes ZERO API calls.
+      ANTHROPIC_API_KEY: ci-placeholder-not-used
+      SUPABASE_URL: http://ci.invalid
+      SUPABASE_ANON_KEY: ci-placeholder
+      SUPABASE_SERVICE_ROLE_KEY: ci-placeholder
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20 # matches the Dockerfile (node:20-slim)
+          cache: npm
+
+      # npm ci against package-lock.json — same as the Dockerfile build stage.
+      # ubuntu-latest ships python3 + build-essential, so native deps
+      # (better-sqlite3 via spectrum-ts) compile without extra setup.
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npx vitest run
