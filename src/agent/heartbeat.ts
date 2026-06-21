@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProfileStore, BlockName, BLOCK_NAMES, MAX_BLOCK_CHARS, type Profile } from '../memory/profile.js';
+import type { ObservationDB, UnconsolidatedObservation } from '../memory/observations.js';
 import { InstructionsStore } from '../memory/instructions.js';
 import { LLMClient } from './llm-clients.js';
 import { callLightweightLLM } from './llm-providers.js';
@@ -71,6 +72,11 @@ export interface HeartbeatDeps {
   writeLog: (entry: HeartbeatLogEntry) => Promise<void>;
   updateLastHeartbeatAt: (userId: string) => Promise<void>;
   callLLM: LLMClient['call'];
+  // P6 observational-memory — observation log seam for the Reflector pass. Optional
+  // so existing callers/tests compile; the Reflector only runs when
+  // GEORGE_REFLECT_ENABLED is on AND this dep is provided. Production passes
+  // createSupabaseObservationDB().
+  observationDB?: ObservationDB;
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -147,6 +153,131 @@ async function realSummarize(_block: BlockName, content: string): Promise<string
     ],
     { maxTokens: 1500, model: config.models.smart },
   );
+}
+
+// ── Reflector (P6 observational-memory) ────────────────────────────────────────
+// A heartbeat pass that periodically folds DURABLE/recurring observations from the
+// user_observations log into the right long-term profile block(s), then prunes the
+// log. Runs alongside compaction, gated by GEORGE_REFLECT_ENABLED (default OFF →
+// the dep is never even touched; see runHeartbeat). george_notes is a pure
+// scratchpad and is excluded as a fold target; observations fold only into
+// identity|academic|interests|relationships|state.
+
+export function isReflectEnabled(): boolean {
+  return process.env.GEORGE_REFLECT_ENABLED === 'true';
+}
+
+// Valid fold targets: every BLOCK_NAME except the george_notes scratchpad.
+const REFLECT_TARGET_BLOCKS = new Set<BlockName>(
+  BLOCK_NAMES.filter((b) => b !== 'george_notes'),
+);
+
+// Reuse the recall feature's salience floor + default so the Reflector and Recall
+// see the same "worth keeping" bar (RECALL_MIN_SALIENCE, default 2).
+const REFLECT_MIN_SALIENCE_DEFAULT = 2;
+const REFLECT_LOAD_LIMIT = 50;
+const REFLECT_PRUNE_DAYS_DEFAULT = 30;
+
+// Given recent observations, decide which durable notes to fold into which block.
+// Dependency-injected so reflectObservations unit-tests without a real LLM, mirroring
+// how compactProfileIfDue takes an injected BlockSummarizer.
+export type ObservationReflector = (
+  observations: UnconsolidatedObservation[],
+) => Promise<Array<{ block: BlockName; text: string }>>;
+
+// Fold durable observations into profile blocks, mark them consolidated, prune the
+// log. Fail-safe: any error is logged and swallowed so the heartbeat tick continues
+// and rows are left un-consolidated for the next tick.
+export async function reflectObservations(
+  store: { appendToBlock(u: string, b: BlockName, c: string): Promise<void> },
+  observationDB: Pick<ObservationDB, 'loadUnconsolidated' | 'markConsolidated' | 'prune'>,
+  userId: string,
+  reflect: ObservationReflector,
+): Promise<void> {
+  try {
+    const minSalience =
+      parseInt(process.env.RECALL_MIN_SALIENCE ?? '', 10) || REFLECT_MIN_SALIENCE_DEFAULT;
+    const pruneDays =
+      parseInt(process.env.REFLECT_PRUNE_DAYS ?? '', 10) || REFLECT_PRUNE_DAYS_DEFAULT;
+
+    const obs = await observationDB.loadUnconsolidated(userId, minSalience, REFLECT_LOAD_LIMIT);
+
+    if (obs.length === 0) {
+      // Nothing fresh to reflect on, but still age out old/consolidated rows.
+      await observationDB.prune(userId, pruneDays);
+      return;
+    }
+
+    const appends = await reflect(obs);
+    for (const a of appends) {
+      const text = (a?.text ?? '').trim();
+      if (!text) continue;
+      if (!REFLECT_TARGET_BLOCKS.has(a.block as BlockName)) continue;
+      await store.appendToBlock(userId, a.block, text);
+    }
+
+    // Mark ALL loaded observations consolidated — they have been reflected on
+    // whether or not they produced an append. This prevents re-loading them forever
+    // and lets them age out via prune.
+    await observationDB.markConsolidated(obs.map((o) => o.id));
+
+    await observationDB.prune(userId, pruneDays);
+  } catch (err) {
+    log('warn', 'reflect_failed', {
+      userId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+// Production reflector: fold durable observations into blocks with the lightweight
+// LLM (JSON mode, like realSummarize). Parses tolerantly (first-{ … last-}) and
+// drops any entry whose block name isn't a valid fold target.
+const REFLECT_SYSTEM = [
+  "You consolidate a student's recent observations into their long-term profile.",
+  'Given observations (content/kind/salience), output STRICT JSON',
+  '{"appends":[{"block":"<identity|academic|interests|relationships|state>","text":"<short third-person durable note>"}]}',
+  '— fold only DURABLE, recurring, or significant patterns; skip transient one-offs; never invent;',
+  '{"appends":[]} if nothing durable.',
+].join(' ');
+
+function parseReflect(raw: string): Array<{ block: BlockName; text: string }> {
+  try {
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start === -1 || end === -1 || end < start) return [];
+    const obj = JSON.parse(raw.slice(start, end + 1)) as {
+      appends?: Array<{ block?: unknown; text?: unknown }>;
+    };
+    const appends = Array.isArray(obj.appends) ? obj.appends : [];
+    const out: Array<{ block: BlockName; text: string }> = [];
+    for (const a of appends) {
+      const block = a?.block;
+      const text = typeof a?.text === 'string' ? a.text : '';
+      if (typeof block === 'string' && REFLECT_TARGET_BLOCKS.has(block as BlockName) && text.trim()) {
+        out.push({ block: block as BlockName, text });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+async function realReflect(
+  observations: UnconsolidatedObservation[],
+): Promise<Array<{ block: BlockName; text: string }>> {
+  const userContent = observations
+    .map((o) => `- (${o.kind ?? 'note'}, salience ${o.salience}) ${o.content}`)
+    .join('\n');
+  const raw = await callLightweightLLM(
+    [
+      { role: 'system', content: REFLECT_SYSTEM },
+      { role: 'user', content: userContent },
+    ],
+    { maxTokens: 400, jsonMode: true },
+  );
+  return parseReflect(raw);
 }
 
 export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise<void> {
@@ -280,6 +411,14 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
           error: compactErr instanceof Error ? compactErr.message : String(compactErr),
         });
       }
+    }
+
+    // P6 observational-memory: fold durable observations into the profile and prune
+    // the observation log. DEFAULT-OFF — gated by GEORGE_REFLECT_ENABLED, and only
+    // runs when the observationDB seam is wired. reflectObservations is itself
+    // fail-safe (logs + swallows), so it never fails the tick.
+    if (isReflectEnabled() && deps.observationDB) {
+      await reflectObservations(deps.profileStore, deps.observationDB, userId, realReflect);
     }
   } catch (err) {
     outcome = 'error';
