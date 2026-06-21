@@ -290,7 +290,17 @@ export interface FlipInputs {
   targetDims: DimKey[];
   errorArms: number;
   guard?: FlipGuardConfig;
+  // Path-flag mode (GEORGE_TRUNK_HYBRID / SINGLE_AGENT): decide on quality/voice
+  // PARITY + latency, not target-dim improvement + flag-target pairwise.
+  pathFlag?: boolean;
+  meanDurationMsOff?: number;
+  meanDurationMsOn?: number;
 }
+
+// Quality dims a PATH flag must not regress (voiceFidelity + groundedness are
+// already guarded above by VETO 2 with the tighter epsilon). A whole-path swap
+// is only safe to flip on if it holds parity on these too.
+const PATH_PARITY_DIMS: DimKey[] = ['helpfulness', 'taste', 'personaSafety'];
 
 // Decide flip-on vs hold-off and return the single deciding guard. Order of
 // vetoes (any one holds the flip): gate regression, voice/anti-fab regression,
@@ -321,6 +331,34 @@ export function decideFlip(inp: FlipInputs): { recommendation: 'flip-on' | 'hold
         decidingGuard: `${dim} regressed (Δ ${d.delta.toFixed(2)}, significant) past epsilon ${guard.voiceAntiFabEpsilon}`,
       };
     }
+  }
+
+  // PATH flags (trunk-hybrid / single-agent): a whole-path swap changes every
+  // turn, so there is no flag-target subset and the bar is quality/voice PARITY
+  // across the broad set (not improvement) plus a latency win. VETO 0/1/2 above
+  // already enforced no error / gate / voiceFidelity / groundedness regression;
+  // here we additionally require no SIGNIFICANT drop on the remaining quality
+  // dims, then flip-on with the latency delta as the headline.
+  if (inp.pathFlag) {
+    const regressed = inp.absoluteDeltas.find(
+      (d) => PATH_PARITY_DIMS.includes(d.dim) && d.delta < -guard.targetMargin && d.significant,
+    );
+    if (regressed) {
+      return {
+        recommendation: 'hold-off',
+        decidingGuard: `${regressed.dim} regressed (Δ ${regressed.delta.toFixed(2)}, significant) — a path swap must hold quality parity`,
+      };
+    }
+    const dOff = inp.meanDurationMsOff;
+    const dOn = inp.meanDurationMsOn;
+    const latency =
+      dOff != null && dOn != null
+        ? `latency ${Math.round(dOff)}ms→${Math.round(dOn)}ms (Δ ${Math.round(dOn - dOff)}ms${dOn < dOff ? ', faster' : ''})`
+        : 'latency not measured';
+    return {
+      recommendation: 'flip-on',
+      decidingGuard: `quality/voice parity held (no significant regression on gate, voiceFidelity, groundedness, ${PATH_PARITY_DIMS.join(', ')}); ${latency}`,
+    };
   }
 
   // NO_REPLY-class flags: decide by the assertion metric, NOT pairwise (must-fix
@@ -401,6 +439,18 @@ export interface AggregateInputs {
   offArm: string;
   onArm: string;
   guard?: FlipGuardConfig;
+  // Path-flag mode (trunk-hybrid / single-agent): decide on parity + latency.
+  pathFlag?: boolean;
+}
+
+// Mean orchestrator latency for an arm over its CANDIDATE turns only: a turn that
+// errored or fell to the fast path doesn't reflect the path under test, so it is
+// excluded. undefined when no candidate turn carried timing.
+function meanArmDurationMs(records: TurnRecord[], armName: string): number | undefined {
+  const ds = records
+    .filter((r) => r.flagConfigName === armName && !r.error && !r.fastPath && typeof r.durationMs === 'number')
+    .map((r) => r.durationMs as number);
+  return ds.length ? ds.reduce((a, b) => a + b, 0) / ds.length : undefined;
 }
 
 export function buildReport(inp: AggregateInputs): FullReport {
@@ -418,6 +468,10 @@ export function buildReport(inp: AggregateInputs): FullReport {
   const pairwiseFull = tallyPairwise(inp.pairwiseFullJudgments);
   const pairwiseFlagTarget = tallyPairwise(inp.pairwiseFlagTargetJudgments);
   const errorArms = inp.records.filter((r) => r.error).length;
+  const meanDurationMsOff = meanArmDurationMs(inp.records, inp.offArm);
+  const meanDurationMsOn = meanArmDurationMs(inp.records, inp.onArm);
+  const durationDeltaMs =
+    meanDurationMsOff != null && meanDurationMsOn != null ? meanDurationMsOn - meanDurationMsOff : undefined;
 
   const flip = decideFlip({
     flag: inp.flag,
@@ -434,6 +488,9 @@ export function buildReport(inp: AggregateInputs): FullReport {
     targetDims: inp.targetDims,
     errorArms,
     guard,
+    pathFlag: inp.pathFlag,
+    meanDurationMsOff,
+    meanDurationMsOn,
   });
 
   const ab: ABReport = {
@@ -452,6 +509,10 @@ export function buildReport(inp: AggregateInputs): FullReport {
     flipRecommendation: flip.recommendation,
     decidingGuard: flip.decidingGuard,
     errorArms,
+    pathFlag: inp.pathFlag,
+    meanDurationMsOff,
+    meanDurationMsOn,
+    durationDeltaMs,
   };
 
   const scenarioRows: ScenarioRow[] = [];
@@ -516,6 +577,13 @@ export function renderMarkdown(report: FullReport): string {
   lines.push(`- split: ${ab.split}`);
   lines.push(`- path flags pinned: ${JSON.stringify(ab.pathFlagsPinned)}`);
   lines.push(`- gate pass rate: OFF ${ab.gatePassRateOff.toFixed(2)} -> ON ${ab.gatePassRateOn.toFixed(2)} (Δ ${ab.gatePassRateDelta.toFixed(2)})`);
+  if (ab.pathFlag) lines.push('- mode: PATH FLAG (bar = quality/voice parity + latency win, not improvement)');
+  if (ab.meanDurationMsOff != null && ab.meanDurationMsOn != null) {
+    const faster = (ab.durationDeltaMs ?? 0) < 0;
+    lines.push(
+      `- mean latency: OFF ${Math.round(ab.meanDurationMsOff)}ms -> ON ${Math.round(ab.meanDurationMsOn)}ms (Δ ${Math.round(ab.durationDeltaMs ?? 0)}ms${faster ? ', ON faster ✅' : ''})`,
+    );
+  }
   if (ab.errorArms > 0) lines.push(`- ⚠️ error arms: ${ab.errorArms}`);
   lines.push('');
   lines.push('## OFF vs ON dimension table');
