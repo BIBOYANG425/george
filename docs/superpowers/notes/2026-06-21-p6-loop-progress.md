@@ -25,13 +25,16 @@ FULLY built + CI-green without touching prod (tests mock the DB). Build to "read
 `docs/superpowers/plans/2026-06-21-p6-observational-memory.md` (4 phases).
 
 ## Phase status
-- [ ] Phase 0 — bia-admin migration: `user_observations` table + indexes + `recall_observations` RPC (FILE + PR; prod-apply PARKED)
-- [ ] Phase 1 — Observer (extend `src/memory/capture.ts`) + observations writer
-- [ ] Phase 2 — Recall (`src/memory/recall.ts` + prompt-builder injection, both paths)
+- [x] Phase 0 — bia-admin migration FILE + PR **#32** (`user_observations` + `recall_observations` RPC + service_role grant). Prod-apply PARKED.
+- [x] Phase 1 — Observer DONE. `src/memory/observations.ts` store seam (commit 81fffac, 21 tests) + `src/memory/capture.ts` Observer (commit 2896014, gated `GEORGE_OBSERVE_ENABLED`). Full suite 817 passed, tsc clean.
+- [ ] Phase 2 — Recall (`src/memory/recall.ts` + prompt-builder injection, both paths) ← NEXT
 - [ ] Phase 3 — Reflector + prune (heartbeat) + `/delete me` extension
 
 ## Log (newest first)
-- 08:46Z — loop started. Spec done + committed (d59d8c6). Writing plan next.
+- 09:0xZ — Phase 1 DONE (observations seam + Observer). Full suite 817 passed/11 skip, tsc clean. Branch pushed. Next: Phase 2 recall.
+- 08:5xZ — Phase 0 done: bia-admin PR #32 (migration + RPC, additive). Starting Phase 1 (george Observer).
+- 08:46Z — loop started. Spec done + committed (d59d8c6). Plan + charter committed (64a04e1).
 
 ## Bobby's activation checklist (fill as phases complete)
-_(prod-apply migration → deploy default-OFF code → dogfood flags observe→recall→reflect on /georgebeta)_
+1. **Apply bia-admin migration to prod:** PR #32 (`20260621130000_p6_user_observations.sql`) — adds `user_observations` + `recall_observations` RPC. Merge + apply to prod (Supabase MCP `apply_migration`), verify `to_regclass('public.user_observations')` non-null.
+2. _(deploy default-OFF george code → dogfood flags observe→recall→reflect on /georgebeta — fill as phases land)_
