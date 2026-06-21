@@ -246,6 +246,18 @@ export interface ABReport {
   // The single guard that decided the recommendation (the line a human acts on).
   decidingGuard: string;
   errorArms: number;
+  // True when the flag under test is a whole-PATH flag (GEORGE_TRUNK_HYBRID,
+  // SINGLE_AGENT) rather than a tagged behavior flag. Path flags have no
+  // flag-target subset (they change EVERY turn), so the flip bar is quality/voice
+  // PARITY across a broad set + a latency win, not target-dim improvement +
+  // flag-target pairwise. See decideFlip's path-flag branch.
+  pathFlag?: boolean;
+  // Mean orchestrator turn latency per arm (candidate turns only — excludes
+  // fast-path + error arms). The headline win for a path flag like trunk-hybrid
+  // (one agent vs orchestrator+dispatch). undefined when no turns carried timing.
+  meanDurationMsOff?: number;
+  meanDurationMsOn?: number;
+  durationDeltaMs?: number; // on - off; negative = ON faster = the win
 }
 
 export interface CostSummary {

@@ -406,6 +406,69 @@ describe('report — flip decision guards', () => {
     expect(d.recommendation).toBe('flip-on');
   });
 
+  it('path flag flips on at quality parity + a latency win (no improvement required)', () => {
+    const off = new Map<string, AggregatedJudge>();
+    const on = new Map<string, AggregatedJudge>();
+    const ids: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const id = `p${i}`;
+      ids.push(id);
+      off.set(id, aggregateJudgeDraws(id, 'OFF', [fakeScore({})], true));
+      on.set(id, aggregateJudgeDraws(id, 'ON', [fakeScore({})], true)); // identical = parity
+    }
+    const deltas = computeAbsoluteDeltas(ids, off, on);
+    const d = decideFlip({
+      flag: 'GEORGE_TRUNK_HYBRID',
+      pathFlagsPinned: {},
+      judgeModel: 'm',
+      split: 'all',
+      gatePassRateOff: 1,
+      gatePassRateOn: 1,
+      absoluteDeltas: deltas,
+      pairwiseFull: tallyPairwise([]),
+      pairwiseFlagTarget: tallyPairwise([]), // path flag has no flag-target subset
+      targetDims: [],
+      errorArms: 0,
+      pathFlag: true,
+      meanDurationMsOff: 8000,
+      meanDurationMsOn: 5000, // ON faster = the win
+    });
+    expect(d.recommendation).toBe('flip-on');
+    expect(d.decidingGuard).toMatch(/parity/);
+    expect(d.decidingGuard).toMatch(/faster/);
+  });
+
+  it('path flag holds off on a significant quality regression even with a latency win', () => {
+    const off = new Map<string, AggregatedJudge>();
+    const on = new Map<string, AggregatedJudge>();
+    const ids: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const id = `q${i}`;
+      ids.push(id);
+      off.set(id, aggregateJudgeDraws(id, 'OFF', [fakeScore({ helpfulness: 5 })], true));
+      on.set(id, aggregateJudgeDraws(id, 'ON', [fakeScore({ helpfulness: 3 })], true)); // -2, significant
+    }
+    const deltas = computeAbsoluteDeltas(ids, off, on);
+    const d = decideFlip({
+      flag: 'GEORGE_TRUNK_HYBRID',
+      pathFlagsPinned: {},
+      judgeModel: 'm',
+      split: 'all',
+      gatePassRateOff: 1,
+      gatePassRateOn: 1,
+      absoluteDeltas: deltas,
+      pairwiseFull: tallyPairwise([]),
+      pairwiseFlagTarget: tallyPairwise([]),
+      targetDims: [],
+      errorArms: 0,
+      pathFlag: true,
+      meanDurationMsOff: 8000,
+      meanDurationMsOn: 5000,
+    });
+    expect(d.recommendation).toBe('hold-off');
+    expect(d.decidingGuard).toMatch(/helpfulness regressed/);
+  });
+
   it('buildReport + renderMarkdown produce a one-pager with the recommendation', () => {
     const flag = 'WORLD_STATE_ENABLED';
     const sc = scenarios.filter((s) => s.flagsUnderTest?.includes(flag));
@@ -503,6 +566,14 @@ const JUDGE_DRAWS = Math.max(3, Number(process.env.GEORGE_EVAL_JUDGE_K) || 3);
 // end. Override with GEORGE_EVAL_FLAG=WORLD_STATE_ENABLED etc.
 const FLAG_UNDER_TEST = process.env.GEORGE_EVAL_FLAG || 'GEORGE_NOREPLY_ENABLED';
 
+// Whole-PATH flags swap the generation topology for EVERY turn (not a tagged
+// behavior tell), so they have no flagsUnderTest subset. They are A/B'd over a
+// broad representative set and decided on quality/voice PARITY + a latency win
+// (see decideFlip's path-flag branch). GEORGE_EVAL_PATH_N caps the breadth.
+const PATH_FLAGS = new Set(['GEORGE_TRUNK_HYBRID', 'SINGLE_AGENT']);
+const IS_PATH_FLAG = PATH_FLAGS.has(FLAG_UNDER_TEST);
+const PATH_FLAG_N = Math.max(6, Number(process.env.GEORGE_EVAL_PATH_N) || 12);
+
 describe.skipIf(!REAL_ENABLED)('conversation eval — real A/B suite', () => {
   it('judge model id is a real Anthropic Opus (must-fix 1)', async () => {
     // Guards against a fabricated id silently 404-ing the judge half.
@@ -517,9 +588,16 @@ describe.skipIf(!REAL_ENABLED)('conversation eval — real A/B suite', () => {
       const { judgeReply, judgePairwise, resolveJudgeModel } = await import('./judge.js');
       // Exercise scenarios for this flag plus a slice of baseline scenarios so the
       // gate-pass-rate guard sees the FULL set (path flags pinned both arms).
-      const flagScenarios = scenarios.filter((s) => s.flagsUnderTest?.includes(FLAG_UNDER_TEST));
+      // Behavior flag: its tagged scenarios + a baseline slice. Path flag: a broad
+      // representative set (it touches every turn), excluding NO_REPLY-class
+      // scenarios (suppression is irrelevant to a topology parity check).
+      const flagScenarios = IS_PATH_FLAG
+        ? []
+        : scenarios.filter((s) => s.flagsUnderTest?.includes(FLAG_UNDER_TEST));
       const baseline = scenarios.filter((s) => !s.flagsUnderTest || s.flagsUnderTest.length === 0).slice(0, 6);
-      const subset: Scenario[] = [...flagScenarios, ...baseline];
+      const subset: Scenario[] = IS_PATH_FLAG
+        ? scenarios.filter((s) => !s.expect.expectNoReply).slice(0, PATH_FLAG_N)
+        : [...flagScenarios, ...baseline];
 
       const offArm = armConfig('OFF', FLAG_UNDER_TEST, 'false');
       const onArm = armConfig('ON', FLAG_UNDER_TEST, 'true');
@@ -651,9 +729,10 @@ describe.skipIf(!REAL_ENABLED)('conversation eval — real A/B suite', () => {
         pairwiseFlagTargetJudgments,
         noReplyMetric,
         flagActivation,
-        targetDims: targetDimsByFlag[FLAG_UNDER_TEST] ?? ['taste'],
+        targetDims: IS_PATH_FLAG ? [] : (targetDimsByFlag[FLAG_UNDER_TEST] ?? ['taste']),
         offArm: 'OFF',
         onArm: 'ON',
+        pathFlag: IS_PATH_FLAG,
       });
 
       // Emit the report artifacts into the gitignored .out dir.
