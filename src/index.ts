@@ -28,6 +28,7 @@ import { createSupabaseSessionStore } from './agent/session-store.js'
 import { getStats, log } from './observability/logger.js'
 import { matchStudentsToEvents } from './jobs/proactive.js'
 import { sendPendingReminders } from './jobs/reminder-sender.js'
+import { sendPendingShippingNotifications } from './jobs/shipping-notifier.js'
 import { scrapeInstagram } from './scrapers/instagram.js'
 import { scrapeUSCEvents } from './scrapers/usc-events.js'
 import { loadAllSkills, getRegistryStats } from './skills/index.js'
@@ -590,6 +591,23 @@ cron.schedule('*/5 * * * *', () => {
     log('error', 'reminder_cron_error', { error: err.message })
   })
 })
+
+// Drain the shipping-notification queue (parcel/shipment status → WeChat/iMessage).
+// Opt-IN kill switch: the producer trigger has enqueued in prod since 2026-06-06,
+// so an ungated boot (even local dev with prod creds) would deliver the entire
+// pending backlog. Disabled is the safe default; the 24h stale guard in the job
+// is a second line of defence.
+if (config.shippingNotifier.enabled) {
+  cron.schedule('*/5 * * * *', () => {
+    sendPendingShippingNotifications().catch((err) => {
+      log('error', 'shipping_notifier_cron_error', { error: err.message })
+    })
+  })
+} else {
+  log('info', 'shipping_notifier_disabled', {
+    hint: 'shipping notification cron NOT scheduled — set SHIPPING_NOTIFIER_ENABLED=true to deliver queued parcel notifications',
+  })
+}
 
 // Weekly: Mon 12:00 PT (lunchtime). Picked so that:
 //   - it lands inside proactive.ts's active window (hour 8-21 LA local), so the
