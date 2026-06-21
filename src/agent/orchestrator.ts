@@ -22,7 +22,7 @@ import { resolveStudentId, resolveProfileUserId } from '../db/students.js';
 import { log } from '../observability/logger.js';
 import { isWebSearchOverCap, recordWebSearchUse } from '../services/web-search-budget.js';
 import { trustedDomains } from '../services/web-search-config.js';
-import { renderMoodBlock } from './calendar-mood.js';
+import { renderMoodBlock, renderDateBlock } from './calendar-mood.js';
 import { extractRelationshipNote, upsertRelationshipNote } from '../memory/profile.js';
 import { isRelationshipEvalEnabled } from './evaluators/relationship.js';
 import { stripRaisedThreadLines } from './grounded-proactive.js';
@@ -176,6 +176,7 @@ export function buildOrchestratorPrompt(
   webAllowed: boolean = false,
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
+  parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
   // Calendar-mood overlay (master.md "Calendar mood overlay"): inject the current
   // academic-calendar tone so finals/orientation/etc. actually changes behavior.
   const moodBlock = renderMoodBlock();
@@ -247,6 +248,7 @@ export function buildSingleAgentPrompt(
   worldStateBlock: string = '',
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
+  parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
   const moodBlock = renderMoodBlock();
   if (moodBlock) parts.push(moodBlock);
   // Activity-state overlay (see buildOrchestratorPrompt): self-gated to '' when
@@ -344,6 +346,7 @@ export function buildTrunkPrompt(
   ];
   // Overlay stack — copied verbatim from buildOrchestratorPrompt / buildSingleAgentPrompt
   // so the overlays are byte-identical for the same inputs.
+  parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
   const moodBlock = renderMoodBlock();
   if (moodBlock) parts.push(moodBlock);
   const activityBlock = renderActivityBlock();
@@ -439,6 +442,7 @@ export function buildAgentsConfig(
   // tone (self-gated to '' unless GEORGE_ACTIVITY_STATE_ENABLED), and the long-gap
   // delay-context note. Without these the legacy multi-agent path silently dropped
   // the activity/delay overlays the other two paths inject.
+  const dateBlock = renderDateBlock(); // real current date — anchors "now" past the training cutoff
   const moodBlock = renderMoodBlock();
   const activityBlock = renderActivityBlock();
   const config: Record<string, { description: string; prompt: string; tools: string[]; model?: string }> = {};
@@ -447,7 +451,7 @@ export function buildAgentsConfig(
     // only, and only when the user is under their daily web-search cap.
     const wantsWeb = name === 'whats-happening' || name === 'know-things';
     const webBlock = wantsWeb && webAllowed ? webSearchGuidance() : '';
-    const extras = [moodBlock, activityBlock, delayContext, userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
+    const extras = [dateBlock, moodBlock, activityBlock, delayContext, userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
     config[name] = {
       description: def.description,
       prompt: extras ? `${def.prompt}\n\n${extras}` : def.prompt,
