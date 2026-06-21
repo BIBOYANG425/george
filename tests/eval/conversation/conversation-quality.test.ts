@@ -72,18 +72,29 @@ const HAS_ANTHROPIC_CONFIG = !!process.env.ANTHROPIC_API_KEY || !!process.env.BA
 // Path flags pinned across BOTH arms so the A/B varies only the flag under test
 // and the generation path is held constant (must-fix f). KIMI_API_KEY is pinned
 // here (emptied) so fast-path turns can't drift onto Kimi mid-A/B.
-// GEORGE_DISABLE_FAST_PATH forces EVERY turn through the full agent: fast-path
-// turns are identical across arms and carry zero topology/flag signal, so leaving
-// them in just dilutes the A/B (the first trunk run had most turns fast-path).
+//
+// NOTE: GEORGE_DISABLE_FAST_PATH (force every turn through the full agent) is NOT
+// pinned globally — it is added below ONLY for PATH flags (trunk/single-agent),
+// where fast-path turns dilute the topology A/B. For BEHAVIOR flags it must stay
+// OFF: e.g. NO_REPLY operates on pure-ack messages that are exactly fast-path
+// territory, so forcing the agent there suppresses the flag's real behavior (the
+// first NO_REPLY run scored 0/2 suppressions purely because the agent was forced).
 const PINNED_PATH_FLAGS: Record<string, string> = {
   SINGLE_AGENT: 'false',
   GEORGE_TRUNK_HYBRID: 'false',
   KIMI_API_KEY: '',
-  GEORGE_DISABLE_FAST_PATH: 'true',
 };
 
+// Whole-PATH flags (swap the generation topology every turn). Defined here so
+// armConfig can gate the force-agent-path behavior on them. The behavior flags
+// (NO_REPLY, world-state, relationship) are NOT in this set.
+const PATH_FLAGS = new Set(['GEORGE_TRUNK_HYBRID', 'SINGLE_AGENT']);
+
 function armConfig(name: string, flag: string, value: 'true' | 'false'): FlagConfig {
-  return { name, flags: { ...PINNED_PATH_FLAGS, [flag]: value } };
+  const flags: Record<string, string> = { ...PINNED_PATH_FLAGS, [flag]: value };
+  // Force the agent path only when the flag UNDER TEST is itself a path flag.
+  if (PATH_FLAGS.has(flag)) flags.GEORGE_DISABLE_FAST_PATH = 'true';
+  return { name, flags };
 }
 
 // Helper to fabricate a JudgeScore for the pure aggregation tests (no LLM).
@@ -570,11 +581,9 @@ const JUDGE_DRAWS = Math.max(3, Number(process.env.GEORGE_EVAL_JUDGE_K) || 3);
 // end. Override with GEORGE_EVAL_FLAG=WORLD_STATE_ENABLED etc.
 const FLAG_UNDER_TEST = process.env.GEORGE_EVAL_FLAG || 'GEORGE_NOREPLY_ENABLED';
 
-// Whole-PATH flags swap the generation topology for EVERY turn (not a tagged
-// behavior tell), so they have no flagsUnderTest subset. They are A/B'd over a
-// broad representative set and decided on quality/voice PARITY + a latency win
-// (see decideFlip's path-flag branch). GEORGE_EVAL_PATH_N caps the breadth.
-const PATH_FLAGS = new Set(['GEORGE_TRUNK_HYBRID', 'SINGLE_AGENT']);
+// PATH_FLAGS is defined above (near armConfig). A path flag is A/B'd over a broad
+// representative set and decided on quality/voice PARITY + a latency win (see
+// decideFlip's path-flag branch). GEORGE_EVAL_PATH_N caps the breadth.
 const IS_PATH_FLAG = PATH_FLAGS.has(FLAG_UNDER_TEST);
 const PATH_FLAG_N = Math.max(6, Number(process.env.GEORGE_EVAL_PATH_N) || 12);
 
