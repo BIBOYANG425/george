@@ -87,6 +87,11 @@ export const config = {
   // blast radius if the iPhone's Shortcuts get exfiltrated.
   adminTokenPhone: process.env.ADMIN_TOKEN_PHONE || '',
   port: parseInt(process.env.PORT || '3001'),
+  // Code-level anti-fabrication gate on the fast path. When on (default), a
+  // fast-path draft that asserts a specific unverified fact (a shop, a gathering,
+  // an opening hour, a course number, a price) is dropped and the turn falls
+  // through to the grounded full agent. Kill-switch: FASTPATH_FABRICATION_GUARD=false.
+  fastPathFabricationGuard: process.env.FASTPATH_FABRICATION_GUARD !== 'false',
   proactive: {
     enabled: process.env.PROACTIVE_ENABLED !== 'false',
     rolloutPct: parseInt(process.env.PROACTIVE_ROLLOUT_PCT || '10'),
