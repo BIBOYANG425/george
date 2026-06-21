@@ -11,10 +11,13 @@
 // (e.g. HEARTBEAT_ENABLED=false), the runtime stays null and
 // tryHandleUserCommand falls through to the orchestrator.
 //
-// /delete me also clears the in-process World Info state (world-state.ts) so no
-// ephemeral per-user signal survives a deletion request.
+// /delete me wipes every per-user table (user_profiles + heartbeat config /
+// instructions / log, student_followups, messages, and the P6 user_observations
+// log) by the shared students.user_id uuid, and also clears the in-process World
+// Info state (world-state.ts) so no ephemeral per-user signal survives a deletion
+// request.
 //
-// Header last reviewed: 2026-06-19
+// Header last reviewed: 2026-06-21
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { ProfileStore } from '../memory/profile.js'
@@ -63,6 +66,9 @@ function buildUserCommandDeps(): UserCommandDeps | null {
         supabase.from('heartbeat_log').delete().eq('user_id', userId),
         supabase.from('student_followups').delete().eq('user_id', userId),
         supabase.from('messages').delete().eq('user_id', userId),
+        // P6 observation log — keyed by the same students.user_id uuid as
+        // user_profiles, so a deletion request must clear it too.
+        supabase.from('user_observations').delete().eq('user_id', userId),
       ]);
       await cache.delete(`user:${userId}:profile`);
       await cache.delete(`user:${userId}:instructions`);
