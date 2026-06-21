@@ -27,6 +27,25 @@ function makeStores() {
     },
   };
 
+  // Fake ObservationDB. Only loadUnconsolidated is exercised by the proactive
+  // memory-grounding path; the rest throw so a test that hits them is obvious.
+  // `observationRows` is mutable so a test can seed candidate observations.
+  const observationRows: any[] = [];
+  const loadUnconsolidated = vi.fn(async (uid: string, minSalience: number, limit: number) =>
+    observationRows
+      .filter((o) => o.user_id === uid && o.salience >= minSalience)
+      .slice(0, limit)
+      .map((o) => ({ id: o.id, content: o.content, salience: o.salience, kind: o.kind ?? null, created_at: o.created_at })),
+  );
+  const observationDB = {
+    loadUnconsolidated,
+    insert: vi.fn(async () => { throw new Error('not used'); }),
+    recall: vi.fn(async () => { throw new Error('not used'); }),
+    markConsolidated: vi.fn(async () => { throw new Error('not used'); }),
+    prune: vi.fn(async () => { throw new Error('not used'); }),
+    deleteForUser: vi.fn(async () => { throw new Error('not used'); }),
+  };
+
   const profileStore = new ProfileStore(
     {
       async loadRow(uid) {
@@ -56,10 +75,14 @@ function makeStores() {
   return {
     profileStore,
     instructionsStore,
+    observationRows,
+    observationDB,
+    loadUnconsolidated,
     deps: {
       profileStore,
       instructionsStore,
       raisedThreadDb,
+      observationDB,
       loadConfig: vi.fn(async (uid: string) => ({
         cadence: '12 hours',
         active_hours_start: '09:00',
@@ -206,5 +229,166 @@ describe('runHeartbeat — P4 grounded proactive (flag-gated)', () => {
     await runHeartbeat('u1', { ...deps, callLLM: okLLM as any });
     const userPrompt = okLLM.mock.calls[0][0].userPrompt as string;
     expect(userPrompt).not.toContain('# OPEN THREADS');
+  });
+});
+
+describe('runHeartbeat — P6 proactive memory-grounding (flag-gated)', () => {
+  // GEORGE_MEMORY_PROACTIVE_ENABLED is read from process.env at runtime; tests
+  // toggle it and restore afterward. The optional MEMORY_PROACTIVE_MIN_SALIENCE
+  // tunable is also cleaned up between tests.
+  const originalFlag = process.env.GEORGE_MEMORY_PROACTIVE_ENABLED;
+  const originalSalience = process.env.MEMORY_PROACTIVE_MIN_SALIENCE;
+  afterEach(() => {
+    if (originalFlag === undefined) delete process.env.GEORGE_MEMORY_PROACTIVE_ENABLED;
+    else process.env.GEORGE_MEMORY_PROACTIVE_ENABLED = originalFlag;
+    if (originalSalience === undefined) delete process.env.MEMORY_PROACTIVE_MIN_SALIENCE;
+    else process.env.MEMORY_PROACTIVE_MIN_SALIENCE = originalSalience;
+  });
+
+  const salientObs = (over: Partial<{ id: number; content: string; salience: number }> = {}) => ({
+    user_id: 'u1',
+    id: over.id ?? 1,
+    content: over.content ?? 'student said CSCI 270 final was kicking their ass',
+    salience: over.salience ?? 4,
+    kind: 'emotion',
+    created_at: '2026-06-10T00:00:00Z',
+  });
+
+  it('does NOT load observations or change the prompt when the flag is OFF (byte-identical)', async () => {
+    delete process.env.GEORGE_MEMORY_PROACTIVE_ENABLED;
+    const { deps, observationRows, loadUnconsolidated } = makeStores();
+    observationRows.push(salientObs());
+
+    // Build the OFF prompt with the dep wired (the dep is wired in prod, so OFF
+    // byte-identical must hold WITH the dep present, not just absent).
+    const mockLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+
+    expect(loadUnconsolidated).not.toHaveBeenCalled();
+    const userPrompt = mockLLM.mock.calls[0][0].userPrompt as string;
+    const systemPrompt = mockLLM.mock.calls[0][0].systemPrompt as string;
+    expect(userPrompt).not.toContain('# MEMORIES TO CHECK IN ON');
+    expect(systemPrompt).not.toContain('Checking in on a remembered observation');
+  });
+
+  it('produces a prompt byte-identical to no-dep when the flag is OFF', async () => {
+    delete process.env.GEORGE_MEMORY_PROACTIVE_ENABLED;
+
+    // Run A: dep wired + salient observations present, flag OFF.
+    const a = makeStores();
+    a.observationRows.push(salientObs());
+    const llmA = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...a.deps, callLLM: llmA as any });
+
+    // Run B: NO observationDB dep at all, flag OFF.
+    const b = makeStores();
+    const { observationDB, ...depsNoObs } = b.deps as any;
+    const llmB = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...depsNoObs, callLLM: llmB as any });
+
+    expect(llmA.mock.calls[0][0].userPrompt).toBe(llmB.mock.calls[0][0].userPrompt);
+    expect(llmA.mock.calls[0][0].systemPrompt).toBe(llmB.mock.calls[0][0].systemPrompt);
+  });
+
+  it('loads salient observations and injects them as candidate memories when ON', async () => {
+    process.env.GEORGE_MEMORY_PROACTIVE_ENABLED = 'true';
+    const { deps, observationRows, loadUnconsolidated } = makeStores();
+    observationRows.push(salientObs());
+    const mockLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+
+    expect(loadUnconsolidated).toHaveBeenCalledWith('u1', 3, 10); // default salience bar 3
+    const userPrompt = mockLLM.mock.calls[0][0].userPrompt as string;
+    const systemPrompt = mockLLM.mock.calls[0][0].systemPrompt as string;
+    expect(userPrompt).toContain('# MEMORIES TO CHECK IN ON');
+    expect(userPrompt).toContain('CSCI 270');
+    expect(systemPrompt).toContain('Checking in on a remembered observation');
+  });
+
+  it('uses a HIGHER salience bar than recall — filters low-salience observations', async () => {
+    process.env.GEORGE_MEMORY_PROACTIVE_ENABLED = 'true';
+    const { deps, observationRows } = makeStores();
+    // salience 2 would pass reactive recall (min 2) but NOT proactive (min 3).
+    observationRows.push(salientObs({ id: 7, content: 'minor low-salience note', salience: 2 }));
+    const mockLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    const userPrompt = mockLLM.mock.calls[0][0].userPrompt as string;
+    expect(userPrompt).not.toContain('# MEMORIES TO CHECK IN ON');
+    expect(userPrompt).not.toContain('minor low-salience note');
+  });
+
+  it('honors the MEMORY_PROACTIVE_MIN_SALIENCE override', async () => {
+    process.env.GEORGE_MEMORY_PROACTIVE_ENABLED = 'true';
+    process.env.MEMORY_PROACTIVE_MIN_SALIENCE = '5';
+    const { deps, loadUnconsolidated } = makeStores();
+    const mockLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    expect(loadUnconsolidated).toHaveBeenCalledWith('u1', 5, 10);
+  });
+
+  it('records surfaced memory keys as raised after a proactive send (mem:<id>)', async () => {
+    process.env.GEORGE_MEMORY_PROACTIVE_ENABLED = 'true';
+    const { deps, observationRows, raisedThreadRows } = makeStores();
+    observationRows.push(salientObs({ id: 42 }));
+    const mockLLM = vi.fn().mockResolvedValue({
+      toolCalls: [{ name: 'send_proactive_message', input: { text: 'CSCI 270 final 考得咋样😋', channel: 'imessage' } }],
+    });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    expect(raisedThreadRows.filter((r) => r.user_id === 'u1' && r.thread === 'mem:42')).toHaveLength(1);
+  });
+
+  it('does NOT re-surface a memory that was already raised (dedup)', async () => {
+    process.env.GEORGE_MEMORY_PROACTIVE_ENABLED = 'true';
+    const { deps, observationRows, raisedThreadRows } = makeStores();
+    observationRows.push(salientObs({ id: 99 }));
+
+    // First tick sends and ledgers mem:99.
+    const sendLLM = vi.fn().mockResolvedValue({
+      toolCalls: [{ name: 'send_proactive_message', input: { text: 'CSCI 270 final 考得咋样😋', channel: 'imessage' } }],
+    });
+    await runHeartbeat('u1', { ...deps, callLLM: sendLLM as any });
+    expect(raisedThreadRows.filter((r) => r.thread === 'mem:99')).toHaveLength(1);
+
+    // Second tick: same observation still un-consolidated, but already raised, so
+    // it must not be re-surfaced.
+    const okLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...deps, callLLM: okLLM as any });
+    const userPrompt = okLLM.mock.calls[0][0].userPrompt as string;
+    expect(userPrompt).not.toContain('# MEMORIES TO CHECK IN ON');
+  });
+
+  it('still respects consent — no proactive send even with memories present', async () => {
+    process.env.GEORGE_MEMORY_PROACTIVE_ENABLED = 'true';
+    const { deps, observationRows, sentMessages } = makeStores();
+    observationRows.push(salientObs());
+    // No-consent user.
+    deps.loadConfig = vi.fn(async () => ({
+      cadence: '12 hours',
+      active_hours_start: '09:00',
+      active_hours_end: '22:00',
+      timezone: 'America/Los_Angeles',
+      paused: false,
+      consent_proactive_messages: false,
+      consent_anomaly_checkin: false,
+      last_heartbeat_at: null,
+    })) as any;
+    // Even if the model TRIES to send (memories tempt it), the send tool throws on
+    // no-consent; the tick records an error and nothing reaches the user.
+    const mockLLM = vi.fn().mockResolvedValue({
+      toolCalls: [{ name: 'send_proactive_message', input: { text: 'CSCI 270 final 考得咋样😋', channel: 'imessage' } }],
+    });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it('does nothing when the observationDB dep is absent even with the flag ON', async () => {
+    process.env.GEORGE_MEMORY_PROACTIVE_ENABLED = 'true';
+    const { deps, observationRows } = makeStores();
+    observationRows.push(salientObs());
+    const { observationDB, ...depsNoObs } = deps as any;
+    const mockLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...depsNoObs, callLLM: mockLLM as any });
+    const userPrompt = mockLLM.mock.calls[0][0].userPrompt as string;
+    expect(userPrompt).not.toContain('# MEMORIES TO CHECK IN ON');
   });
 });

@@ -235,3 +235,42 @@ per-turn recall from Phase 2.
   path, so `recall_memory` cannot fire there. This is fine and expected — the
   always-on Phase 2 auto-inject already covers the fast path on every turn. The tool
   only adds deliberate, query-specific recall on the full-agent paths.
+
+## Phase 6 (post-MVP): proactive memory-grounding
+
+Phases 2 and 5 are REACTIVE — they surface a remembered observation when the
+student pings George. This phase is the PROACTIVE complement (the sibling of P4
+grounded-proactive open-thread grounding): the ~12h heartbeat may UNPROMPTED check
+in on a remembered observation ("hey, how'd that CSCI 270 final go?", referencing
+something the student actually told him).
+
+- **What:** in `runHeartbeat`, when enabled and the `observationDB` seam is wired,
+  load recent SALIENT un-consolidated observations
+  (`loadUnconsolidated(userId, MEMORY_PROACTIVE_MIN_SALIENCE, 10)`), drop any already
+  raised, and inject the top few into the heartbeat prompt as a
+  `# MEMORIES TO CHECK IN ON` candidate section — ADDITIVE alongside the existing
+  P4 open-thread `# OPEN THREADS` section. Helpers live in
+  `src/agent/memory-proactive.ts` (the memory sibling of `grounded-proactive.ts`).
+- **Higher salience bar:** default min-salience **3** (env `MEMORY_PROACTIVE_MIN_SALIENCE`),
+  one notch above reactive recall's default of 2 — an unprompted ping should land on
+  something genuinely worth reaching out about.
+- **The model still decides.** We only SUPPLY grounding material. George can still
+  `heartbeat_ok` (stay silent). There is NO second send mechanism — every send flows
+  through the existing `send_proactive_message` path and its consent
+  (`consent_proactive_messages`), 1-per-tick cadence, and deep-quiet/quiet-hour
+  gates. Memory-grounding never bypasses a guard.
+- **Dedup, no migration.** Reuses the existing `proactive_raised_threads` table via
+  the same `RaisedThreadDB` seam as P4. Each observation maps to a stable key
+  `mem:<id>` (disjoint from open-thread gist-slug keys, so the two sources share the
+  table without collision). When a proactive is sent that tick, ALL surfaced memory
+  candidate keys are recorded as raised (the tool result does not say which memory
+  the model grounded on, so this conservatively avoids re-pinging the same memory;
+  it mirrors how the open-thread path records-on-send). Already-raised keys are
+  excluded from the candidate set.
+- **Flag:** `GEORGE_MEMORY_PROACTIVE_ENABLED` (default-OFF), independent of all other
+  P6 flags. OFF = byte-identical to today's heartbeat: no observation load, the
+  `# MEMORIES TO CHECK IN ON` user-prompt section is absent, and the
+  `## Checking in on a remembered observation` system-prompt guidance is absent.
+- **Activation is a behavioral change.** This sends UNSOLICITED outbound to real
+  users. Flipping the flag is a deliberate operator decision, not a default — same
+  posture as P4 grounded-proactive (needs a human voice review before production).
