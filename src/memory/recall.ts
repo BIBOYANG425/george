@@ -75,20 +75,22 @@ function resolveHalfLifeDays(): number {
 // Render the header + one "- <content>" line per row, in the order given
 // (best-first). Append lines until the next would push past BLOCK_CHAR_CAP; never
 // cut mid-line. Always keep header + 1 line if at least one row exists.
-function renderBlock(contents: string[]): string {
-  if (contents.length === 0) return '';
+// Returns the rendered block plus the number of "- " lines that made it in (the
+// count actually injected after the cap), so the caller can log success telemetry.
+function renderBlock(contents: string[]): { block: string; count: number } {
+  if (contents.length === 0) return { block: '', count: 0 };
   let block = RECALL_HEADER;
-  let first = true;
+  let count = 0;
   for (const content of contents) {
     const line = `- ${content}`;
     const candidate = `${block}\n${line}`;
     // Always include the first line (header + 1 line guarantee); after that,
     // stop once adding the next line would exceed the cap.
-    if (!first && candidate.length > BLOCK_CHAR_CAP) break;
+    if (count > 0 && candidate.length > BLOCK_CHAR_CAP) break;
     block = candidate;
-    first = false;
+    count += 1;
   }
-  return block.trimEnd();
+  return { block: block.trimEnd(), count };
 }
 
 // Returns a render-ready block or '' (empty). NEVER throws.
@@ -128,9 +130,20 @@ export async function recallForTurn(
     if (rows.length === 0) return '';
 
     // 7. Render best-first, capped.
-    return renderBlock(rows.map((r) => r.content));
+    const { block, count } = renderBlock(rows.map((r) => r.content));
+    if (block === '') return '';
+
+    // 8. Success telemetry (parity with memory_capture / memory_compacted). Only
+    //    fires when a non-empty block is actually injected. count = rows that made
+    //    it past the cap; topScore = best (first) row's score, ~3dp, or undefined.
+    const top = rows[0]?.score;
+    const topScore =
+      typeof top === 'number' ? Math.round(top * 1000) / 1000 : undefined;
+    log('info', 'recall_injected', { userId, count, topScore });
+
+    return block;
   } catch (e) {
-    // 8. Never block a reply on a recall failure.
+    // 9. Never block a reply on a recall failure.
     log('warn', 'recall_failed', { error: (e as Error).message });
     return '';
   }
