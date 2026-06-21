@@ -12,7 +12,7 @@ const STALE_AFTER_MS = 24 * 60 * 60 * 1000
 // are triaged to 'skipped' by markStaleNotificationsSkipped() at job start.
 export async function getPendingShippingNotifications() {
   const now = Date.now()
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('shipping_notifications')
     .select(
       'id, kind, payload, created_at, students(id, wechat_open_id, imessage_id, name, shipping_notif_opt_out)',
@@ -22,6 +22,9 @@ export async function getPendingShippingNotifications() {
     .gte('scheduled_for', new Date(now - STALE_AFTER_MS).toISOString())
     .order('scheduled_for', { ascending: true })
     .limit(100)
+  // Surface read errors (missing column/table/RLS/relationship) instead of
+  // silently sending nothing forever (Codex #5).
+  if (error) console.error('[getPendingShippingNotifications]', error.message)
   return data || []
 }
 
@@ -42,26 +45,37 @@ export async function markStaleNotificationsSkipped(): Promise<number> {
 }
 
 export async function markShippingNotificationSent(id: string) {
-  await supabase
+  const { error } = await supabase
     .from('shipping_notifications')
     .update({ status: 'sent', sent_at: new Date().toISOString() })
     .eq('id', id)
+  // If this write fails the row stays 'pending' and WILL be resent next tick —
+  // surface it loudly so a stuck row doesn't silently spam a student (Codex #2).
+  if (error) {
+    console.error('[markShippingNotificationSent] FAILED — resend risk', id, error.message)
+  }
 }
 
 // Terminal non-delivery we never want to retry (no copy for the kind, or the
 // student has no reachable platform id).
 export async function markShippingNotificationSkipped(id: string, reason: string) {
-  await supabase
+  const { error } = await supabase
     .from('shipping_notifications')
     .update({ status: 'skipped', error: reason })
     .eq('id', id)
+  if (error) {
+    console.error('[markShippingNotificationSkipped] FAILED', id, error.message)
+  }
 }
 
 // Delivery attempt failed. Terminal with this schema (no retry_count column);
 // a future retry/backoff would add one. Acts as the dead-letter state.
 export async function markShippingNotificationFailed(id: string, error: string) {
-  await supabase
+  const { error: dbErr } = await supabase
     .from('shipping_notifications')
     .update({ status: 'failed', error })
     .eq('id', id)
+  if (dbErr) {
+    console.error('[markShippingNotificationFailed] FAILED', id, dbErr.message)
+  }
 }

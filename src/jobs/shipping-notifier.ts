@@ -20,6 +20,8 @@ function fmtDate(v: unknown): string {
   return Number.isNaN(d.getTime())
     ? ''
     : d.toLocaleString('zh-CN', {
+        // Pickup is at USC — render in LA time regardless of server TZ (Codex #7).
+        timeZone: 'America/Los_Angeles',
         month: 'numeric',
         day: 'numeric',
         hour: '2-digit',
@@ -74,11 +76,21 @@ export function messageForKind(
 const BAD_NEWS = new Set(['lost', 'returned', 'disputed'])
 const BAD_NEWS_DELAY_MS = 15 * 60 * 1000
 
+// In-flight guard so the */5 cron can't re-enter while a slow tick is still
+// draining (two overlapping ticks would send the same rows twice — Codex #3).
+let notifierRunning = false
+
 // Drains pending shipping notifications and delivers each via the existing
 // platform-message channel (WeChat customer-service message / iMessage), the
 // same path reminder-sender uses. Single-attempt: success → 'sent', delivery
 // error → 'failed' (terminal). No-copy / no-platform / opted-out → 'skipped'.
 export async function sendPendingShippingNotifications() {
+  if (notifierRunning) {
+    log('warn', 'shipping_notifier_overlap_skipped', {})
+    return
+  }
+  notifierRunning = true
+  try {
   // Triage first: pending rows scheduled >24h ago are stale (backlog built up
   // while the notifier was disabled or down) — mark them 'skipped' instead of
   // blasting outdated status updates at students, and log how many.
@@ -110,6 +122,15 @@ export async function sendPendingShippingNotifications() {
       await markShippingNotificationSkipped(id, 'no_copy_for_kind')
       continue
     }
+    // Pickup messages need member_id + location, else they render with blanks —
+    // skip rather than send a confusing message (Codex #10).
+    if (kind === 'pickup_open' || kind === 'pickup_reminder') {
+      const payload = (n.payload ?? {}) as Record<string, unknown>
+      if (!payload.member_id || !payload.pickup_location) {
+        await markShippingNotificationSkipped(id, 'incomplete_pickup_payload')
+        continue
+      }
+    }
     if (!student) {
       await markShippingNotificationSkipped(id, 'no_student')
       continue
@@ -133,5 +154,8 @@ export async function sendPendingShippingNotifications() {
       await markShippingNotificationFailed(id, (err as Error).message)
       log('error', 'shipping_notification_error', { id, error: (err as Error).message })
     }
+  }
+  } finally {
+    notifierRunning = false
   }
 }
