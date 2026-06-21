@@ -27,10 +27,11 @@ FULLY built + CI-green without touching prod (tests mock the DB). Build to "read
 ## Phase status
 - [x] Phase 0 — bia-admin migration FILE + PR **#32** (`user_observations` + `recall_observations` RPC + service_role grant). Prod-apply PARKED.
 - [x] Phase 1 — Observer DONE. `src/memory/observations.ts` store seam (commit 81fffac, 21 tests) + `src/memory/capture.ts` Observer (commit 2896014, gated `GEORGE_OBSERVE_ENABLED`). Full suite 817 passed, tsc clean.
-- [ ] Phase 2 — Recall (`src/memory/recall.ts` + prompt-builder injection, both paths) ← NEXT
-- [ ] Phase 3 — Reflector + prune (heartbeat) + `/delete me` extension
+- [x] Phase 2 — Recall DONE. `src/memory/recall.ts` (commit 1233d85, 13 tests) + injected into all 4 paths orchestrator/single/trunk/fast (commit 904677e, gated `GEORGE_RECALL_ENABLED`). Full suite 838 passed, OFF byte-identical verified.
+- [ ] Phase 3 — Reflector + prune (heartbeat) + `/delete me` extension + .env docs ← NEXT (final phase)
 
 ## Log (newest first)
+- 09:1xZ — Phase 2 DONE (recall module + 4-path injection). Full suite 838 passed/11 skip, tsc clean. Next: Phase 3 (Reflector/prune/delete/docs) = final phase, then one feature PR.
 - 09:0xZ — Phase 1 DONE (observations seam + Observer). Full suite 817 passed/11 skip, tsc clean. Branch pushed. Next: Phase 2 recall.
 - 08:5xZ — Phase 0 done: bia-admin PR #32 (migration + RPC, additive). Starting Phase 1 (george Observer).
 - 08:46Z — loop started. Spec done + committed (d59d8c6). Plan + charter committed (64a04e1).
