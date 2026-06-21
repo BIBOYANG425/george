@@ -98,7 +98,6 @@ export async function getOverview(sb: SupabaseClient) {
     studentsTotal,
     eventsTotal,
     activeEvents,
-    memoriesTotal,
     proactiveTotal,
     heartbeatTotal,
     msgsWithTokens,
@@ -110,7 +109,6 @@ export async function getOverview(sb: SupabaseClient) {
     headCount('students'),
     headCount('events'),
     headCount('events', (q) => q.eq('status', 'active')),
-    headCount('student_memories'),
     headCount('proactive_log'),
     headCount('heartbeat_log'),
     headCount('messages', (q) => q.not('tokens_used', 'is', null)),
@@ -150,7 +148,6 @@ export async function getOverview(sb: SupabaseClient) {
       students: studentsTotal,
       events: eventsTotal,
       activeEvents,
-      memories: memoriesTotal,
       proactiveSent: proactiveTotal,
       heartbeats: heartbeatTotal,
       activeUsers7d: active7d.size,
@@ -338,7 +335,7 @@ export async function getUsers(sb: SupabaseClient, limit = 100) {
 
 // ── USER detail (drill-down) ───────────────────────────────────────────────
 export async function getUserDetail(sb: SupabaseClient, userId: string) {
-  const [{ data: convo }, students, { data: profileRows }, { data: memories }] = await Promise.all([
+  const [{ data: convo }, students, { data: profileRows }] = await Promise.all([
     sb
       .from('messages')
       .select('id, role, content, created_at, agent, tokens_used, tool_calls')
@@ -347,7 +344,6 @@ export async function getUserDetail(sb: SupabaseClient, userId: string) {
       .limit(500),
     loadStudents(sb),
     sb.from('user_profiles').select('*').eq('user_id', userId),
-    sb.from('student_memories').select('key, value, category, created_at').eq('user_id', userId).limit(50),
   ]);
 
   const ix = indexStudents(students);
@@ -383,7 +379,6 @@ export async function getUserDetail(sb: SupabaseClient, userId: string) {
     student,
     profile,
     heartbeat: hb,
-    memories: memories ?? [],
     controls,
     usage,
     stats: { messages: (convo ?? []).length, tokens, costUsd: Number(cost.toFixed(4)) },

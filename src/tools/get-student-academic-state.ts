@@ -1,10 +1,15 @@
 // Aggregates everything the course sub-agent needs to know about a student
-// *before* recommending classes: profile (year/major), completed courses, GE
-// progress, and stored preferences (units cap, prof bar, time window). This is
-// the first tool the course voice should call for "what should I take" — it
-// prevents re-asking facts already in student / student_memories.
+// *before* recommending classes: year/major/interests from the students table,
+// plus the student's free-form academic + identity memory blocks from
+// user_profiles. This is the first tool the course voice should call for "what
+// should I take" — it prevents re-asking facts george already has.
 //
-// Header last reviewed: 2026-06-07
+// The old structured completed-course / GE / preference store was removed in the
+// memory-consolidation refactor; that data now lives as prose in the
+// user_profiles academic block, so course preferences ride along in
+// `academic_notes` rather than as discrete typed fields.
+//
+// Header last reviewed: 2026-06-21
 
 import { z } from 'zod'
 import { supabase } from '../db/client.js'
@@ -16,11 +21,10 @@ interface AcademicState {
     major: string | null
     interests: string[]
   }
-  completed_courses: string[]
-  ge_status: Record<string, string>
-  units_preference: string | null
-  prof_bar: string | null
-  time_preference: string | null
+  // Free-form academic context george has accumulated (completed courses, GE
+  // progress, units/prof/time preferences if mentioned). Prose, not typed.
+  academic_notes: string | null
+  identity_notes: string | null
   missing: string[]
 }
 
@@ -38,29 +42,25 @@ export async function getStudentAcademicStateHandler(input: {
     })
   }
 
-  const [studentResult, memoriesResult] = await Promise.all([
-    supabase
-      .from('students')
-      .select('year, major, interests')
-      .eq('id', studentId)
-      .single(),
-    supabase
-      .from('student_memories')
-      .select('key, value, category')
-      .eq('student_id', studentId)
-      .in('category', [
-        'personal_fact',
-        'academic_interest',
-        'completed_course',
-        'ge_completed',
-        'units_preference',
-        'prof_bar',
-        'time_preference',
-      ]),
-  ])
+  const { data: student } = await supabase
+    .from('students')
+    .select('year, major, interests, user_id')
+    .eq('id', studentId)
+    .single()
 
-  const student = studentResult.data
-  const memories = memoriesResult.data ?? []
+  // The student's profile is keyed by user_id (the uuid user_profiles uses),
+  // not the students.id, so resolve it via the students row's user_id.
+  let academicNotes: string | null = null
+  let identityNotes: string | null = null
+  if (student?.user_id) {
+    const { data: profile } = await supabase
+      .from('user_profiles')
+      .select('academic, identity')
+      .eq('user_id', student.user_id)
+      .maybeSingle()
+    academicNotes = profile?.academic?.trim() || null
+    identityNotes = profile?.identity?.trim() || null
+  }
 
   const state: AcademicState = {
     profile: {
@@ -68,53 +68,15 @@ export async function getStudentAcademicStateHandler(input: {
       major: student?.major ?? null,
       interests: Array.isArray(student?.interests) ? student.interests : [],
     },
-    completed_courses: [],
-    ge_status: {},
-    units_preference: null,
-    prof_bar: null,
-    time_preference: null,
+    academic_notes: academicNotes,
+    identity_notes: identityNotes,
     missing: [],
-  }
-
-  for (const m of memories) {
-    switch (m.category) {
-      case 'completed_course':
-        state.completed_courses.push(m.key)
-        break
-      case 'ge_completed':
-        state.ge_status[m.key] = m.value
-        break
-      case 'units_preference':
-        state.units_preference = m.value
-        break
-      case 'prof_bar':
-        state.prof_bar = m.value
-        break
-      case 'time_preference':
-        state.time_preference = m.value
-        break
-      case 'personal_fact':
-        // Fallback: students table may be empty but memory has year/major.
-        if (!state.profile.year && /year|grade|大[一二三四]|freshman|soph|junior|senior|grad/i.test(m.key + ' ' + m.value)) {
-          state.profile.year = m.value
-        }
-        if (!state.profile.major && /major|major:/i.test(m.key)) {
-          state.profile.major = m.value
-        }
-        break
-      case 'academic_interest':
-        if (!state.profile.interests.includes(m.value)) {
-          state.profile.interests.push(m.value)
-        }
-        break
-    }
   }
 
   // Flag what's still unknown so the agent knows what to ask.
   if (!state.profile.year) state.missing.push('year')
   if (!state.profile.major) state.missing.push('major')
-  if (Object.keys(state.ge_status).length === 0) state.missing.push('ge_status')
-  if (!state.units_preference) state.missing.push('units_preference')
+  if (!state.academic_notes) state.missing.push('academic_notes')
 
   return JSON.stringify(state, null, 2)
 }

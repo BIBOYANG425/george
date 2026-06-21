@@ -3,11 +3,8 @@ import { describe, it, expect } from 'vitest';
 import {
   threadKey,
   extractOpenThreads,
-  parseRaisedThreads,
-  raisedThreadLine,
   unraisedThreads,
   renderGroundedProactiveNote,
-  stripRaisedThreadLines,
   type ProactiveMessage,
   type OpenThread,
 } from '../../src/agent/grounded-proactive.js';
@@ -88,20 +85,8 @@ describe('extractOpenThreads', () => {
   });
 });
 
-describe('raised-thread ledger (george_notes)', () => {
-  it('round-trips a raised key through the ledger line', () => {
-    const key = threadKey('想好选 buad 280 还是等下学期了吗');
-    const line = raisedThreadLine(key);
-    const parsed = parseRaisedThreads(`some other note\n${line}\nanother note`);
-    expect(parsed.has(key)).toBe(true);
-  });
-
-  it('parses an empty/absent notes block to an empty set', () => {
-    expect(parseRaisedThreads('').size).toBe(0);
-    expect(parseRaisedThreads('just a normal note\nno markers here').size).toBe(0);
-  });
-
-  it('unraisedThreads filters out already-raised threads', () => {
+describe('unraisedThreads', () => {
+  it('filters out already-raised threads', () => {
     const threads: OpenThread[] = [
       { key: 'k1', source: 'george_asked', gist: 'a' },
       { key: 'k2', source: 'user_mulling', gist: 'b' },
@@ -132,34 +117,5 @@ describe('renderGroundedProactiveNote', () => {
       { key: 'k2', source: 'user_mulling', gist: 'drop the class or not' },
     ]);
     expect(note).toContain('they were mulling');
-  });
-});
-
-describe('stripRaisedThreadLines (ledger never leaks into renders)', () => {
-  it('returns the input UNCHANGED when there is no ledger line (byte-for-byte)', () => {
-    const notes = 'promised to send the housing list\nwants a writ150 rec';
-    expect(stripRaisedThreadLines(notes)).toBe(notes);
-    expect(stripRaisedThreadLines('')).toBe('');
-  });
-
-  it('removes RAISED_THREAD lines but keeps the real notes', () => {
-    const key = threadKey('which writ150 prof do you want');
-    const notes = `promised the housing list\n${raisedThreadLine(key)}\nwants a writ150 rec`;
-    const stripped = stripRaisedThreadLines(notes);
-    expect(stripped).not.toContain('RAISED_THREAD');
-    expect(stripped).toContain('promised the housing list');
-    expect(stripped).toContain('wants a writ150 rec');
-    // The stored block still parses the ledger — only the render is stripped.
-    expect(parseRaisedThreads(notes).has(key)).toBe(true);
-  });
-
-  it('collapses the gap left when a ledger line sat between real notes', () => {
-    const notes = `note a\n${raisedThreadLine('k1')}\n${raisedThreadLine('k2')}\nnote b`;
-    expect(stripRaisedThreadLines(notes)).toBe('note a\nnote b');
-  });
-
-  it('yields empty string when the block was only ledger lines', () => {
-    const notes = `${raisedThreadLine('k1')}\n${raisedThreadLine('k2')}`;
-    expect(stripRaisedThreadLines(notes)).toBe('');
   });
 });

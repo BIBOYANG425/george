@@ -2,7 +2,6 @@
 // Per-user 6-block profile load/save with KV cache.
 
 import { KVCache } from './kv-cache.js';
-import { stripRaisedThreadLines } from '../agent/grounded-proactive.js';
 
 export const BLOCK_NAMES = [
   'identity',
@@ -22,10 +21,9 @@ export interface Profile {
   relationships: string;
   state: string;
   george_notes: string;
-  // Free-form prose relationship note (P3). Promoted out of the george_notes
-  // sentinel-fenced blob into its own user_profiles column. loadProfile reads it
-  // here first; readers keep a fallback to extractRelationshipNote(george_notes)
-  // until a later backfill migrates existing notes out of the blob.
+  // Free-form prose relationship note (P3). Lives in its own user_profiles
+  // column; loadProfile reads it here and readers use it directly (george_notes
+  // is now a pure scratchpad — no fenced blob, no fallback).
   relationship_note: string;
   // Compaction marker (P1 memory-consolidation). The atomic append RPC sets this
   // to now() instead of slicing when a block would exceed MAX_BLOCK_CHARS; the
@@ -66,44 +64,11 @@ const CACHE_TTL_SECONDS = 300;
 // heartbeat's compactProfileIfDue condenses back under this same number.
 export const MAX_BLOCK_CHARS = 4000;
 
-// ── Free-form relationship note (P3, zero-schema MVP) ──────────────────────
+// ── Free-form relationship note (P3) ───────────────────────────────────────
 // A short prose note about George's relationship with this user, rewritten
-// periodically by src/agent/evaluators/relationship.ts. Until a bia-admin
-// migration adds a dedicated column, it lives INSIDE the george_notes block,
-// fenced by sentinel markers so the evaluator can rewrite just its own portion
-// without clobbering any other george_notes content (heartbeat scratchpad, P4
-// raised-thread markers, etc.). Pure string helpers so they unit-test without a
-// DB. The markers are HTML comments so they read as inert if ever surfaced raw.
-export const REL_NOTE_START = '<!-- relationship_note:start -->';
-export const REL_NOTE_END = '<!-- relationship_note:end -->';
-const REL_NOTE_BLOCK_RE = new RegExp(
-  `\\n*${escapeRegExp(REL_NOTE_START)}[\\s\\S]*?${escapeRegExp(REL_NOTE_END)}\\n*`,
-  'g',
-);
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// Pull just the prose note out of a george_notes block (empty string if none).
-export function extractRelationshipNote(georgeNotes: string): string {
-  const start = georgeNotes.indexOf(REL_NOTE_START);
-  const end = georgeNotes.indexOf(REL_NOTE_END);
-  if (start === -1 || end === -1 || end < start) return '';
-  return georgeNotes.slice(start + REL_NOTE_START.length, end).trim();
-}
-
-// Return a new george_notes string with the sentinel-fenced note replaced by
-// `note` (any prior fenced note is stripped first, so this is idempotent and
-// never accumulates). A blank note removes the fence entirely. Non-note content
-// in the block is preserved verbatim.
-export function upsertRelationshipNote(georgeNotes: string, note: string): string {
-  const withoutNote = georgeNotes.replace(REL_NOTE_BLOCK_RE, '\n').trim();
-  const trimmed = note.trim();
-  if (!trimmed) return withoutNote;
-  const fenced = `${REL_NOTE_START}\n${trimmed}\n${REL_NOTE_END}`;
-  return withoutNote ? `${withoutNote}\n\n${fenced}` : fenced;
-}
+// periodically by src/agent/evaluators/relationship.ts. It lives in the
+// dedicated user_profiles.relationship_note column (read via
+// Profile.relationship_note, written via ProfileStore.saveRelationshipNote).
 
 export class ProfileStore {
   constructor(private db: ProfileDB, private cache: KVCache) {}
@@ -181,10 +146,11 @@ export class ProfileStore {
   }
 
   renderForPrompt(profile: Profile): string {
+    // george_notes is a pure scratchpad now (the raised-thread ledger lives in
+    // the proactive_raised_threads table, the relationship note in its own
+    // column), so every block renders as-is.
     const sections = BLOCK_NAMES.map((name) => {
-      // Hide the grounded-proactive RAISED_THREAD ledger from the heartbeat's
-      // profile view; it's an internal dedupe trail, not memory about the user.
-      const content = name === 'george_notes' ? stripRaisedThreadLines(profile[name]) : profile[name];
+      const content = profile[name];
       const label = name.toUpperCase().replace('_', ' ');
       return `## ${label}\n${content || '(empty)'}`;
     });
