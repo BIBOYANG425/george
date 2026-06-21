@@ -25,6 +25,15 @@ import {
   type OpenThread,
   type RaisedThreadDB,
 } from './grounded-proactive.js';
+import {
+  isMemoryProactiveEnabled,
+  resolveMemoryProactiveMinSalience,
+  selectMemoryCandidates,
+  renderMemoryProactiveNote,
+  MEMORY_PROACTIVE_GUIDANCE,
+  MEMORY_PROACTIVE_LOAD_LIMIT,
+  type MemoryCandidate,
+} from './memory-proactive.js';
 
 export interface HeartbeatConfig {
   cadence: string;
@@ -312,10 +321,18 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
 
     // The grounded-proactive guidance is part of the feature's prompt footprint,
     // so it is appended ONLY when the flag is on. With the flag off the system
-    // prompt is byte-for-byte the pre-P4 prompt (master + heartbeat).
-    const systemPrompt = isGroundedProactiveEnabled()
-      ? `${MASTER_PROMPT}\n\n${HEARTBEAT_PROMPT}\n\n${GROUNDED_PROACTIVE_GUIDANCE}`
-      : `${MASTER_PROMPT}\n\n${HEARTBEAT_PROMPT}`;
+    // prompt is byte-for-byte the pre-P4 prompt (master + heartbeat). The P6
+    // memory-grounding guidance is an INDEPENDENT additive source behind its own
+    // flag — appended only when GEORGE_MEMORY_PROACTIVE_ENABLED is on, so with both
+    // flags off the system prompt is byte-for-byte unchanged, and the two can be
+    // enabled independently.
+    let systemPrompt = `${MASTER_PROMPT}\n\n${HEARTBEAT_PROMPT}`;
+    if (isGroundedProactiveEnabled()) {
+      systemPrompt = `${systemPrompt}\n\n${GROUNDED_PROACTIVE_GUIDANCE}`;
+    }
+    if (isMemoryProactiveEnabled()) {
+      systemPrompt = `${systemPrompt}\n\n${MEMORY_PROACTIVE_GUIDANCE}`;
+    }
     const profileBlock = deps.profileStore.renderForPrompt(profile);
 
     // P4 — grounded proactive (DEFAULT-OFF). When enabled, mine the already-loaded
@@ -332,6 +349,39 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
       groundedNote = renderGroundedProactiveNote(groundableThreads);
     }
 
+    // P6 (post-MVP) — proactive memory-grounding (DEFAULT-OFF, independent flag).
+    // When enabled AND the observationDB seam is wired, load recent SALIENT
+    // observations the student told George (higher salience bar than reactive
+    // recall, default 3), drop any already raised proactively (dedup keys
+    // `mem:<id>` in the SAME proactive_raised_threads table — no new migration),
+    // and surface the top few as candidate check-in material. ADDITIVE to the
+    // open-thread grounding above: a separate prompt section, a separate flag. The
+    // rendered note is append-or-empty-string, so when the flag is off — or the
+    // dep is absent, or there is nothing salient/unraised — the user prompt is
+    // byte-for-byte identical to before. Fail-safe: a load error never fails the
+    // tick; we log and proceed with no memory grounding.
+    let memoryCandidates: MemoryCandidate[] = [];
+    let memoryNote = '';
+    if (isMemoryProactiveEnabled() && deps.observationDB) {
+      try {
+        const [raised, observations] = await Promise.all([
+          loadRaisedThreads(deps.raisedThreadDb, userId),
+          deps.observationDB.loadUnconsolidated(
+            userId,
+            resolveMemoryProactiveMinSalience(),
+            MEMORY_PROACTIVE_LOAD_LIMIT,
+          ),
+        ]);
+        memoryCandidates = selectMemoryCandidates(observations, raised);
+        memoryNote = renderMemoryProactiveNote(memoryCandidates);
+      } catch (err) {
+        log('warn', 'memory_proactive_load_failed', {
+          userId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     const userPrompt = [
       profileBlock,
       `# STANDING INSTRUCTIONS\n${instructions || '(none)'}`,
@@ -344,6 +394,7 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
           : '(none)'
       }`,
       ...(groundedNote ? [groundedNote] : []),
+      ...(memoryNote ? [memoryNote] : []),
       `\nReview this user's state. Choose exactly ONE tool to call.`,
     ].join('\n\n');
 
@@ -397,6 +448,23 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
           const raised = groundableThreads[0];
           await recordRaisedThread(deps.raisedThreadDb, userId, raised.key);
           logAction({ tool: 'mark_thread_raised', threadKey: raised.key });
+        }
+        // P6 — record the surfaced MEMORY candidates as raised so a remembered
+        // observation is never re-pinged. The tool result does not tell us WHICH
+        // memory (if any) the model grounded on, so — conservatively, and matching
+        // how the open-thread path records-on-send — we ledger ALL surfaced
+        // candidates once any proactive is sent this tick. recordRaisedThread is
+        // idempotent (unique (user_id, thread) index). Keys are `mem:<id>`, disjoint
+        // from open-thread gist-slug keys, so the two sources share the table
+        // without collision. Guarded so it is inert when the memory flag is off.
+        if (isMemoryProactiveEnabled() && memoryCandidates.length > 0) {
+          for (const c of memoryCandidates) {
+            await recordRaisedThread(deps.raisedThreadDb, userId, c.key);
+          }
+          logAction({
+            tool: 'mark_memory_raised',
+            memoryKeys: memoryCandidates.map((c) => c.key),
+          });
         }
       } else if (call.name === 'add_followup') outcome = 'followup_scheduled';
       else outcome = 'ok';
