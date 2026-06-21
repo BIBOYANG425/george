@@ -43,10 +43,15 @@ export interface ProfileDB {
   loadRow(userId: string): Promise<Record<string, string> | null>;
   upsertBlock(userId: string, block: BlockName, content: string): Promise<void>;
   saveRelationshipNote(userId: string, note: string): Promise<void>;
+  // Atomically append `addition` to one block in a single DB transaction:
+  // validate block name, dedupe by literal substring, append, and flag
+  // compaction_due if the block exceeds the cap. Never slices. This replaces
+  // the old client-side read-modify-write (a lost-update race + silent slice).
+  appendBlockAtomic(userId: string, block: BlockName, addition: string): Promise<void>;
 }
 
 const CACHE_TTL_SECONDS = 300;
-const MAX_BLOCK_CHARS = 2000;
+const MAX_BLOCK_CHARS = 4000;
 
 // ── Free-form relationship note (P3, zero-schema MVP) ──────────────────────
 // A short prose note about George's relationship with this user, rewritten
@@ -135,26 +140,22 @@ export class ProfileStore {
   }
 
   // Append a fact to a block WITHOUT clobbering existing content (saveBlock does a
-  // full overwrite, which silently destroys earlier facts). Dedupes against
-  // existing lines and caps at MAX_BLOCK_CHARS, keeping the most recent content.
-  // This is what per-turn capture + the heartbeat append mode use to accumulate
-  // memory safely.
+  // full overwrite, which silently destroys earlier facts). Delegates to the
+  // atomic `append_to_profile_block` RPC, which in one transaction validates the
+  // block, dedupes by literal substring, appends, and flags compaction_due past
+  // the cap (it never slices). This replaces the old client-side
+  // read-modify-write, which was a lost-update race under concurrent writers and
+  // silently sliced old facts. After the write we bust the cache so the next
+  // loadProfile sees the new content. This is what per-turn capture + the
+  // heartbeat append mode use to accumulate memory safely.
   async appendToBlock(userId: string, block: BlockName, addition: string): Promise<void> {
     if (!BLOCK_NAMES.includes(block)) {
       throw new Error(`Invalid block name: ${block}`);
     }
     const trimmed = addition.trim();
     if (!trimmed) return;
-    const profile = await this.loadProfile(userId);
-    const current = (profile[block] ?? '').trim();
-    const existingLines = current.split('\n').map((l) => l.trim());
-    // Skip if this fact is already recorded (exact line or contained in one).
-    if (existingLines.some((l) => l === trimmed || l.includes(trimmed))) return;
-    let merged = current ? `${current}\n${trimmed}` : trimmed;
-    if (merged.length > MAX_BLOCK_CHARS) {
-      merged = merged.slice(merged.length - MAX_BLOCK_CHARS);
-    }
-    await this.saveBlock(userId, block, merged);
+    await this.db.appendBlockAtomic(userId, block, trimmed);
+    await this.cache.delete(this.cacheKey(userId));
   }
 
   renderForPrompt(profile: Profile): string {
@@ -194,6 +195,12 @@ export function createSupabaseProfileDB(): ProfileDB {
         .from('user_profiles')
         .upsert({ user_id: userId, relationship_note: note, updated_at: new Date().toISOString() });
       if (error) throw new Error(`saveRelationshipNote failed: ${error.message}`);
+    },
+    async appendBlockAtomic(userId, block, addition) {
+      const { error } = await supabase.rpc('append_to_profile_block', {
+        p_user_id: userId, p_block: block, p_addition: addition,
+      });
+      if (error) throw new Error(`appendBlockAtomic failed: ${error.message}`);
     },
   };
 }
