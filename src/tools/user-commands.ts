@@ -4,7 +4,6 @@
 // executeUserCommand performs the action via injected deps.
 
 import { BLOCK_NAMES, BlockName, Profile, ProfileStore } from '../memory/profile.js';
-import { stripRaisedThreadLines } from '../agent/grounded-proactive.js';
 
 export type ParsedCommand =
   | { command: 'profile' }
@@ -134,10 +133,9 @@ export function renderProfilePlainEnglish(profile: Profile): string {
   if (profile.interests) parts.push(`interests: ${profile.interests}`);
   if (profile.relationships) parts.push(`relationships: ${profile.relationships}`);
   if (profile.state) parts.push(`state: ${profile.state}`);
-  // Strip the internal RAISED_THREAD ledger so /profile shows the user only real
-  // commitments, not the grounded-proactive dedupe trail.
-  const commitments = stripRaisedThreadLines(profile.george_notes);
-  if (commitments) parts.push(`commitments: ${commitments}`);
+  // george_notes is a pure scratchpad now (the raised-thread ledger lives in the
+  // proactive_raised_threads table), so it renders directly as commitments.
+  if (profile.george_notes) parts.push(`commitments: ${profile.george_notes}`);
   if (parts.length === 1) parts.push('(nothing yet — we are just getting started)');
   parts.push('\nthe full version is on uscbia.com/account/george.');
   return parts.join('\n');

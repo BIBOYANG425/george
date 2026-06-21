@@ -82,10 +82,7 @@ export class SupabaseSessionStore implements SessionStore {
 
   async load(sessionId: string): Promise<Session | null> {
     // Conversation history only. The long-term memory layer lives in
-    // user_profiles (loaded separately via ProfileStore in the orchestrator);
-    // the old student_memories enrichment here queried columns that don't
-    // exist (memory_type/content/user_id) and nothing consumed its output, so
-    // it's removed rather than kept as a perpetually-failing query.
+    // user_profiles (loaded separately via ProfileStore in the orchestrator).
     const messagesRes = await this.supabase
       .from('messages')
       .select('role, content, created_at')
@@ -167,10 +164,7 @@ export class SupabaseSessionStore implements SessionStore {
   }
 
   async delete(sessionId: string): Promise<void> {
-    await Promise.all([
-      this.supabase.from('messages').delete().eq('user_id', sessionId),
-      this.supabase.from('student_memories').delete().eq('user_id', sessionId),
-    ]);
+    await this.supabase.from('messages').delete().eq('user_id', sessionId);
   }
 
   async countUserMessages(sessionId: string): Promise<number> {

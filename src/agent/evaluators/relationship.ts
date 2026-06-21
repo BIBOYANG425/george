@@ -7,10 +7,9 @@
 // system prompt each turn (see orchestrator.ts) so George stays warm and
 // continuous instead of treating every turn cold.
 //
-// Storage is zero-schema for now: the note lives inside the existing george_notes
-// profile block, fenced by sentinel markers (see profile.ts upsertRelationshipNote)
-// — no DB migration. A bia-admin migration can promote it to a dedicated column
-// later without changing this file's contract.
+// Storage is the dedicated user_profiles.relationship_note column (read via
+// profile.relationship_note, written via store.saveRelationshipNote). The note
+// is injected into the system prompt each turn (see orchestrator.ts).
 //
 // Reuses the capture.ts plumbing: fire-and-forget from the Spectrum turn, on the
 // callLightweightLLM helper, but on the SMART model tier (config.models.smart)
@@ -21,7 +20,7 @@
 
 import { callLightweightLLM } from '../llm-providers.js';
 import { config } from '../../config.js';
-import { ProfileStore, extractRelationshipNote } from '../../memory/profile.js';
+import { ProfileStore } from '../../memory/profile.js';
 import { log } from '../../observability/logger.js';
 import type { Evaluator, EvalContext } from './types.js';
 
@@ -63,17 +62,15 @@ export interface RelationshipEvalArgs {
 }
 
 // Fire-and-forget. Loads the current note, asks the SMART model to rewrite it
-// from recent history, and writes it back into george_notes via the sentinel
-// upsert (preserving any other notes). Never throws into the caller.
+// from recent history, and writes it back to the relationship_note column via
+// store.saveRelationshipNote. Never throws into the caller.
 export async function runRelationshipEval(args: RelationshipEvalArgs): Promise<void> {
   if (!isRelationshipEvalEnabled()) return;
   const { store, userId, recentMessages } = args;
   if (recentMessages.length === 0) return;
   try {
     const profile = await store.loadProfile(userId);
-    // Dual-read: prefer the dedicated column; fall back to the legacy fenced blob
-    // in george_notes for users not yet backfilled.
-    const prior = profile.relationship_note || extractRelationshipNote(profile.george_notes ?? '');
+    const prior = profile.relationship_note;
     const transcript = recentMessages
       .map((m) => `${m.role === 'user' ? 'STUDENT' : 'GEORGE'}: ${m.content}`)
       .join('\n');

@@ -1,7 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { runOrchestrator, buildOrchestratorPrompt, isProfileEmpty, buildAgentsConfig, buildOrchestratorToolNames } from '../../src/agent/orchestrator.js';
 import type { Profile } from '../../src/memory/profile.js';
-import { upsertRelationshipNote } from '../../src/memory/profile.js';
 
 describe('buildOrchestratorPrompt', () => {
   it('concatenates master + orchestrator prompts', () => {
@@ -56,12 +55,16 @@ describe('relationship-note injection (P3, default-OFF flag)', () => {
   });
 
   const noteText = 'they text terse and late-night, mostly CS coursework stress';
+  // The note now lives in its own relationship_note column; george_notes is a
+  // pure scratchpad rendered as-is.
   const profileWithNote = (): Profile => ({
     identity: '', academic: '', interests: '', relationships: '', state: '',
-    george_notes: upsertRelationshipNote('keep this heartbeat scratch', noteText),
+    george_notes: 'keep this heartbeat scratch',
+    relationship_note: noteText,
+    compaction_due: null,
   });
 
-  it('flag OFF: no # RELATIONSHIP NOTE section, and the raw sentinel/note are not leaked', () => {
+  it('flag OFF: no # RELATIONSHIP NOTE section even when a note exists', () => {
     delete process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED;
     const prompt = buildOrchestratorPrompt(profileWithNote());
     expect(prompt).not.toMatch(/^# RELATIONSHIP NOTE$/m);
@@ -72,12 +75,11 @@ describe('relationship-note injection (P3, default-OFF flag)', () => {
     const prompt = buildOrchestratorPrompt(profileWithNote());
     expect(prompt).toMatch(/^# RELATIONSHIP NOTE$/m);
     expect(prompt).toContain(noteText);
-    // Shown once (in the dedicated section), not duplicated inside USER PROFILE.
+    // Shown once (in the dedicated section); the column note is not duplicated
+    // inside USER PROFILE.
     expect(prompt.split(noteText).length - 1).toBe(1);
-    // The non-note george_notes content still renders in USER PROFILE.
+    // The george_notes scratchpad still renders as-is in USER PROFILE.
     expect(prompt).toContain('keep this heartbeat scratch');
-    // Sentinel markers never leak into the prompt.
-    expect(prompt).not.toContain('relationship_note:start');
   });
 
   it('flag ON but no note present: no # RELATIONSHIP NOTE section', () => {

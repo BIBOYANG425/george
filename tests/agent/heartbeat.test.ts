@@ -207,23 +207,4 @@ describe('runHeartbeat — P4 grounded proactive (flag-gated)', () => {
     const userPrompt = okLLM.mock.calls[0][0].userPrompt as string;
     expect(userPrompt).not.toContain('# OPEN THREADS');
   });
-
-  it('dual-reads the legacy george_notes ledger as a fallback (no table row)', async () => {
-    process.env.GROUNDED_PROACTIVE_ENABLED = 'true';
-    const { deps, profileRows } = makeStores();
-    deps.loadRecentMessages = vi.fn(async () => openThreadMessages) as any;
-    // Pre-seed the legacy george_notes blob with the already-raised key (the
-    // exact key extractOpenThreads derives from openThreadMessages), table empty.
-    // This proves the union dual-read still dedupes existing users' raised
-    // threads that live only in the blob, before any Phase-2 backfill.
-    profileRows.set('u1', {
-      identity: '', academic: '', interests: '', relationships: '', state: '',
-      george_notes: 'RAISED_THREAD: 你是想要评分高的-prof-还是-workload-轻的',
-      relationship_note: '',
-    });
-    const okLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
-    await runHeartbeat('u1', { ...deps, callLLM: okLLM as any });
-    const userPrompt = okLLM.mock.calls[0][0].userPrompt as string;
-    expect(userPrompt).not.toContain('# OPEN THREADS');
-  });
 });

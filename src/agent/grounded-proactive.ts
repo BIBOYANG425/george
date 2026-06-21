@@ -7,14 +7,13 @@
 // they were mulling — or stay silent. Generic "event brief" pushes feel botty;
 // grounding them on something the user actually left hanging feels human.
 //
-// This module is pure (no DB, no LLM, no clock). Everything it produces is
-// either:
+// The pure helpers in this module (no DB, no LLM, no clock) produce either:
 //   - a list of OpenThread descriptors mined from recent messages, or
 //   - a prompt note rendered append-or-empty-string (same discipline as
-//     calendar-mood.ts), or
-//   - read/write helpers for a tiny "raised threads" ledger kept as plain lines
-//     inside the existing george_notes profile block (no schema change), so the
-//     same thread is not raised twice.
+//     calendar-mood.ts).
+// The "raised threads" dedupe ledger (so the same thread is not raised twice)
+// lives in the proactive_raised_threads table, accessed through the RaisedThreadDB
+// seam below.
 //
 // Behaviour is gated by config.groundedProactive.enabled at the call site
 // (src/agent/heartbeat.ts). When the flag is unset the heartbeat user prompt is
@@ -48,9 +47,6 @@ export function isGroundedProactiveEnabled(): boolean {
 
 const MAX_THREADS = 3;
 const GIST_MAX_CHARS = 120;
-// Marker line stored in george_notes. Kept deliberately boring so a human
-// reading /profile sees an obvious audit trail.
-const RAISED_PREFIX = 'RAISED_THREAD:';
 
 // Normalize a gist into a short stable key: lowercase, collapse whitespace,
 // strip punctuation, keep the first handful of meaningful tokens. Deterministic
@@ -165,33 +161,7 @@ export function extractOpenThreads(messages: ProactiveMessage[]): OpenThread[] {
   return threads.slice(0, MAX_THREADS);
 }
 
-// Parse the set of already-raised thread keys out of the george_notes block.
-export function parseRaisedThreads(georgeNotes: string): Set<string> {
-  const keys = new Set<string>();
-  for (const line of (georgeNotes || '').split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith(RAISED_PREFIX)) {
-      const key = trimmed.slice(RAISED_PREFIX.length).trim();
-      if (key) keys.add(key);
-    }
-  }
-  return keys;
-}
-
-// The line to append to george_notes when a thread has been raised. Pairs with
-// ProfileStore.appendToBlock (which dedupes), so re-raising is a no-op.
-//
-// LEGACY (Phase-1 dual-read): the raised-thread ledger now lives in the
-// proactive_raised_threads table (see RaisedThreadDB below). This helper +
-// parseRaisedThreads + stripRaisedThreadLines are kept so the heartbeat can
-// still READ old george_notes ledger lines as a fallback for existing users
-// until a Phase-2 backfill clears them. The heartbeat no longer WRITES new
-// ledger lines into george_notes. A later Phase-2 task removes these helpers.
-export function raisedThreadLine(key: string): string {
-  return `${RAISED_PREFIX} ${key}`;
-}
-
-// ── Raised-thread ledger (table-backed, Phase-1) ───────────────────────────
+// ── Raised-thread ledger (table-backed) ────────────────────────────────────
 // The dedupe ledger (which open threads george already proactively raised, so
 // he never repeats himself) lives in the proactive_raised_threads table
 // (id, user_id, thread, raised_at) with a UNIQUE index on (user_id, thread).
@@ -237,23 +207,6 @@ export function createSupabaseRaisedThreadDB(): RaisedThreadDB {
       return (data ?? []).map((r: { thread: string }) => r.thread);
     },
   };
-}
-
-// Remove the RAISED_THREAD ledger lines from a george_notes block before it is
-// rendered for a human or a model. The stored block keeps the lines so
-// parseRaisedThreads can dedupe; this strips them only at the surface so the
-// audit trail never leaks into the reactive prompt, the heartbeat's profile
-// view, or the /profile command. Returns the input UNCHANGED when no ledger
-// line is present, so a profile that never used grounded-proactive renders
-// byte-for-byte as before this feature existed.
-export function stripRaisedThreadLines(georgeNotes: string): string {
-  if (!georgeNotes || !georgeNotes.includes(RAISED_PREFIX)) return georgeNotes;
-  return georgeNotes
-    .split('\n')
-    .filter((line) => !line.trim().startsWith(RAISED_PREFIX))
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
 }
 
 // Static heartbeat guidance describing HOW to use the OPEN THREADS section. This

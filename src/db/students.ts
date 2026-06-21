@@ -137,16 +137,6 @@ export async function claimLinkCode(
   return { success: true, message: '账号链接成功！现在你的微信和iMessage是同一个George了 👻' }
 }
 
-export async function loadStudentMemories(studentId: string, limit = 20) {
-  const { data } = await supabase
-    .from('student_memories')
-    .select('key, value, category')
-    .eq('student_id', studentId)
-    .order('last_referenced_at', { ascending: false })
-    .limit(limit)
-  return data || []
-}
-
 export async function getReferralCount(studentId: string): Promise<number> {
   const { count } = await supabase
     .from('students')

@@ -38,7 +38,6 @@ export async function getStats() {
     { count: todayMessages },
     { count: totalEvents },
     { count: activeEvents },
-    { count: totalMemories },
     { count: proactiveSent },
   ] = await Promise.all([
     supabase.from('students').select('id', { count: 'exact', head: true }),
@@ -46,7 +45,6 @@ export async function getStats() {
     supabase.from('messages').select('id', { count: 'exact', head: true }).gte('created_at', `${today}T00:00:00Z`),
     supabase.from('events').select('id', { count: 'exact', head: true }),
     supabase.from('events').select('id', { count: 'exact', head: true }).eq('status', 'active'),
-    supabase.from('student_memories').select('id', { count: 'exact', head: true }),
     supabase.from('proactive_log').select('id', { count: 'exact', head: true }).eq('status', 'sent').gte('sent_at', thirtyDaysAgo),
   ])
 
@@ -60,7 +58,6 @@ export async function getStats() {
     students: { total: totalStudents || 0, weeklyActive: weeklyActive || 0 },
     messages: { total: totalMessages || 0, today: todayMessages || 0 },
     events: { total: totalEvents || 0, active: activeEvents || 0 },
-    memories: totalMemories || 0,
     proactiveMessagesSent30d: proactiveSent || 0,
     uptime: process.uptime(),
     timestamp: now.toISOString(),

@@ -24,9 +24,7 @@ import { isWebSearchOverCap, recordWebSearchUse } from '../services/web-search-b
 import { trustedDomains } from '../services/web-search-config.js';
 import { providerOptionsForModel } from './model-providers.js';
 import { renderMoodBlock, renderDateBlock } from './calendar-mood.js';
-import { extractRelationshipNote, upsertRelationshipNote } from '../memory/profile.js';
 import { isRelationshipEvalEnabled } from './evaluators/relationship.js';
-import { stripRaisedThreadLines } from './grounded-proactive.js';
 import { renderActivityBlock } from './activity-state.js';
 import { getWorldStateStore, worldStateEnabled } from './world-state.js';
 import { fastReply } from './fast-path.js';
@@ -75,21 +73,12 @@ export interface RunOrchestratorArgs {
 function buildUserProfileBlock(profile?: Profile | null): string {
   if (!profile) return '';
   const blocks = ['identity', 'academic', 'interests', 'relationships', 'state', 'george_notes'] as const;
-  // When the relationship eval is ON, the prose note lives (zero-schema) inside
-  // george_notes but is surfaced in its OWN labeled section, so strip the
-  // sentinel-fenced note from the raw block here to avoid showing it twice. When
-  // OFF, no sentinel ever exists, so this is a no-op and the block is unchanged.
-  const relEvalOn = isRelationshipEvalEnabled();
+  // george_notes is now a pure scratchpad: the relationship note lives in its own
+  // user_profiles.relationship_note column (surfaced via buildRelationshipNoteBlock)
+  // and the raised-thread ledger lives in the proactive_raised_threads table, so
+  // there is nothing to strip from the block — it renders as-is.
   const sections = blocks.map((name) => {
-    let content = profile[name];
-    if (name === 'george_notes') {
-      // Strip the grounded-proactive RAISED_THREAD ledger (internal audit trail),
-      // and when the relationship eval is on, the sentinel-fenced prose note
-      // (surfaced in its own labeled section). Both are no-ops when their markers
-      // are absent, so an untouched george_notes block renders unchanged.
-      content = stripRaisedThreadLines(content);
-      if (relEvalOn && content) content = upsertRelationshipNote(content, '');
-    }
+    const content = profile[name];
     const label = name.toUpperCase().replace('_', ' ');
     return `## ${label}\n${content || '(empty)'}`;
   });
@@ -112,13 +101,11 @@ function buildUserProfileBlock(profile?: Profile | null): string {
 // Free-form prose relationship note (P3), surfaced as its own labeled section so
 // the model treats it as the running relationship texture, not just another
 // profile fact. The note is maintained by evaluators/relationship.ts and stored
-// (zero-schema) inside the george_notes block. Returns '' — so the prompt is
-// byte-for-byte unchanged — unless the eval flag is on AND a note exists.
+// in the dedicated user_profiles.relationship_note column. Returns '' — so the
+// prompt is byte-for-byte unchanged — unless the eval flag is on AND a note exists.
 function buildRelationshipNoteBlock(profile?: Profile | null): string {
   if (!isRelationshipEvalEnabled() || !profile) return '';
-  // Dual-read: prefer the dedicated column; fall back to the legacy fenced blob
-  // in george_notes for users not yet backfilled.
-  const note = profile.relationship_note || extractRelationshipNote(profile.george_notes ?? '');
+  const note = profile.relationship_note;
   if (!note) return '';
   return [
     '# RELATIONSHIP NOTE',

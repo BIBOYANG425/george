@@ -255,7 +255,6 @@ async function loadOverview(){
       +'<div class="grid cards" style="margin-top:14px">'
       +card('总学生',fmt(o.totals.students))
       +card('活动 Events',fmt(o.totals.activeEvents)+' / '+fmt(o.totals.events),'active / 总')
-      +card('长期记忆',fmt(o.totals.memories),'student_memories')
       +card('Heartbeat 日志',fmt(o.totals.heartbeats),'proactive '+fmt(o.totals.proactiveSent))
       +'</div>'
       +'<div class="panel"><h3>消息量趋势 <span class="tag">近 14 天 · 用户 vs George</span></h3>'+lineChart(ts)+'</div>'
@@ -387,7 +386,6 @@ async function openUser(id){
       +'<div class="panel"><h3>记忆档案 <span class="tag">user_profiles 6 blocks</span></h3><div class="blocks">'
         + blocks.map(b=>'<div class="block"><div class="bk">'+b.replace('_',' ')+'</div><div class="bv">'+(p[b]?esc(p[b]):'<span class="skel">空</span>')+'</div></div>').join('')
       +'</div></div>'
-      +(d.memories&&d.memories.length?'<div class="panel"><h3>结构化记忆</h3>'+d.memories.map(m=>'<div class="block" style="margin-bottom:6px"><div class="bk">'+esc(m.category)+' · '+esc(m.key)+'</div><div class="bv">'+esc(m.value)+'</div></div>').join('')+'</div>':'')
       +'<div class="panel"><h3>对话记录 <span class="tag">'+d.conversation.length+' 条</span></h3><div class="convo">'
         + (d.conversation.length? d.conversation.map(renderConvoMsg).join('') : '<div class="empty">无记录</div>')
       +'</div></div>';

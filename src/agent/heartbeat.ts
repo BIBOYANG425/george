@@ -15,7 +15,6 @@ import { createHeartbeatOkTool } from '../tools/heartbeat/heartbeat-ok.js';
 import { applyNoReplyGate } from './noreply-gate.js';
 import {
   extractOpenThreads,
-  parseRaisedThreads,
   unraisedThreads,
   renderGroundedProactiveNote,
   recordRaisedThread,
@@ -177,18 +176,14 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
 
     // P4 — grounded proactive (DEFAULT-OFF). When enabled, mine the already-loaded
     // recent messages for a concrete open thread george can ground a proactive on,
-    // skipping any thread already raised. The raised-thread ledger now lives in the
-    // proactive_raised_threads table; we UNION the table with the legacy
-    // george_notes RAISED_THREAD lines (dual-read) so existing users' already-raised
-    // threads still dedupe until a Phase-2 backfill clears the blob. The rendered
-    // note is append-or-empty-string, so when the flag is off — or there is no
-    // fresh thread — the user prompt is byte-for-byte identical to before.
+    // skipping any thread already raised. The raised-thread ledger lives in the
+    // proactive_raised_threads table (the only source). The rendered note is
+    // append-or-empty-string, so when the flag is off — or there is no fresh
+    // thread — the user prompt is byte-for-byte identical to before.
     let groundableThreads: OpenThread[] = [];
     let groundedNote = '';
     if (isGroundedProactiveEnabled()) {
-      const dbRaised = await loadRaisedThreads(deps.raisedThreadDb, userId);
-      const blobRaised = parseRaisedThreads(profile.george_notes);
-      const raised = new Set([...dbRaised, ...blobRaised]);
+      const raised = await loadRaisedThreads(deps.raisedThreadDb, userId);
       groundableThreads = unraisedThreads(extractOpenThreads(messages), raised);
       groundedNote = renderGroundedProactiveNote(groundableThreads);
     }
