@@ -265,6 +265,85 @@ describe('captureFactsFromTurn — both ON', () => {
   });
 });
 
+describe('extraction prompt — Observer salience calibration', () => {
+  // The real recalibration lives in EXTRACT_SYSTEM (not exported). We can't test
+  // the model's judgment through a mock, so we pin the PLUMBING: the system prompt
+  // actually handed to the lightweight LLM carries the new "be stingy / drop
+  // chit-chat / 1-5 rubric" guidance. If someone reverts the prompt to the noisy
+  // version, these assertions fail.
+  function systemPromptFromLastCall(): string {
+    const [messages] = llmMock.mock.calls[0];
+    const system = (messages as Array<{ role: string; content: string }>).find(
+      (m) => m.role === 'system',
+    );
+    return system?.content ?? '';
+  }
+
+  it('instructs the LLM to be stingy and default to empty observations', async () => {
+    process.env.GEORGE_OBSERVE_ENABLED = 'true';
+    llmMock.mockResolvedValue(JSON.stringify({ facts: [], observations: [] }));
+    const { store } = makeStore();
+    const { db } = makeObservationDB();
+    await captureFactsFromTurn(store, HANDLE, 'hi', 'hey', { observationDB: db });
+
+    const sys = systemPromptFromLastCall();
+    expect(sys).toMatch(/STINGY/i);
+    expect(sys).toContain('"observations":[]');
+  });
+
+  it('tells the LLM to DROP greetings, acks, bare questions, and requests to the bot', async () => {
+    process.env.GEORGE_OBSERVE_ENABLED = 'true';
+    llmMock.mockResolvedValue(JSON.stringify({ facts: [], observations: [] }));
+    const { store } = makeStore();
+    const { db } = makeObservationDB();
+    await captureFactsFromTurn(store, HANDLE, 'hi', 'hey', { observationDB: db });
+
+    const sys = systemPromptFromLastCall();
+    expect(sys).toMatch(/DROP/);
+    expect(sys.toLowerCase()).toContain('greeting');
+    expect(sys.toLowerCase()).toContain('ack');
+    // requests to the bot / meta-talk about the AI must be excluded, not logged
+    expect(sys.toLowerCase()).toMatch(/asked if you remember|asked for a like|meta-talk about the ai/);
+  });
+
+  it('spells out the 1-5 salience rubric (1 trivial → 5 major life event)', async () => {
+    process.env.GEORGE_OBSERVE_ENABLED = 'true';
+    llmMock.mockResolvedValue(JSON.stringify({ facts: [], observations: [] }));
+    const { store } = makeStore();
+    const { db } = makeObservationDB();
+    await captureFactsFromTurn(store, HANDLE, 'hi', 'hey', { observationDB: db });
+
+    const sys = systemPromptFromLastCall();
+    // each rubric level present
+    expect(sys).toMatch(/1 = trivial/);
+    expect(sys).toMatch(/2 = minor/);
+    expect(sys).toMatch(/3 = a normal memorable/);
+    expect(sys).toMatch(/4 = significant/);
+    expect(sys).toMatch(/5 = highly memorable/);
+    // captures the memorable kinds we want to keep
+    expect(sys.toLowerCase()).toContain('episodic');
+    expect(sys.toLowerCase()).toContain('emotional');
+    expect(sys.toLowerCase()).toContain('relationship');
+  });
+
+  it('keeps facts extraction + strict-JSON shape unchanged', async () => {
+    process.env.GEORGE_OBSERVE_ENABLED = 'true';
+    llmMock.mockResolvedValue(JSON.stringify({ facts: [], observations: [] }));
+    const { store } = makeStore();
+    const { db } = makeObservationDB();
+    await captureFactsFromTurn(store, HANDLE, 'hi', 'hey', { observationDB: db });
+
+    const sys = systemPromptFromLastCall();
+    // facts contract preserved
+    expect(sys).toContain('FACTS');
+    expect(sys).toContain('"facts":[]');
+    expect(sys).toMatch(/Return STRICT JSON only/);
+    // jsonMode still requested
+    const [, opts] = llmMock.mock.calls[0];
+    expect(opts).toMatchObject({ jsonMode: true });
+  });
+});
+
 describe('captureFactsFromTurn — robustness', () => {
   it('malformed JSON → no throw, no writes (observe ON)', async () => {
     process.env.GEORGE_OBSERVE_ENABLED = 'true';

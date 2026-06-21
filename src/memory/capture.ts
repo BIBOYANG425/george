@@ -57,11 +57,18 @@ const EXTRACT_SYSTEM = [
   '- Do NOT capture transient chit-chat, the assistant\'s suggestions/questions, or anything the student did not clearly state.',
   '- Each fact: a short third-person statement, e.g. "studies CS, sophomore", "lives in the village", "into hiking and hotpot".',
   '- Never invent. Only what the student actually said. If nothing durable, return "facts":[].',
-  'OBSERVATIONS — the softer, episodic stuff facts skip:',
-  '- Mood & emotional context, episodic events (e.g. "celebrated getting a Pear offer"), recurring patterns, relational beats.',
-  '- Short third-person. salience is an integer 1-5 (5 = highly memorable, 1 = barely worth noting).',
-  '- kind is one of: fact, event, emotion, preference, relationship.',
-  '- Never invent; only what the student actually said or did. If nothing notable, return "observations":[].',
+  'OBSERVATIONS — only what a real friend would actually REMEMBER about this person weeks later:',
+  '- Be STINGY. Most turns have NOTHING memorable. That is the normal, correct case. Default to "observations":[].',
+  '- Capture ONLY: episodic events (e.g. "celebrated getting a Pear offer", "flew home for break"), emotional / state context (e.g. "stressed about CSCI 270 midterm", "homesick lately"), ongoing situations, relationships, and durable plans / preferences.',
+  '- DROP, never log: greetings & acks ("said hi", "thanked you"), the act of asking a question, requests to you the bot ("asked for a like", "asked if you remember them"), meta-talk about the AI ("asked if you know who they are"), and one-off transactional chit-chat.',
+  '- Short third-person, in the student\'s own language (EN or ZH). kind is one of: fact, event, emotion, preference, relationship.',
+  '- salience is an integer 1-5:',
+  '    1 = trivial / transactional (greeting, ack, just asking a question). DON\'T log these at 1, DROP them entirely.',
+  '    2 = minor but real (a small preference or passing detail worth a faint memory).',
+  '    3 = a normal memorable fact or event.',
+  '    4 = significant (an emotional moment, an important plan, a relationship beat).',
+  '    5 = highly memorable (a major life event).',
+  '- Only log what you would genuinely want surfaced weeks later. Never invent; only what the student actually said or did. If nothing is memorable, return "observations":[].',
 ].join('\n');
 
 interface RawObservation {
