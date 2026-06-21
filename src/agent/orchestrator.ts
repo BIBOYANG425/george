@@ -694,11 +694,19 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // of the full multi-hop engine (~50s). fastReply returns null — falling through
   // to the full agent — for anything factual or uncertain, so anti-fabrication is
   // preserved. (Skipped implicitly when it returns null.)
-  const fast = await fastReply({
-    text: args.text,
-    historyPrefix,
-    profileBlock: buildUserProfileBlock(profile),
-  });
+  //
+  // GEORGE_DISABLE_FAST_PATH (default off) forces every turn through the full
+  // agent. The eval harness sets it so an A/B over the agent TOPOLOGY (trunk vs
+  // multi-agent) isn't diluted by fast-path turns, which are identical on both
+  // arms and carry zero topology signal.
+  const fastPathDisabled = process.env.GEORGE_DISABLE_FAST_PATH === 'true';
+  const fast = fastPathDisabled
+    ? null
+    : await fastReply({
+        text: args.text,
+        historyPrefix,
+        profileBlock: buildUserProfileBlock(profile),
+      });
   if (fast !== null) {
     yield { type: 'result', result: fast };
     // Tag the turn as fast-path so the dashboard can tell it apart from a
