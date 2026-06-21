@@ -151,7 +151,12 @@ export function aggregateArm(
   judgeByScenario: Map<string, AggregatedJudge>,
 ): ArmAggregate {
   const armRecords = records.filter((r) => r.flagConfigName === flagConfigName);
-  const gatePasses = armRecords.filter((r) => gateByScenario.get(r.scenarioId)?.pass).length;
+  // Gate-pass rate is over GATED turns only: fast-path and error turns are
+  // excluded from the A/B (must-fix f) and never get a gate entry, so counting
+  // them in the denominator wrongly deflates the rate (a turn the harness chose
+  // not to gate is not a gate failure). Denominator = turns that were gated.
+  const gatedRecords = armRecords.filter((r) => !r.fastPath && !r.error);
+  const gatePasses = gatedRecords.filter((r) => gateByScenario.get(r.scenarioId)?.pass).length;
   const meanByDim = {} as Record<DimKey, number>;
   const sdByDim = {} as Record<DimKey, number>;
   for (const k of DIM_KEYS) {
@@ -170,7 +175,7 @@ export function aggregateArm(
   const totalCostUsd = armRecords.reduce((a, r) => a + (r.costUsd ?? 0), 0);
   return {
     flagConfigName,
-    gatePassRate: armRecords.length ? gatePasses / armRecords.length : 0,
+    gatePassRate: gatedRecords.length ? gatePasses / gatedRecords.length : 1,
     meanByDim,
     sdByDim,
     totalCostUsd,

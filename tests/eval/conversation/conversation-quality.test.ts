@@ -72,10 +72,14 @@ const HAS_ANTHROPIC_CONFIG = !!process.env.ANTHROPIC_API_KEY || !!process.env.BA
 // Path flags pinned across BOTH arms so the A/B varies only the flag under test
 // and the generation path is held constant (must-fix f). KIMI_API_KEY is pinned
 // here (emptied) so fast-path turns can't drift onto Kimi mid-A/B.
+// GEORGE_DISABLE_FAST_PATH forces EVERY turn through the full agent: fast-path
+// turns are identical across arms and carry zero topology/flag signal, so leaving
+// them in just dilutes the A/B (the first trunk run had most turns fast-path).
 const PINNED_PATH_FLAGS: Record<string, string> = {
   SINGLE_AGENT: 'false',
   GEORGE_TRUNK_HYBRID: 'false',
   KIMI_API_KEY: '',
+  GEORGE_DISABLE_FAST_PATH: 'true',
 };
 
 function armConfig(name: string, flag: string, value: 'true' | 'false'): FlagConfig {
@@ -750,7 +754,8 @@ describe.skipIf(!REAL_ENABLED)('conversation eval — real A/B suite', () => {
       expect(report.ab.gatePassRateOn).toBeGreaterThanOrEqual(report.ab.gatePassRateOff);
       expect(['flip-on', 'hold-off']).toContain(report.ab.flipRecommendation);
     },
-    // Generous timeout: 2N real multi-agent turns + k*N judge calls.
-    600_000,
+    // Generous timeout: 2N real multi-agent turns (fast path disabled, so every
+    // turn runs the full ~40s OFF / ~13s ON agent loop) + k*N Opus judge calls.
+    1_200_000,
   );
 });
