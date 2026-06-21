@@ -43,6 +43,7 @@ import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filte
 import { startHeartbeatScheduler } from './jobs/heartbeat-scheduler.js'
 import { startPendingUsersCleanupCron } from './jobs/pending-users-cleanup-cron.js'
 import { runHeartbeat } from './agent/heartbeat.js'
+import { createSupabaseRaisedThreadDB } from './agent/grounded-proactive.js'
 import { ProfileStore, createSupabaseProfileDB } from './memory/profile.js'
 import { InstructionsStore, createSupabaseInstructionsDB } from './memory/instructions.js'
 import { getKVCache } from './memory/kv-cache.js'
@@ -709,6 +710,7 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
   const heartbeatDeps = {
     profileStore,
     instructionsStore,
+    raisedThreadDb: createSupabaseRaisedThreadDB(),
     async loadConfig(userId: string) {
       const { data, error } = await supabase
         .from('user_heartbeat_config')

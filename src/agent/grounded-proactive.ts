@@ -21,6 +21,8 @@
 // byte-for-byte unchanged, because the renderer returns '' and the caller only
 // appends non-empty notes.
 
+import { createServiceRoleClient } from '../memory/supabase-client.js';
+
 export interface ProactiveMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -178,8 +180,63 @@ export function parseRaisedThreads(georgeNotes: string): Set<string> {
 
 // The line to append to george_notes when a thread has been raised. Pairs with
 // ProfileStore.appendToBlock (which dedupes), so re-raising is a no-op.
+//
+// LEGACY (Phase-1 dual-read): the raised-thread ledger now lives in the
+// proactive_raised_threads table (see RaisedThreadDB below). This helper +
+// parseRaisedThreads + stripRaisedThreadLines are kept so the heartbeat can
+// still READ old george_notes ledger lines as a fallback for existing users
+// until a Phase-2 backfill clears them. The heartbeat no longer WRITES new
+// ledger lines into george_notes. A later Phase-2 task removes these helpers.
 export function raisedThreadLine(key: string): string {
   return `${RAISED_PREFIX} ${key}`;
+}
+
+// ── Raised-thread ledger (table-backed, Phase-1) ───────────────────────────
+// The dedupe ledger (which open threads george already proactively raised, so
+// he never repeats himself) lives in the proactive_raised_threads table
+// (id, user_id, thread, raised_at) with a UNIQUE index on (user_id, thread).
+// This seam is injected into the heartbeat so it unit-tests with a fake DB.
+export interface RaisedThreadDB {
+  insert(userId: string, thread: string): Promise<void>;
+  list(userId: string): Promise<string[]>;
+}
+
+// Mark an open-thread key as raised for a user. Idempotent: the table's unique
+// (user_id, thread) index + ignoreDuplicates make a repeat insert a no-op.
+export async function recordRaisedThread(
+  db: RaisedThreadDB,
+  userId: string,
+  key: string,
+): Promise<void> {
+  await db.insert(userId, key);
+}
+
+// Load the set of thread keys this user has already had raised (from the table).
+export async function loadRaisedThreads(db: RaisedThreadDB, userId: string): Promise<Set<string>> {
+  return new Set(await db.list(userId));
+}
+
+// Supabase-backed RaisedThreadDB. Mirrors createSupabaseProfileDB's client
+// construction (service-role client, no config import) so importing this module
+// never triggers config.ts's eager required-env validation.
+export function createSupabaseRaisedThreadDB(): RaisedThreadDB {
+  const supabase = createServiceRoleClient();
+  return {
+    async insert(userId, thread) {
+      const { error } = await supabase
+        .from('proactive_raised_threads')
+        .upsert({ user_id: userId, thread }, { onConflict: 'user_id,thread', ignoreDuplicates: true });
+      if (error) throw new Error(`raised-thread insert failed: ${error.message}`);
+    },
+    async list(userId) {
+      const { data, error } = await supabase
+        .from('proactive_raised_threads')
+        .select('thread')
+        .eq('user_id', userId);
+      if (error) throw new Error(`raised-thread list failed: ${error.message}`);
+      return (data ?? []).map((r: { thread: string }) => r.thread);
+    },
+  };
 }
 
 // Remove the RAISED_THREAD ledger lines from a george_notes block before it is
