@@ -22,6 +22,11 @@ export interface Profile {
   relationships: string;
   state: string;
   george_notes: string;
+  // Free-form prose relationship note (P3). Promoted out of the george_notes
+  // sentinel-fenced blob into its own user_profiles column. loadProfile reads it
+  // here first; readers keep a fallback to extractRelationshipNote(george_notes)
+  // until a later backfill migrates existing notes out of the blob.
+  relationship_note: string;
 }
 
 export const EMPTY_PROFILE: Profile = {
@@ -31,11 +36,13 @@ export const EMPTY_PROFILE: Profile = {
   relationships: '',
   state: '',
   george_notes: '',
+  relationship_note: '',
 };
 
 export interface ProfileDB {
   loadRow(userId: string): Promise<Record<string, string> | null>;
   upsertBlock(userId: string, block: BlockName, content: string): Promise<void>;
+  saveRelationshipNote(userId: string, note: string): Promise<void>;
 }
 
 const CACHE_TTL_SECONDS = 300;
@@ -101,6 +108,7 @@ export class ProfileStore {
           relationships: row.relationships ?? '',
           state: row.state ?? '',
           george_notes: row.george_notes ?? '',
+          relationship_note: row.relationship_note ?? '',
         }
       : { ...EMPTY_PROFILE };
     await this.cache.set(this.cacheKey(userId), JSON.stringify(profile), CACHE_TTL_SECONDS);
@@ -115,6 +123,14 @@ export class ProfileStore {
       throw new Error(`Block content too long (${content.length} > ${MAX_BLOCK_CHARS})`);
     }
     await this.db.upsertBlock(userId, block, content);
+    await this.cache.delete(this.cacheKey(userId));
+  }
+
+  // Write the free-form relationship note to its own column (P3 promotion out of
+  // the george_notes sentinel blob). Busts the cache so the next loadProfile sees
+  // the new note.
+  async saveRelationshipNote(userId: string, note: string): Promise<void> {
+    await this.db.saveRelationshipNote(userId, note);
     await this.cache.delete(this.cacheKey(userId));
   }
 
@@ -172,6 +188,12 @@ export function createSupabaseProfileDB(): ProfileDB {
         .from('user_profiles')
         .upsert({ user_id: userId, [block]: content, updated_at: new Date().toISOString() });
       if (error) throw new Error(`upsertBlock failed: ${error.message}`);
+    },
+    async saveRelationshipNote(userId, note) {
+      const { error } = await supabase
+        .from('user_profiles')
+        .upsert({ user_id: userId, relationship_note: note, updated_at: new Date().toISOString() });
+      if (error) throw new Error(`saveRelationshipNote failed: ${error.message}`);
     },
   };
 }

@@ -116,7 +116,9 @@ function buildUserProfileBlock(profile?: Profile | null): string {
 // byte-for-byte unchanged — unless the eval flag is on AND a note exists.
 function buildRelationshipNoteBlock(profile?: Profile | null): string {
   if (!isRelationshipEvalEnabled() || !profile) return '';
-  const note = extractRelationshipNote(profile.george_notes ?? '');
+  // Dual-read: prefer the dedicated column; fall back to the legacy fenced blob
+  // in george_notes for users not yet backfilled.
+  const note = profile.relationship_note || extractRelationshipNote(profile.george_notes ?? '');
   if (!note) return '';
   return [
     '# RELATIONSHIP NOTE',

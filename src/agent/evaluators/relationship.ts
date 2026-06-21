@@ -21,7 +21,7 @@
 
 import { callLightweightLLM } from '../llm-providers.js';
 import { config } from '../../config.js';
-import { ProfileStore, upsertRelationshipNote, extractRelationshipNote } from '../../memory/profile.js';
+import { ProfileStore, extractRelationshipNote } from '../../memory/profile.js';
 import { log } from '../../observability/logger.js';
 import type { Evaluator, EvalContext } from './types.js';
 
@@ -71,7 +71,9 @@ export async function runRelationshipEval(args: RelationshipEvalArgs): Promise<v
   if (recentMessages.length === 0) return;
   try {
     const profile = await store.loadProfile(userId);
-    const prior = extractRelationshipNote(profile.george_notes ?? '');
+    // Dual-read: prefer the dedicated column; fall back to the legacy fenced blob
+    // in george_notes for users not yet backfilled.
+    const prior = profile.relationship_note || extractRelationshipNote(profile.george_notes ?? '');
     const transcript = recentMessages
       .map((m) => `${m.role === 'user' ? 'STUDENT' : 'GEORGE'}: ${m.content}`)
       .join('\n');
@@ -93,8 +95,8 @@ export async function runRelationshipEval(args: RelationshipEvalArgs): Promise<v
     // cache bust on quiet turns where the model returned the prior note verbatim).
     if (note === prior) return;
 
-    const nextNotes = upsertRelationshipNote(profile.george_notes ?? '', note);
-    await store.saveBlock(userId, 'george_notes', nextNotes);
+    // Write to the dedicated column (P3 promotion out of the george_notes blob).
+    await store.saveRelationshipNote(userId, note);
     log('info', 'relationship_eval', { userId, chars: note.length });
   } catch (err) {
     log('warn', 'relationship_eval_failed', { error: (err as Error).message });

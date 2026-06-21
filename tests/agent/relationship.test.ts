@@ -18,7 +18,7 @@ vi.mock('../../src/agent/llm-providers.js', () => ({
 }));
 
 import { createInMemoryCache } from '../../src/memory/kv-cache';
-import { ProfileStore, BLOCK_NAMES, extractRelationshipNote } from '../../src/memory/profile';
+import { ProfileStore, BLOCK_NAMES } from '../../src/memory/profile';
 import { callLightweightLLM } from '../../src/agent/llm-providers.js';
 
 // Statically importing the evaluator would run config.ts at hoist time (before the
@@ -39,6 +39,11 @@ function makeStore() {
     async upsertBlock(userId: string, block: string, content: string) {
       const existing = rows.get(userId) ?? Object.fromEntries(BLOCK_NAMES.map((b) => [b, '']));
       existing[block] = content;
+      rows.set(userId, existing);
+    },
+    async saveRelationshipNote(userId: string, note: string) {
+      const existing = rows.get(userId) ?? Object.fromEntries(BLOCK_NAMES.map((b) => [b, '']));
+      existing.relationship_note = note;
       rows.set(userId, existing);
     },
   };
@@ -129,7 +134,7 @@ describe('runRelationshipEval', () => {
     expect(p.george_notes).toBe('');
   });
 
-  it('writes the rewritten note into george_notes when ON', async () => {
+  it('writes the rewritten note into the relationship_note column when ON', async () => {
     process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED = 'true';
     vi.mocked(callLightweightLLM).mockResolvedValue('they text terse and late, mostly CS coursework stress');
     const { store } = makeStore();
@@ -143,9 +148,9 @@ describe('runRelationshipEval', () => {
     });
     expect(callLightweightLLM).toHaveBeenCalledTimes(1);
     const p = await store.loadProfile('u2');
-    expect(extractRelationshipNote(p.george_notes)).toBe(
-      'they text terse and late, mostly CS coursework stress',
-    );
+    // The note now lives in its own column, not the george_notes blob.
+    expect(p.relationship_note).toBe('they text terse and late, mostly CS coursework stress');
+    expect(p.george_notes).toBe('');
   });
 
   it('runs on the SMART model tier', async () => {
@@ -173,7 +178,7 @@ describe('runRelationshipEval', () => {
       userId: 'u4',
       recentMessages: [{ role: 'user', content: 'hey' }],
     });
-    const saveSpy = vi.spyOn(store, 'saveBlock');
+    const saveSpy = vi.spyOn(store, 'saveRelationshipNote');
     // Model returns the same note again.
     vi.mocked(callLightweightLLM).mockResolvedValue('steady rapport');
     await rel.runRelationshipEval({
