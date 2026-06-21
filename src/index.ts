@@ -124,8 +124,14 @@ app.get('/health', (_req, res) => {
     build: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? 'local',
     deployedBranch: process.env.RAILWAY_GIT_BRANCH ?? null,
     transport: process.env.TRANSPORT === 'spectrum' ? 'spectrum' : 'legacy',
-    // Spectrum inbound-stream liveness. A large secondsSinceInbound while
-    // state is 'connected' is the silent-deafness signal a monitor can alert on.
+    // Spectrum inbound-stream telemetry (state, connect/inbound times, error +
+    // reconnect counts). Top-level `status` stays 'ok' here even on long inbound
+    // silence: spectrum-ts exposes no keepalive/connection-event, so inbound
+    // silence cannot be told apart from a legitimately quiet night, and flipping
+    // to 'degraded' on quiet would false-alarm every off-peak hour. A recent
+    // unrecovered error shows as state:'error'/'reconnecting' with lastError(At);
+    // `staleInboundSeconds` is an advisory threshold the dashboard MAY surface.
+    // See src/adapters/spectrum-stats.ts header for the library-liveness blocker.
     ...(process.env.TRANSPORT === 'spectrum' ? { spectrum: getSpectrumHealth() } : {}),
   })
 })
