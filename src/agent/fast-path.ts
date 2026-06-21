@@ -16,30 +16,54 @@ import { callLightweightLLM } from './llm-providers.js';
 import { doubaoChat, isDoubaoConfigured } from './doubao-client.js';
 import { MASTER_PROMPT } from './agents.config.js';
 import { renderMoodBlock, renderDateBlock } from './calendar-mood.js';
+import { isNoReplyEnabled } from '../adapters/split-response.js';
 import { log } from '../observability/logger.js';
 
 const NEEDS_AGENT = 'NEEDS_AGENT';
+const NO_REPLY_TOKEN = '{{NO_REPLY}}';
 
-const FAST_INSTRUCTION = [
-  '# FAST RESPONDER MODE',
-  'You handle ONLY messages that need no lookup. If the latest message can be',
-  'answered right now with zero external facts — a greeting, small talk, feelings,',
-  'thanks, encouragement, or vibes/opinions you already hold — reply in voice',
-  '(mirror their language, no markdown, short, follow every voice rule above).',
-  '',
-  "If answering would need ANY fact you'd otherwise look up — a specific course,",
-  'professor, rating, event, place, price, date, housing, immigration rule,',
-  'finding/matching people, OR anything current or recent (new/recent movies,',
-  "shows, music, news, what's trending or popular now, this week's events, 最近 /",
-  '最新 anything) which your training is too old to know — output EXACTLY',
-  `this token and nothing else: ${NEEDS_AGENT}`,
-  '',
-  `When in doubt, output ${NEEDS_AGENT}. Never invent a fact to avoid bailing.`,
-  '',
-  `CRITICAL: never stall. Do NOT reply with "let me check", "give me a sec",`,
-  `"i'll look it up", or any promise to find out — that means you need the tools,`,
-  `so output ${NEEDS_AGENT} instead. Either answer fully now, or output ${NEEDS_AGENT}.`,
-].join('\n');
+// Built per-call (not a const) because the {{NO_REPLY}} option is gated on
+// GEORGE_NOREPLY_ENABLED. Pure acks ("收到", "ok", a lone 👍) and automated texts
+// land on the FAST PATH, so for NO_REPLY to actually fire the fast responder has
+// to be allowed to stay silent here — the full agent is geared to act and won't.
+export function buildFastInstruction(): string {
+  const lines = [
+    '# FAST RESPONDER MODE',
+    'You handle ONLY messages that need no lookup. If the latest message can be',
+    'answered right now with zero external facts — a greeting, small talk, feelings,',
+    'thanks, encouragement, or vibes/opinions you already hold — reply in voice',
+    '(mirror their language, no markdown, short, follow every voice rule above).',
+    '',
+    "If answering would need ANY fact you'd otherwise look up — a specific course,",
+    'professor, rating, event, place, price, date, housing, immigration rule,',
+    'finding/matching people, OR anything current or recent (new/recent movies,',
+    "shows, music, news, what's trending or popular now, this week's events, 最近 /",
+    '最新 anything) which your training is too old to know — output EXACTLY',
+    `this token and nothing else: ${NEEDS_AGENT}`,
+  ];
+  if (isNoReplyEnabled()) {
+    lines.push(
+      '',
+      'If the latest message is a pure acknowledgement that needs no reply (收到, ok,',
+      '好的, 嗯, 哈哈哈, a lone 👍 / emoji), or a clearly automated / system text (a',
+      'delivery or 2FA code, a "package shipped" notice), output EXACTLY this token',
+      `and nothing else to stay silent: ${NO_REPLY_TOKEN}. Use it sparingly. When in`,
+      'doubt, a short human reply beats silence. Never send it alongside other text.',
+    );
+  }
+  const close = isNoReplyEnabled()
+    ? `so output ${NEEDS_AGENT} instead. Answer fully now, output ${NO_REPLY_TOKEN} to stay silent, or output ${NEEDS_AGENT}.`
+    : `so output ${NEEDS_AGENT} instead. Either answer fully now, or output ${NEEDS_AGENT}.`;
+  lines.push(
+    '',
+    `When in doubt, output ${NEEDS_AGENT}. Never invent a fact to avoid bailing.`,
+    '',
+    `CRITICAL: never stall. Do NOT reply with "let me check", "give me a sec",`,
+    `"i'll look it up", or any promise to find out — that means you need the tools,`,
+    close,
+  );
+  return lines.join('\n');
+}
 
 // Returns George's reply for a no-lookup message, or null to signal "run the
 // full agent" (the message needs tools, or the fast call failed).
@@ -48,7 +72,7 @@ export async function fastReply(args: {
   historyPrefix: string;
   profileBlock: string;
 }): Promise<string | null> {
-  const system = [MASTER_PROMPT, renderDateBlock(), renderMoodBlock(), args.profileBlock, FAST_INSTRUCTION]
+  const system = [MASTER_PROMPT, renderDateBlock(), renderMoodBlock(), args.profileBlock, buildFastInstruction()]
     .filter(Boolean)
     .join('\n\n');
   try {
