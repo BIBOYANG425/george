@@ -1,6 +1,7 @@
 // tests/agent/la-time.test.ts
 import { describe, it, expect } from 'vitest';
-import { tzMonthDay, tzHourMinute, LA_TIMEZONE } from '../../src/agent/la-time.js';
+import { tzMonthDay, tzHourMinute, tzFullDate, LA_TIMEZONE } from '../../src/agent/la-time.js';
+import { renderDateBlock } from '../../src/agent/calendar-mood.js';
 
 describe('la-time', () => {
   describe('tzMonthDay', () => {
@@ -43,5 +44,33 @@ describe('la-time', () => {
     it('exposes the LA timezone constant', () => {
       expect(LA_TIMEZONE).toBe('America/Los_Angeles');
     });
+  });
+
+  describe('tzFullDate', () => {
+    it('formats the LA wall-clock full date with weekday + year', () => {
+      const now = new Date('2026-06-20T12:00:00-07:00');
+      expect(tzFullDate(now)).toBe('Saturday, June 20, 2026');
+    });
+
+    it('uses the LA day across the UTC boundary', () => {
+      // 2026-01-01 02:00 UTC is still Dec 31, 2025 in LA.
+      const now = new Date('2026-01-01T02:00:00Z');
+      expect(tzFullDate(now)).toBe('Wednesday, December 31, 2025');
+    });
+  });
+});
+
+describe('renderDateBlock', () => {
+  it('injects the real current year + date and a recency rule', () => {
+    const block = renderDateBlock(new Date('2026-06-20T12:00:00-07:00'));
+    expect(block).toContain('# TODAY');
+    expect(block).toContain('June 20, 2026');
+    expect(block).toContain('2026');
+    // The anti-stale rule: a prior-year release is not "current".
+    expect(block).toMatch(/PRIOR year/);
+  });
+
+  it('is always non-empty (callers append unconditionally)', () => {
+    expect(renderDateBlock(new Date('2026-06-20T12:00:00-07:00')).length).toBeGreaterThan(0);
   });
 });

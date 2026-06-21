@@ -35,3 +35,16 @@ export function tzHourMinute(now: Date, timeZone: string = LA_TIMEZONE): { hours
   const minutes = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
   return { hours, minutes };
 }
+
+// Full human date on the wall clock of the timezone (default LA), e.g.
+// "Saturday, June 20, 2026". Used to anchor the agent's sense of "now" in the
+// system prompt so it does not treat its training cutoff as the present.
+export function tzFullDate(now: Date, timeZone: string = LA_TIMEZONE): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(now);
+}

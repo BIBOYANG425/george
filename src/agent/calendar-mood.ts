@@ -9,7 +9,7 @@
 // Windows are approximate USC academic-calendar ranges, kept as an easy-to-edit
 // table (month*100 + day). Tune the dates per the official USC calendar each year.
 
-import { tzMonthDay } from './la-time.js';
+import { tzMonthDay, tzFullDate } from './la-time.js';
 
 export interface CalendarMood {
   phase: 'finals' | 'orientation' | 'midterms' | 'break';
@@ -68,4 +68,22 @@ export function getCalendarMood(now: Date = new Date()): CalendarMood | null {
 export function renderMoodBlock(mood: CalendarMood | null = getCalendarMood()): string {
   if (!mood) return '';
   return ['# CURRENT MOOD', `Academic calendar phase: ${mood.phase}.`, mood.directive].join('\n');
+}
+
+// The real current date, anchored to LA. Injected into every agent path so
+// George's sense of "now" is the actual date, not its training cutoff. Without
+// this George read "今年 / 最新 / 现在" as its training year (~2025) and served
+// prior-year movies/releases as current. Always non-empty (the date always
+// exists), so callers append it unconditionally like the other overlays.
+export function renderDateBlock(now: Date = new Date()): string {
+  return [
+    '# TODAY',
+    `Today is ${tzFullDate(now)} (Los Angeles). That is the real current date. Trust it over any sense of "now" from your training.`,
+    'Your training data ends well before today. So anything that depends on what is',
+    'current, recent, newly released, in theaters/airing now, trending, or priced',
+    'right now is BEYOND your knowledge and you must look it up before answering.',
+    "Always check a release / event / news date against today's date: a movie, show,",
+    'album, or product from a PRIOR year is NOT "今年" / "最新" / "current", however',
+    'recent it feels from memory.',
+  ].join('\n');
 }
