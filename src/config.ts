@@ -41,6 +41,20 @@ export const config = {
     apiKey: process.env.KIMI_API_KEY || '',
     baseUrl: process.env.KIMI_BASE_URL || 'https://api.moonshot.cn/v1',
   },
+  // Doubao (ByteDance / 火山方舟 Ark) via its Anthropic-compatible endpoint, so
+  // the Agent SDK can run George on it just like the DeepSeek /anthropic gateway.
+  // When a turn's model is a doubao-* / ark-* id AND apiKey is set, the
+  // orchestrator routes THAT query() to this base+key via a per-call env override
+  // (see src/agent/model-providers.ts). Set DOUBAO_MODEL as a global tier
+  // (GEORGE_MODEL_FAST/SMART=doubao-…) or assign per-user from the dashboard.
+  doubao: {
+    apiKey: process.env.DOUBAO_API_KEY || '',
+    // Ark's Anthropic-protocol endpoint (Coding Plan). NOT /api/v3 (that's the
+    // OpenAI-format endpoint the Agent SDK can't speak + separate billing).
+    baseUrl: process.env.DOUBAO_BASE_URL || 'https://ark.cn-beijing.volces.com/api/coding',
+    // e.g. doubao-seed-1.6 / doubao-seed-code-preview-latest / ark-code-latest.
+    model: process.env.DOUBAO_MODEL || '',
+  },
   supabase: {
     url: requiredUnlessBridge('SUPABASE_URL'),
     anonKey: requiredUnlessBridge('SUPABASE_ANON_KEY'),

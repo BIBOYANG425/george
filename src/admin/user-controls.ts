@@ -155,7 +155,7 @@ export async function countTodayUserMessages(userId: string): Promise<number> {
 // permissive enough for real ids, strict enough to reject typos like "fast" or
 // "gpt5-turbo-mega". An unrecognized override is ignored (fall back to default)
 // rather than bricking the user.
-const MODEL_ID_RE = /^(claude-|deepseek|moonshot|kimi|gpt-|o[0-9]|gemini-|us\.anthropic\.|anthropic\.)/i;
+const MODEL_ID_RE = /^(claude-|deepseek|moonshot|kimi|gpt-|o[0-9]|gemini-|doubao|ark-|us\.anthropic\.|anthropic\.)/i;
 
 // Resolve the model a user should run on (override or the supplied fallback).
 export function resolveModelForUser(userId: string, fallback: string): string {
@@ -247,5 +247,10 @@ export function getModelChoices(): Array<{ id: string; label: string }> {
   add(fast, `FAST 档：${fast}${map}`);
   add(smart, `SMART 档：${smart}${map}`);
   add(cli, `CLI 默认：${cli}`);
+  // Doubao (火山方舟 Ark) — offered when DOUBAO_API_KEY + DOUBAO_MODEL are set,
+  // so an admin can A/B a single user onto Doubao from the dashboard. Routed to
+  // Ark's Anthropic endpoint per-call (see model-providers.ts).
+  const doubao = process.env.DOUBAO_MODEL;
+  if (process.env.DOUBAO_API_KEY && doubao) add(doubao, `Doubao 豆包：${doubao}（火山方舟）`);
   return out;
 }
