@@ -59,9 +59,9 @@ describe('ProfileStore', () => {
     await expect(store.saveBlock(FAKE_USER, 'notreal' as any, 'x')).rejects.toThrow(/block name/);
   });
 
-  it('saveBlock rejects content >2000 chars', async () => {
+  it('saveBlock rejects content >4000 chars', async () => {
     const { store } = makeStore();
-    await expect(store.saveBlock(FAKE_USER, 'identity', 'x'.repeat(2001))).rejects.toThrow(/too long/);
+    await expect(store.saveBlock(FAKE_USER, 'identity', 'x'.repeat(4001))).rejects.toThrow(/too long/);
   });
 });
 

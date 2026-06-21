@@ -13,6 +13,20 @@ function makeStores() {
   const logs: any[] = [];
   const sentMessages: any[] = [];
 
+  // Fake table-backed raised-thread ledger (proactive_raised_threads). Mirrors
+  // the DB seam: idempotent insert on (user_id, thread), per-user list.
+  const raisedThreadRows: Array<{ user_id: string; thread: string }> = [];
+  const raisedThreadDb = {
+    async insert(uid: string, t: string) {
+      if (!raisedThreadRows.some((r) => r.user_id === uid && r.thread === t)) {
+        raisedThreadRows.push({ user_id: uid, thread: t });
+      }
+    },
+    async list(uid: string) {
+      return raisedThreadRows.filter((r) => r.user_id === uid).map((r) => r.thread);
+    },
+  };
+
   const profileStore = new ProfileStore(
     {
       async loadRow(uid) {
@@ -45,6 +59,7 @@ function makeStores() {
     deps: {
       profileStore,
       instructionsStore,
+      raisedThreadDb,
       loadConfig: vi.fn(async (uid: string) => ({
         cadence: '12 hours',
         active_hours_start: '09:00',
@@ -73,6 +88,7 @@ function makeStores() {
     followupRows,
     logs,
     sentMessages,
+    raisedThreadRows,
   };
 }
 
@@ -162,31 +178,49 @@ describe('runHeartbeat — P4 grounded proactive (flag-gated)', () => {
     expect(userPrompt).toContain('prof');
   });
 
-  it('marks the grounded thread raised in george_notes after a proactive send', async () => {
+  it('records the grounded thread in the proactive_raised_threads table after a proactive send', async () => {
     process.env.GROUNDED_PROACTIVE_ENABLED = 'true';
-    const { deps, profileStore } = makeStores();
+    const { deps, raisedThreadRows } = makeStores();
     deps.loadRecentMessages = vi.fn(async () => openThreadMessages) as any;
     const mockLLM = vi.fn().mockResolvedValue({
       toolCalls: [{ name: 'send_proactive_message', input: { text: '想好选哪个 prof 了吗', channel: 'imessage' } }],
     });
     await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
-    const profile = await profileStore.loadProfile('u1');
-    expect(profile.george_notes).toMatch(/RAISED_THREAD:/);
+    expect(raisedThreadRows.filter((r) => r.user_id === 'u1')).toHaveLength(1);
   });
 
-  it('does not re-inject a thread that was already raised', async () => {
+  it('does not re-inject a thread that was already raised (table-backed)', async () => {
     process.env.GROUNDED_PROACTIVE_ENABLED = 'true';
-    const { deps, profileStore } = makeStores();
+    const { deps, raisedThreadRows } = makeStores();
     deps.loadRecentMessages = vi.fn(async () => openThreadMessages) as any;
 
-    // First tick raises the thread.
+    // First tick raises the thread into the table.
     const sendLLM = vi.fn().mockResolvedValue({
       toolCalls: [{ name: 'send_proactive_message', input: { text: '想好选哪个 prof 了吗', channel: 'imessage' } }],
     });
     await runHeartbeat('u1', { ...deps, callLLM: sendLLM as any });
-    expect((await profileStore.loadProfile('u1')).george_notes).toMatch(/RAISED_THREAD:/);
+    expect(raisedThreadRows.filter((r) => r.user_id === 'u1')).toHaveLength(1);
 
     // Second tick on the same open thread should no longer offer it.
+    const okLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...deps, callLLM: okLLM as any });
+    const userPrompt = okLLM.mock.calls[0][0].userPrompt as string;
+    expect(userPrompt).not.toContain('# OPEN THREADS');
+  });
+
+  it('dual-reads the legacy george_notes ledger as a fallback (no table row)', async () => {
+    process.env.GROUNDED_PROACTIVE_ENABLED = 'true';
+    const { deps, profileRows } = makeStores();
+    deps.loadRecentMessages = vi.fn(async () => openThreadMessages) as any;
+    // Pre-seed the legacy george_notes blob with the already-raised key (the
+    // exact key extractOpenThreads derives from openThreadMessages), table empty.
+    // This proves the union dual-read still dedupes existing users' raised
+    // threads that live only in the blob, before any Phase-2 backfill.
+    profileRows.set('u1', {
+      identity: '', academic: '', interests: '', relationships: '', state: '',
+      george_notes: 'RAISED_THREAD: 你是想要评分高的-prof-还是-workload-轻的',
+      relationship_note: '',
+    });
     const okLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
     await runHeartbeat('u1', { ...deps, callLLM: okLLM as any });
     const userPrompt = okLLM.mock.calls[0][0].userPrompt as string;
