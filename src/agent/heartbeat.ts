@@ -98,8 +98,12 @@ export type BlockSummarizer = (block: BlockName, content: string) => Promise<str
 
 // Pure-ish, dependency-injected so it unit-tests without the whole tick. Only
 // touches blocks > MAX_BLOCK_CHARS, only writes a condensed block when it is
-// non-empty AND strictly shorter than the original (never grow, never blank a
-// block), and only clears compaction_due when the marker was set.
+// non-empty, strictly shorter than the original, AND back under the cap (never
+// grow, never blank a block, never hand saveBlock content it would reject), and
+// only clears compaction_due when the marker was set. If the summarizer can't
+// get a block back under the cap we log and move on rather than throw — clearing
+// the marker so the tick doesn't re-summarize the same block forever; the next
+// append re-flags it via the RPC.
 export async function compactProfileIfDue(
   store: {
     saveBlock(u: string, b: BlockName, c: string): Promise<void>;
@@ -114,9 +118,11 @@ export async function compactProfileIfDue(
     const content = profile[block] ?? '';
     if (content.length <= MAX_BLOCK_CHARS) continue;
     const condensed = (await summarize(block, content)).trim();
-    if (condensed && condensed.length < content.length) {
+    if (condensed && condensed.length < content.length && condensed.length <= MAX_BLOCK_CHARS) {
       await store.saveBlock(userId, block, condensed);
       log('info', 'memory_compacted', { userId, block, before: content.length, after: condensed.length });
+    } else if (condensed.length > MAX_BLOCK_CHARS) {
+      log('warn', 'memory_compaction_over_cap', { userId, block, before: content.length, after: condensed.length });
     }
   }
   await store.clearCompactionDue(userId);
