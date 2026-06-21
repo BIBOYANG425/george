@@ -257,6 +257,61 @@ describe('recallForTurn — env overrides', () => {
   });
 });
 
+describe('recallForTurn — success telemetry (recall_injected)', () => {
+  beforeEach(() => {
+    process.env.GEORGE_RECALL_ENABLED = 'true';
+  });
+
+  it('logs info recall_injected with count (rendered lines) + topScore when a non-empty block is returned', async () => {
+    const embed = vi.fn(async () => EMB);
+    const { db } = makeDB([
+      row('sleeps at 3am', { id: 1, score: 0.91234 }),
+      row('celebrated a Pear offer', { id: 2, score: 0.5 }),
+      row('stressed about visa', { id: 3, score: 0.4 }),
+    ]);
+    const out = await recallForTurn(HANDLE, 'how am I doing', { db, embed });
+
+    expect(out).not.toBe('');
+    const renderedLines = out.split('\n').filter((l) => l.startsWith('- ')).length;
+    expect(renderedLines).toBe(3);
+
+    const injected = logMock.mock.calls.find((c) => c[1] === 'recall_injected');
+    expect(injected).toBeDefined();
+    expect(injected![0]).toBe('info');
+    expect(injected![2]).toEqual({ userId: HANDLE, count: renderedLines, topScore: 0.912 });
+  });
+
+  it('count reflects rows actually injected after the 600-char cap, not the raw row count', async () => {
+    const long = 'x'.repeat(120);
+    const rows = Array.from({ length: 20 }, (_, i) => row(`${long}-${i}`, { id: i, score: 0.8 }));
+    const embed = vi.fn(async () => EMB);
+    const { db } = makeDB(rows);
+    const out = await recallForTurn(HANDLE, 'tell me everything', { db, embed });
+
+    const renderedLines = out.split('\n').filter((l) => l.startsWith('- ')).length;
+    expect(renderedLines).toBeLessThan(20); // capped, fewer than the 20 raw rows
+
+    const injected = logMock.mock.calls.find((c) => c[1] === 'recall_injected');
+    expect(injected).toBeDefined();
+    expect(injected![2]).toMatchObject({ count: renderedLines });
+  });
+
+  it('does NOT log recall_injected on the disabled (OFF) path', async () => {
+    delete process.env.GEORGE_RECALL_ENABLED;
+    const embed = vi.fn(async () => EMB);
+    const { db } = makeDB([row('a')]);
+    expect(await recallForTurn(HANDLE, 'hi', { db, embed })).toBe('');
+    expect(logMock.mock.calls.find((c) => c[1] === 'recall_injected')).toBeUndefined();
+  });
+
+  it('does NOT log recall_injected on an empty-block path (db.recall returns [])', async () => {
+    const embed = vi.fn(async () => EMB);
+    const { db } = makeDB([]);
+    expect(await recallForTurn(HANDLE, 'hi', { db, embed })).toBe('');
+    expect(logMock.mock.calls.find((c) => c[1] === 'recall_injected')).toBeUndefined();
+  });
+});
+
 describe('recallForTurn — robustness', () => {
   beforeEach(() => {
     process.env.GEORGE_RECALL_ENABLED = 'true';
