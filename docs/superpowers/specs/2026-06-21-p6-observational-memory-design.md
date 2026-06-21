@@ -201,3 +201,37 @@ bia-admin owns the schema (the `user_observations` migration + `recall_observati
 RPC). george deploys migration-then-code. The `OPENAI_API_KEY` used by the
 `embed` Edge Function is already configured in Supabase for squad — no new
 george env var required.
+
+## Phase 5 (post-MVP): recall tool
+
+§3 listed a recall *tool* as a non-goal for the MVP ("a `recall()` tool is a
+possible later add, out of scope here"). That eventual target is now built as a
+default-OFF add-on. It complements — does not replace — the always-on auto-injected
+per-turn recall from Phase 2.
+
+- **What:** `recall_memory` agent tool (`src/tools/recall-memory.ts`), input
+  `{ query, user_id }`. George calls it to DELIBERATELY search this student's
+  observation log for a specific detail the per-turn auto-inject (which only sees
+  the raw user message) did not surface. It resolves the channel handle →
+  `students.user_id` via `resolveProfileUserId`, embeds the query with
+  `embedObservation`, calls `createSupabaseObservationDB().recall(...)`, and returns
+  the matched observations (content/salience/kind) as a compact JSON result.
+- **Tunables:** reuses the SAME `RECALL_TOP_K` / `RECALL_MIN_SALIENCE` /
+  `RECALL_HALF_LIFE_DAYS` knobs as `recall.ts` (one source of truth; the resolvers
+  are exported from `recall.ts`).
+- **Anti-fabrication:** returns ONLY real stored observations. Any error / no
+  results / non-onboarded handle / empty query → a graceful
+  `{ memories: [], note: 'no relevant memories found' }`. Never throws.
+- **Gating:** `GEORGE_RECALL_TOOL_ENABLED` (default-OFF). When unset the tool is
+  absent from `ALL_TOOLS` (so it is not even registered in the in-process MCP
+  server) and from every assembled allowlist (`ORCHESTRATOR_DIRECT_TOOLS`,
+  `TRUNK_TOOLS`, the single-agent `Object.keys(ALL_TOOLS)` set), and the orchestrator
+  prompt's `# RECALL MEMORY TOOL` context block is `''` — so agent behavior is
+  byte-identical to before. Independent of `GEORGE_RECALL_ENABLED` (auto-inject).
+- **Assigned to** the main/orchestrator (and trunk) agent — recall of personal
+  memory fits the agent that owns small-talk + personal continuity, not a domain
+  sub-agent.
+- **Fast-path caveat (the original non-goal's reason):** tools never run on the fast
+  path, so `recall_memory` cannot fire there. This is fine and expected — the
+  always-on Phase 2 auto-inject already covers the fast path on every turn. The tool
+  only adds deliberate, query-specific recall on the full-agent paths.

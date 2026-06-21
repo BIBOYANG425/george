@@ -56,16 +56,20 @@ function parseIntEnv(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function resolveTopK(): number {
+// Exported so the deliberate recall TOOL (src/tools/recall-memory.ts) reads the
+// SAME RECALL_TOP_K / RECALL_MIN_SALIENCE / RECALL_HALF_LIFE_DAYS tunables (and
+// the same defaults/bounds) as the auto-injected per-turn recall — one source of
+// truth for the knobs. Behavior of recallForTurn is unchanged.
+export function resolveTopK(): number {
   return Math.max(1, parseIntEnv(process.env.RECALL_TOP_K, TOP_K_DEFAULT));
 }
 
-function resolveMinSalience(): number {
+export function resolveMinSalience(): number {
   const n = parseIntEnv(process.env.RECALL_MIN_SALIENCE, MIN_SALIENCE_DEFAULT);
   return Math.min(MIN_SALIENCE_CEIL, Math.max(MIN_SALIENCE_FLOOR, n));
 }
 
-function resolveHalfLifeDays(): number {
+export function resolveHalfLifeDays(): number {
   return Math.max(
     HALF_LIFE_DAYS_FLOOR,
     parseIntEnv(process.env.RECALL_HALF_LIFE_DAYS, HALF_LIFE_DAYS_DEFAULT),
