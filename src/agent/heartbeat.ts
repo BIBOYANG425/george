@@ -2,9 +2,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ProfileStore, BlockName } from '../memory/profile.js';
+import { ProfileStore, BlockName, BLOCK_NAMES, MAX_BLOCK_CHARS, type Profile } from '../memory/profile.js';
 import { InstructionsStore } from '../memory/instructions.js';
 import { LLMClient } from './llm-clients.js';
+import { callLightweightLLM } from './llm-providers.js';
+import { config } from '../config.js';
+import { log } from '../observability/logger.js';
 import { createUpdateBlockTool } from '../tools/heartbeat/update-block.js';
 import { createSendProactiveTool } from '../tools/heartbeat/send-proactive-message.js';
 import { createAddFollowupTool } from '../tools/heartbeat/add-followup.js';
@@ -82,6 +85,64 @@ const MASTER_PROMPT = applyNoReplyGate(
 
 const RECENT_MESSAGES_LIMIT = 10;
 const MAX_TOKENS = 800;
+
+// ── Memory compaction (P1 memory-consolidation) ───────────────────────────────
+// The atomic append RPC (Task 4) never slices an over-cap block; instead it sets
+// user_profiles.compaction_due = now(). This is where the heartbeat acts on that
+// marker: when it is set, condense/dedupe each over-cap block back under the cap
+// with the lightweight LLM, then clear the marker. This replaces the old silent
+// truncation with real compaction (no data loss).
+
+// Condenses one block's content. The block name is passed so a summarizer can
+// vary its prompt per block if needed. Returns the condensed content.
+export type BlockSummarizer = (block: BlockName, content: string) => Promise<string>;
+
+// Pure-ish, dependency-injected so it unit-tests without the whole tick. Only
+// touches blocks > MAX_BLOCK_CHARS, only writes a condensed block when it is
+// non-empty AND strictly shorter than the original (never grow, never blank a
+// block), and only clears compaction_due when the marker was set.
+export async function compactProfileIfDue(
+  store: {
+    saveBlock(u: string, b: BlockName, c: string): Promise<void>;
+    clearCompactionDue(u: string): Promise<void>;
+  },
+  userId: string,
+  profile: Profile,
+  summarize: BlockSummarizer,
+): Promise<void> {
+  if (!profile.compaction_due) return;
+  for (const block of BLOCK_NAMES) {
+    const content = profile[block] ?? '';
+    if (content.length <= MAX_BLOCK_CHARS) continue;
+    const condensed = (await summarize(block, content)).trim();
+    if (condensed && condensed.length < content.length) {
+      await store.saveBlock(userId, block, condensed);
+      log('info', 'memory_compacted', { userId, block, before: content.length, after: condensed.length });
+    }
+  }
+  await store.clearCompactionDue(userId);
+}
+
+// Real summarizer for production: condense + dedupe one over-cap block with the
+// SMART tier (same tier the relationship evaluator uses — this is a judgment
+// task, preserve every distinct fact). System prompt drops only exact/near
+// duplicates and filler, keeps one-fact-per-line, outputs under the cap.
+const COMPACT_SYSTEM = [
+  'You compact a memory block for an AI companion.',
+  'Dedupe and condense the lines below, preserving every DISTINCT durable fact, drop only exact/near duplicates and filler.',
+  'Keep the one-fact-per-line format.',
+  `Output ONLY the condensed block, under ${MAX_BLOCK_CHARS} characters.`,
+].join(' ');
+
+async function realSummarize(_block: BlockName, content: string): Promise<string> {
+  return callLightweightLLM(
+    [
+      { role: 'system', content: COMPACT_SYSTEM },
+      { role: 'user', content },
+    ],
+    { maxTokens: 1500, model: config.models.smart },
+  );
+}
 
 export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise<void> {
   const startedAt = Date.now();
@@ -203,6 +264,22 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
     }
 
     await deps.updateLastHeartbeatAt(userId);
+
+    // P1 memory-consolidation: if the atomic append RPC flagged an over-cap block
+    // this cycle (compaction_due set), condense it back under the cap with the
+    // lightweight LLM and clear the marker. Reuses the profile already loaded for
+    // this tick (no reload). Isolated so a compaction failure never fails the tick
+    // or flips the outcome — the marker stays set and the next tick retries.
+    if (profile.compaction_due) {
+      try {
+        await compactProfileIfDue(deps.profileStore, userId, profile, realSummarize);
+      } catch (compactErr) {
+        log('warn', 'memory_compaction_failed', {
+          userId,
+          error: compactErr instanceof Error ? compactErr.message : String(compactErr),
+        });
+      }
+    }
   } catch (err) {
     outcome = 'error';
     errorMessage = err instanceof Error ? err.message : String(err);
