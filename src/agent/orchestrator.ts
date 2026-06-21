@@ -22,6 +22,7 @@ import { resolveStudentId, resolveProfileUserId } from '../db/students.js';
 import { log } from '../observability/logger.js';
 import { isWebSearchOverCap, recordWebSearchUse } from '../services/web-search-budget.js';
 import { trustedDomains } from '../services/web-search-config.js';
+import { providerOptionsForModel } from './model-providers.js';
 import { renderMoodBlock } from './calendar-mood.js';
 import { extractRelationshipNote, upsertRelationshipNote } from '../memory/profile.js';
 import { isRelationshipEvalEnabled } from './evaluators/relationship.js';
@@ -544,6 +545,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.worldStateBlock,
       ),
       model: inputs.trunkModel,
+      ...providerOptionsForModel(inputs.trunkModel),
       thinking: { type: 'disabled' as const },
       mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
       tools: trunkAllow,
@@ -570,6 +572,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.worldStateBlock,
       ),
       model: inputs.resolvedModel,
+      ...providerOptionsForModel(inputs.resolvedModel),
       // Disable extended thinking on the agent loop — it adds ~7s PER tool-call
       // turn (DeepSeek-v4 defaults it on). Tools provide the grounding; the
       // thinking was the dominant cost on tool queries (~35s → much less).
@@ -586,6 +589,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
   return {
     systemPrompt: inputs.systemPrompt,
     model: inputs.resolvedModel,
+    ...providerOptionsForModel(inputs.resolvedModel),
     mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
     tools: inputs.orchestratorTools,
     allowedTools: ['Task', 'Agent', 'WebSearch', ...Object.keys(ALL_TOOLS).map(nsTool)],
