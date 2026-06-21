@@ -18,6 +18,7 @@ import { getFullCatalog } from '../skills/index.js';
 import { ALL_TOOLS } from '../tools/index.js';
 import type { SessionStore, TurnTelemetry } from './session-store.js';
 import type { Profile, ProfileStore } from '../memory/profile.js';
+import { recallForTurn } from '../memory/recall.js';
 import { resolveStudentId, resolveProfileUserId } from '../db/students.js';
 import { log } from '../observability/logger.js';
 import { isWebSearchOverCap, recordWebSearchUse } from '../services/web-search-budget.js';
@@ -156,15 +157,17 @@ function buildStudentIdBlock(studentId?: string | null): string {
   ].join('\n');
 }
 
-// `delayContext` (long-gap note) and `worldStateBlock` (World Info timed-state
-// overlay) are optional per-turn overlays pre-rendered by the caller. Both empty
-// by default, so when their flags are off the prompt is byte-for-byte unchanged.
+// `delayContext` (long-gap note), `worldStateBlock` (World Info timed-state
+// overlay) and `recallBlock` (P6 observational-memory "## THINGS YOU REMEMBER")
+// are optional per-turn overlays pre-rendered by the caller. All empty by default,
+// so when their flags are off the prompt is byte-for-byte unchanged.
 export function buildOrchestratorPrompt(
   profile?: Profile | null,
   studentId?: string | null,
   delayContext?: string,
   worldStateBlock: string = '',
   webAllowed: boolean = false,
+  recallBlock: string = '',
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
   parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
@@ -185,6 +188,11 @@ export function buildOrchestratorPrompt(
   if (userProfileBlock) parts.push(userProfileBlock);
   const relationshipNoteBlock = buildRelationshipNoteBlock(profile);
   if (relationshipNoteBlock) parts.push(relationshipNoteBlock);
+  // P6 observational-memory recall ("## THINGS YOU REMEMBER"): pre-rendered by the
+  // caller via recallForTurn(). '' when GEORGE_RECALL_ENABLED is unset, so OFF is
+  // byte-for-byte unchanged. Placed right after the profile so the model sees
+  // identity + memories together.
+  if (recallBlock) parts.push(recallBlock);
   if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
   const studentIdBlock = buildStudentIdBlock(studentId);
   if (studentIdBlock) parts.push(studentIdBlock);
@@ -237,6 +245,7 @@ export function buildSingleAgentPrompt(
   webAllowed: boolean = false,
   delayContext?: string,
   worldStateBlock: string = '',
+  recallBlock: string = '',
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
   parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
@@ -254,6 +263,9 @@ export function buildSingleAgentPrompt(
   if (userProfileBlock) parts.push(userProfileBlock);
   const relationshipNoteBlock = buildRelationshipNoteBlock(profile);
   if (relationshipNoteBlock) parts.push(relationshipNoteBlock);
+  // P6 observational-memory recall (see buildOrchestratorPrompt): '' by default,
+  // so OFF is byte-for-byte unchanged.
+  if (recallBlock) parts.push(recallBlock);
   if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
   const studentIdBlock = buildStudentIdBlock(studentId);
   if (studentIdBlock) parts.push(studentIdBlock);
@@ -328,6 +340,7 @@ export function buildTrunkPrompt(
   webAllowed: boolean = false,
   delayContext?: string,
   worldStateBlock: string = '',
+  recallBlock: string = '',
 ): string {
   const parts = [
     `${MASTER_PROMPT}\n\n${TRUNK_ROUTING_PROMPT}`,
@@ -348,6 +361,9 @@ export function buildTrunkPrompt(
   if (userProfileBlock) parts.push(userProfileBlock);
   const relationshipNoteBlock = buildRelationshipNoteBlock(profile);
   if (relationshipNoteBlock) parts.push(relationshipNoteBlock);
+  // P6 observational-memory recall (see buildOrchestratorPrompt): '' by default,
+  // so OFF is byte-for-byte unchanged.
+  if (recallBlock) parts.push(recallBlock);
   if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
   const studentIdBlock = buildStudentIdBlock(studentId);
   if (studentIdBlock) parts.push(studentIdBlock);
@@ -496,6 +512,10 @@ export interface QueryOptionsInputs {
   webAllowed: boolean;
   delayContext?: string;
   worldStateBlock: string;
+  // P6 observational-memory recall block, pre-fetched once per turn by the caller
+  // (recallForTurn). '' when GEORGE_RECALL_ENABLED is unset, so the OFF path stays
+  // byte-for-byte unchanged across all three branches below.
+  recallBlock?: string;
   // Already resolved by the caller. OFF path uses resolveModelForUser(userId,
   // ORCHESTRATOR_MODEL); trunk path uses resolveModelForUser(userId, TRUNK_MODEL).
   resolvedModel: string;
@@ -545,6 +565,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.webAllowed,
         inputs.delayContext,
         inputs.worldStateBlock,
+        inputs.recallBlock,
       ),
       model: inputs.trunkModel,
       ...providerOptionsForModel(inputs.trunkModel),
@@ -572,6 +593,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.webAllowed,
         inputs.delayContext,
         inputs.worldStateBlock,
+        inputs.recallBlock,
       ),
       model: inputs.resolvedModel,
       ...providerOptionsForModel(inputs.resolvedModel),
@@ -667,6 +689,15 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   const profileKey = await resolveProfileUserId(args.userId);
   const profile = args.profileStore && profileKey ? await args.profileStore.loadProfile(profileKey) : null;
 
+  // P6 observational-memory recall: fetch the per-turn "## THINGS YOU REMEMBER"
+  // block ONCE here, with the RAW channel handle + RAW user message (recallForTurn
+  // resolves the handle → uuid and embeds internally). Shared by the fast path AND
+  // every full-agent path below so recall reaches the model on all four routes.
+  // recallForTurn is internally gated by GEORGE_RECALL_ENABLED (returns '' when
+  // unset, before any resolve/embed/DB work) and NEVER throws — so OFF is byte-for-
+  // byte unchanged and a recall failure can never block a reply.
+  const recallBlock = await recallForTurn(args.userId, args.text);
+
   // Conversation history (used by both the fast path and the full agent).
   const historyPrefix = await buildHistoryPrefix(args.sessionStore, args.userId);
 
@@ -700,6 +731,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
         text: args.text,
         historyPrefix,
         profileBlock: buildUserProfileBlock(profile),
+        recallBlock,
       });
   if (fast !== null) {
     yield { type: 'result', result: fast };
@@ -744,7 +776,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // Web search is rationed per student/day; when over cap, it's omitted from the
   // turn's tool set and the guidance block is dropped (find_places stays free).
   const webAllowed = !isWebSearchOverCap(studentId);
-  const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext, worldStateBlock, webAllowed);
+  const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext, worldStateBlock, webAllowed, recallBlock);
   const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed, args.delayContext);
   const orchestratorTools = buildOrchestratorToolNames(webAllowed);
 
@@ -800,6 +832,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     webAllowed,
     delayContext: args.delayContext,
     worldStateBlock,
+    recallBlock,
     resolvedModel,
     trunkModel,
     systemPrompt,
