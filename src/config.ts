@@ -68,6 +68,13 @@ export const config = {
   imessage: {
     enabled: process.env.IMESSAGE_ENABLED === 'true',
   },
+  shippingNotifier: {
+    // Opt-IN kill switch. The parcel producer has enqueued in prod since
+    // 2026-06-06, so an ungated boot would blast the backlog. Default off; set
+    // SHIPPING_NOTIFIER_ENABLED=true to start delivering (queue-health check +
+    // dry-run first).
+    enabled: process.env.SHIPPING_NOTIFIER_ENABLED === 'true',
+  },
   // When set on a bridge-mode deployment (e.g. Mac mini), the iMessage adapter
   // forwards new messages to this URL instead of calling processMessage locally.
   // Used by the Mac mini bridge to reach the Cloudflare Container backend.
