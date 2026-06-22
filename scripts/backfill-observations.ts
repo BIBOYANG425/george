@@ -86,7 +86,8 @@ export interface BackfillResult {
 // no LLM, no Supabase.
 export interface BackfillDeps {
   resolveUser: (handle: string) => Promise<string | null>;
-  loadMessages: (userId: string, limit: number) => Promise<MessageRow[]>;
+  // `handle` is the raw channel handle (messages.user_id), NOT the resolved uuid.
+  loadMessages: (handle: string, limit: number) => Promise<MessageRow[]>;
   extract: (userText: string, assistantText: string) => Promise<{
     observations: Array<{ content?: string; salience?: number; kind?: string }>;
   }>;
@@ -133,7 +134,10 @@ export async function backfillForUser(
     return { resolved: false, userId: null, scanned: 0, extracted: 0, inserted: 0, samples: [] };
   }
 
-  const messages = await deps.loadMessages(userId, limit);
+  // messages.user_id stores the raw CHANNEL HANDLE (e.g. "+1747...", "web-anon"),
+  // NOT the resolved students.user_id uuid. So load history by the handle, but
+  // key the observations we write by the resolved uuid (userId) below.
+  const messages = await deps.loadMessages(handle, limit);
   const turns = pairTurns(messages);
 
   let scanned = 0;
@@ -235,11 +239,11 @@ async function main(): Promise<void> {
   // walks user→assistant in order.
   const deps: BackfillDeps = {
     resolveUser: (handle) => resolveProfileUserId(handle),
-    async loadMessages(userId, limit) {
+    async loadMessages(handle, limit) {
       const { data, error } = await supabase
         .from('messages')
         .select('role, content, created_at')
-        .eq('user_id', userId)
+        .eq('user_id', handle) // messages.user_id holds the channel handle, not the uuid
         .order('created_at', { ascending: false })
         .limit(limit);
       if (error) throw new Error(`loadMessages failed: ${error.message}`);
@@ -250,17 +254,22 @@ async function main(): Promise<void> {
     observationDB,
   };
 
-  // Resolve the target list. --all enumerates onboarded users straight from
-  // user_profiles (the uuid-keyed table that only onboarded students have a row
-  // in); each uuid passes through resolveProfileUserId unchanged.
+  // Resolve the target list. --all enumerates onboarded students' CHANNEL HANDLES
+  // (students.imessage_id where a user_id uuid is set) — because backfillForUser
+  // loads history by the handle (messages.user_id) and resolves it to the uuid for
+  // the observation write. Enumerating uuids here would find zero messages.
   let targets: string[];
   if (args.all) {
-    const { data, error } = await supabase.from('user_profiles').select('user_id');
+    const { data, error } = await supabase
+      .from('students')
+      .select('imessage_id')
+      .not('user_id', 'is', null)
+      .not('imessage_id', 'is', null);
     if (error) {
       console.error(`[backfill-observations] failed to list onboarded users: ${error.message}`);
       process.exit(1);
     }
-    targets = (data ?? []).map((r) => (r as { user_id: string }).user_id).filter(Boolean);
+    targets = (data ?? []).map((r) => (r as { imessage_id: string }).imessage_id).filter(Boolean);
     console.log(`[backfill-observations] --all: ${targets.length} onboarded users`);
   } else {
     targets = [args.user!];
