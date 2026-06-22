@@ -20,6 +20,7 @@ import {
   recordSpectrumError,
   recordSpectrumReconnecting,
 } from './spectrum-stats.js'
+import { startSpectrumWatchdog, stopSpectrumWatchdog } from './spectrum-watchdog.js'
 import { parseControlTokens, isNoReplyEnabled, getReadReceiptDelayMs } from './split-response.js'
 import { stageReadReceiptDelay, stageGenerate, stageSend } from './spectrum-stages.js'
 import { log } from '../observability/logger.js'
@@ -370,6 +371,12 @@ export async function startSpectrumAdapter(
   const handlers = buildSpectrumHandlers(deps)
   let backoffMs = 1_000
 
+  // Reliability watchdog: self-heal a silently-wedged Spectrum stream by
+  // restarting the process (Railway brings up a fresh connection). Default-OFF —
+  // startSpectrumWatchdog installs NO timer unless SPECTRUM_WATCHDOG_ENABLED is
+  // on, so the default path is byte-identical to before. See spectrum-watchdog.ts.
+  startSpectrumWatchdog()
+
   while (!spectrumStopping) {
     try {
       const client = await createSpectrumClient(creds)
@@ -403,6 +410,9 @@ export async function startSpectrumAdapter(
 // connection on Photon's side.
 export async function stopSpectrumAdapter(): Promise<void> {
   spectrumStopping = true
+  // Tear down the watchdog timer first so a clean shutdown never trips it (no-op
+  // when the watchdog was never started, i.e. the default-OFF path).
+  stopSpectrumWatchdog()
   const client = activeSpectrumClient
   activeSpectrumClient = null
   if (client) await client.close().catch(() => {})
