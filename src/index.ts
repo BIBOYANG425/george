@@ -22,6 +22,7 @@ import cron from 'node-cron'
 import { config, loadTransportConfig } from './config.js'
 import { createWeChatRouter } from './adapters/wechat.js'
 import { getSpectrumHealth } from './adapters/spectrum-stats.js'
+import { isWedged, loadWatchdogConfig } from './adapters/spectrum-watchdog.js'
 import { startIMessageAdapter, stopIMessageAdapter } from './adapters/imessage.js'
 import { runOrchestrator } from './agent/orchestrator.js'
 import { createSupabaseSessionStore } from './agent/session-store.js'
@@ -114,6 +115,16 @@ app.use(express.json())
 // ROUTES
 // ==========================================
 
+// Spectrum health snapshot for /health, augmented with the honest `wedged`
+// degraded boolean (see spectrum-watchdog.isWedged). Additive over the raw
+// spectrum-stats snapshot; the raw fields are unchanged.
+function spectrumHealthSnapshot() {
+  const health = getSpectrumHealth()
+  const cfg = loadWatchdogConfig()
+  const wedged = isWedged(health, Date.now(), { failSeconds: cfg.failSeconds, silentSeconds: cfg.silentSeconds })
+  return { ...health, wedged }
+}
+
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -132,7 +143,12 @@ app.get('/health', (_req, res) => {
     // unrecovered error shows as state:'error'/'reconnecting' with lastError(At);
     // `staleInboundSeconds` is an advisory threshold the dashboard MAY surface.
     // See src/adapters/spectrum-stats.ts header for the library-liveness blocker.
-    ...(process.env.TRANSPORT === 'spectrum' ? { spectrum: getSpectrumHealth() } : {}),
+    // `spectrum.wedged` is the HONEST degraded signal: true only when our own
+    // reconnect loop has been failing (state error/reconnecting) continuously
+    // past the watchdog's fail threshold with no recovery — NOT on a quiet night
+    // (state stays 'connected' → wedged stays false). Reported regardless of
+    // whether the watchdog is enabled, so /health is honest even before cutover.
+    ...(process.env.TRANSPORT === 'spectrum' ? { spectrum: spectrumHealthSnapshot() } : {}),
   })
 })
 
