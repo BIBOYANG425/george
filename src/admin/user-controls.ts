@@ -43,12 +43,14 @@ function storePath(): string {
 }
 
 export interface UserControls {
-  modelOverride: string | null; // [main tier] the LIVE field today; PR-2 migrates this to mainModel
-  // PR-1 dormant fields — STORED from the dashboard but NOT read at runtime yet.
-  // PR-2 repoints resolveModelForUser to mainModel and wires emotionalModel into
-  // the fast path (shipped together with the sub-agent collapse).
-  mainModel: string | null; // [main tier] orchestrator + sub-agents — dormant in PR-1
-  emotionalModel: string | null; // [emotional tier] fast-path quick reply — dormant in PR-1
+  // [MAIN tier] the per-user model for the orchestrator + sub-agents. Named
+  // modelOverride for historical reasons (it predates the two-tier split); it IS
+  // the main-tier field — read by resolveModelForUser/getMainModelOverride and
+  // collapsed onto every sub-agent (see applyMainModelCollapse).
+  modelOverride: string | null;
+  // [EMOTIONAL tier] the per-user model for the fast-path quick reply. Read by
+  // resolveEmotionalModelForUser, routed by id-prefix in fastReply.
+  emotionalModel: string | null;
   dailyMessageLimit: number | null; // null = unlimited
   blocked: boolean;
   // Optional custom message shown to the user when they are blocked or hit the
@@ -62,7 +64,6 @@ export interface UserControls {
 
 const DEFAULTS: UserControls = {
   modelOverride: null,
-  mainModel: null,
   emotionalModel: null,
   dailyMessageLimit: null,
   blocked: false,
@@ -123,7 +124,7 @@ export function listUserControls(): Store {
 
 export function setUserControls(
   userId: string,
-  patch: Partial<Pick<UserControls, 'modelOverride' | 'mainModel' | 'emotionalModel' | 'dailyMessageLimit' | 'blocked' | 'feedbackMessage' | 'note'>>,
+  patch: Partial<Pick<UserControls, 'modelOverride' | 'emotionalModel' | 'dailyMessageLimit' | 'blocked' | 'feedbackMessage' | 'note'>>,
   updatedBy = 'admin',
 ): UserControls {
   const store = { ...readStore() };
@@ -131,7 +132,6 @@ export function setUserControls(
   const next: UserControls = {
     ...prev,
     ...('modelOverride' in patch ? { modelOverride: normStr(patch.modelOverride) } : {}),
-    ...('mainModel' in patch ? { mainModel: normStr(patch.mainModel) } : {}),
     ...('emotionalModel' in patch ? { emotionalModel: normStr(patch.emotionalModel) } : {}),
     ...('dailyMessageLimit' in patch ? { dailyMessageLimit: normLimit(patch.dailyMessageLimit) } : {}),
     ...('blocked' in patch ? { blocked: !!patch.blocked } : {}),
@@ -181,15 +181,13 @@ export async function countTodayUserMessages(userId: string): Promise<number> {
 // rather than bricking the user.
 const MODEL_ID_RE = /^(claude-|deepseek|moonshot|kimi|gpt-|o[0-9]|gemini-|doubao|ark-|us\.anthropic\.|anthropic\.)/i;
 
-// The raw per-user MAIN model override, or null when none/invalid. Reads `mainModel`
-// first (the canonical field), falling back to the legacy `modelOverride` so existing
-// rows keep working without a migration script. An id that doesn't match a known
-// provider prefix is treated as no-override (ignored), not a brick. Callers that need
-// to know WHETHER an override exists (e.g. the sub-agent collapse) use this directly,
-// since resolveModelForUser collapses "no override" into the fallback string.
+// The raw per-user MAIN model override (the modelOverride field), or null when
+// none/invalid. An id that doesn't match a known provider prefix is treated as
+// no-override (ignored), not a brick. Callers that need to know WHETHER an override
+// exists (e.g. the sub-agent collapse) use this directly, since resolveModelForUser
+// collapses "no override" into the fallback string.
 export function getMainModelOverride(userId: string): string | null {
-  const c = getUserControls(userId);
-  const v = (c.mainModel ?? c.modelOverride)?.trim();
+  const v = getUserControls(userId).modelOverride?.trim();
   return v && MODEL_ID_RE.test(v) ? v : null;
 }
 
@@ -276,8 +274,12 @@ function normLimit(v: unknown): number | null {
 // (claude-haiku/sonnet/opus). Locally the DeepSeek `/anthropic` gateway auto-maps
 // them; in prod they hit real Claude. The SAME id is portable — intentional.
 export function getModelChoices(tier: Tier = 'main'): Array<{ id: string; label: string }> {
+  // The "inherit default" label is tier-specific: the MAIN tier inherits the global
+  // GEORGE_MODEL_FAST/SMART tiers, but the EMOTIONAL tier's real default is the fast
+  // path's own selection (Doubao-if-configured, else lightweight), NOT GEORGE_MODEL_FAST.
   const fast = process.env.GEORGE_MODEL_FAST || 'claude-sonnet-4-6';
-  const out: Array<{ id: string; label: string }> = [{ id: '', label: `默认 · 继承全局（FAST=${fast}）` }];
+  const defaultLabel = tier === 'emotional' ? '默认 · 继承全局（快速回复）' : `默认 · 继承全局（FAST=${fast}）`;
+  const out: Array<{ id: string; label: string }> = [{ id: '', label: defaultLabel }];
   const seen = new Set<string>(['']);
   for (const m of availableModels(tier)) {
     if (!seen.has(m.id)) { seen.add(m.id); out.push({ id: m.id, label: m.label }); }

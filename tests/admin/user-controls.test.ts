@@ -34,20 +34,18 @@ afterEach(() => {
   }
 })
 
-describe('UserControls — PR-1 two new dormant fields', () => {
-  it('DEFAULTS include mainModel + emotionalModel as null (no undefined leak)', () => {
+describe('UserControls — two model fields (modelOverride = main, emotionalModel)', () => {
+  it('DEFAULTS read both model fields as null (no undefined leak)', () => {
     const c = getUserControls('nobody')
     expect(c.modelOverride).toBeNull()
-    expect(c.mainModel).toBeNull()
     expect(c.emotionalModel).toBeNull()
   })
 
-  it('setUserControls persists mainModel + emotionalModel without touching modelOverride', () => {
-    setUserControls('u1', { mainModel: 'doubao-seed-1.6', emotionalModel: 'claude-sonnet-4-6' })
+  it('setUserControls persists modelOverride + emotionalModel', () => {
+    setUserControls('u1', { modelOverride: 'doubao-seed-1.6', emotionalModel: 'claude-sonnet-4-6' })
     const c = getUserControls('u1')
-    expect(c.mainModel).toBe('doubao-seed-1.6')
+    expect(c.modelOverride).toBe('doubao-seed-1.6')
     expect(c.emotionalModel).toBe('claude-sonnet-4-6')
-    expect(c.modelOverride).toBeNull()
   })
 
   it('partial patch leaves the other fields intact', () => {
@@ -58,56 +56,44 @@ describe('UserControls — PR-1 two new dormant fields', () => {
     expect(c.blocked).toBe(true)
   })
 
-  it('back-fills a legacy row (only modelOverride) — new fields read as null', () => {
+  it('back-fills a legacy row missing the emotional field', () => {
     fs.writeFileSync(
       storeFile,
       JSON.stringify({ legacy: { modelOverride: 'claude-sonnet-4-6', dailyMessageLimit: null, blocked: false } }),
     )
     const c = getUserControls('legacy')
     expect(c.modelOverride).toBe('claude-sonnet-4-6')
-    expect(c.mainModel).toBeNull()
     expect(c.emotionalModel).toBeNull()
   })
 })
 
-describe('resolveModelForUser / getMainModelOverride — PR-2 reads mainModel ?? modelOverride', () => {
-  it('reads mainModel (PR-2 repoint — the main override now drives the model)', () => {
-    setUserControls('u3', { mainModel: 'doubao-seed-1.6' })
+describe('resolveModelForUser / getMainModelOverride — main tier reads modelOverride', () => {
+  it('reads the modelOverride field as the main-tier override', () => {
+    setUserControls('u3', { modelOverride: 'doubao-seed-1.6' })
     expect(resolveModelForUser('u3', 'claude-sonnet-4-6')).toBe('doubao-seed-1.6')
     expect(getMainModelOverride('u3')).toBe('doubao-seed-1.6')
   })
 
-  it('mainModel takes precedence over a legacy modelOverride', () => {
-    setUserControls('u3b', { modelOverride: 'claude-sonnet-4-6', mainModel: 'doubao-seed-1.6' })
-    expect(resolveModelForUser('u3b', 'fallback-x')).toBe('doubao-seed-1.6')
-  })
-
-  it('falls back to the legacy modelOverride when mainModel is unset (back-compat, no migration)', () => {
-    setUserControls('u4', { modelOverride: 'doubao-seed-1.6' })
-    expect(resolveModelForUser('u4', 'claude-sonnet-4-6')).toBe('doubao-seed-1.6')
-    expect(getMainModelOverride('u4')).toBe('doubao-seed-1.6')
-  })
-
-  it('returns the fallback / null when neither field is set', () => {
+  it('returns the fallback / null when no override is set', () => {
     expect(resolveModelForUser('nobody2', 'claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
     expect(getMainModelOverride('nobody2')).toBeNull()
   })
 
   it('falls back when the override is an unrecognized id', () => {
-    setUserControls('u5', { mainModel: 'not-a-real-prefix' })
+    setUserControls('u5', { modelOverride: 'not-a-real-prefix' })
     expect(resolveModelForUser('u5', 'claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
     expect(getMainModelOverride('u5')).toBeNull()
   })
 })
 
-describe('resolveEmotionalModelForUser — PR-2 fast-path tier', () => {
+describe('resolveEmotionalModelForUser — fast-path tier', () => {
   it('returns the validated emotional override', () => {
     setUserControls('e1', { emotionalModel: 'doubao-seed-2-0-lite-260215' })
     expect(resolveEmotionalModelForUser('e1')).toBe('doubao-seed-2-0-lite-260215')
   })
 
   it('is independent of the main tier', () => {
-    setUserControls('e2', { mainModel: 'claude-sonnet-4-6', emotionalModel: 'gpt-4o-mini' })
+    setUserControls('e2', { modelOverride: 'claude-sonnet-4-6', emotionalModel: 'gpt-4o-mini' })
     expect(resolveEmotionalModelForUser('e2')).toBe('gpt-4o-mini')
     expect(resolveModelForUser('e2', 'fb')).toBe('claude-sonnet-4-6')
   })

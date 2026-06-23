@@ -31,7 +31,7 @@ import { renderActivityBlock } from './activity-state.js';
 import { getWorldStateStore, worldStateEnabled } from './world-state.js';
 import { fastReply } from './fast-path.js';
 import { detectUnsourcedClaim } from './fast-path-guard.js';
-import { checkUsageAllowed, resolveModelForUser, getMainModelOverride, resolveEmotionalModelForUser } from '../admin/user-controls.js';
+import { checkUsageAllowed, getMainModelOverride, resolveEmotionalModelForUser } from '../admin/user-controls.js';
 
 // Register george's 23 tools as an in-process SDK MCP server so the model can
 // actually CALL them. Without this, the orchestrator/sub-agents only had tool
@@ -553,8 +553,8 @@ export interface QueryOptionsInputs {
   // user_id (resolved internally → students.user_id). Only surfaces in the prompt
   // when GEORGE_RECALL_TOOL_ENABLED is on; '' / unset → byte-identical OFF.
   handle?: string | null;
-  // Already resolved by the caller. OFF path uses resolveModelForUser(userId,
-  // ORCHESTRATOR_MODEL); trunk path uses resolveModelForUser(userId, TRUNK_MODEL).
+  // Already resolved by the caller from getMainModelOverride: resolvedModel =
+  // override ?? ORCHESTRATOR_MODEL; trunkModel = override ?? TRUNK_MODEL (trunk path).
   resolvedModel: string;
   trunkModel: string;
   // The raw per-user MAIN-model override (getMainModelOverride), or null/undefined
@@ -890,12 +890,15 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // Per-user model control (set from the admin dashboard). Falls back to the
   // global ORCHESTRATOR_MODEL (OFF/single paths) or TRUNK_MODEL (trunk path) when
   // no override is configured for this user.
-  const resolvedModel = resolveModelForUser(args.userId, ORCHESTRATOR_MODEL);
-  const trunkModel = resolveModelForUser(args.userId, TRUNK_MODEL);
-  // Raw override (or null) so the sub-agent collapse fires ONLY for users who actually
-  // overrode their main model — default users keep the FAST/SMART tiering. See
-  // applyMainModelCollapse + the cross-provider provider-env hazard it closes.
+  // Resolve the per-user MAIN-model override ONCE (raw, or null when none). All three
+  // downstream values derive from it, so we don't re-read the control store per
+  // fallback. null → default users keep the FAST/SMART tiering and the sub-agent
+  // collapse is a no-op (see applyMainModelCollapse + the cross-provider env hazard it
+  // closes). trunkModel only matters in the trunk-hybrid branch, so its fallback is
+  // computed lazily there.
   const mainModelOverride = getMainModelOverride(args.userId);
+  const resolvedModel = mainModelOverride ?? ORCHESTRATOR_MODEL;
+  const trunkModel = trunkHybrid ? (mainModelOverride ?? TRUNK_MODEL) : TRUNK_MODEL;
   const queryOptions = buildQueryOptions({
     trunkHybrid,
     singleAgent,

@@ -325,7 +325,7 @@ export async function getUsers(sb: SupabaseClient, limit = 100) {
         firstSeen: a.firstSeen,
         heartbeat: hb ? { paused: !!hb.paused, lastAt: hb.last_heartbeat_at ?? null } : null,
         control: ctrl
-          ? { modelOverride: ctrl.modelOverride ?? null, mainModel: ctrl.mainModel ?? null, emotionalModel: ctrl.emotionalModel ?? null, dailyMessageLimit: ctrl.dailyMessageLimit ?? null, blocked: !!ctrl.blocked }
+          ? { modelOverride: ctrl.modelOverride ?? null, emotionalModel: ctrl.emotionalModel ?? null, dailyMessageLimit: ctrl.dailyMessageLimit ?? null, blocked: !!ctrl.blocked }
           : null,
       };
     });
