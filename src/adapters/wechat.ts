@@ -4,8 +4,11 @@
 // Non-null responses are split on blank-line boundaries into up to 4 chat messages with
 // INTER_MESSAGE_DELAY_MS between parts, matching WeChat's short-burst cadence.
 // Subscribe events trigger the BIA welcome copy.
+// Outbound custom/send treats a non-zero WeChat errcode (HTTP 200) as a failure
+// and throws, so callers (e.g. the shipping notifier) don't mark undelivered
+// messages as 'sent'.
 //
-// Header last reviewed: 2026-06-07
+// Header last reviewed: 2026-06-23
 
 import { Router } from 'express'
 import { config } from '../config.js'
@@ -13,6 +16,7 @@ import { parseIncomingXml, verifySignature, splitMessage } from './wechat-xml.js
 import { runOrchestrator } from '../agent/orchestrator.js'
 import { log } from '../observability/logger.js'
 import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS } from './split-response.js'
+import { assertWeChatSendOk } from './wechat-send-result.js'
 import type { IncomingMessage } from './types.js'
 
 const NON_TEXT_RESPONSES: Record<string, string> = {
@@ -57,10 +61,23 @@ async function sendCustomerServiceMessage(openId: string, text: string) {
       signal: AbortSignal.timeout(10_000),
     },
   )
-  if (!res.ok) {
-    const err = await res.text()
-    log('error', 'wechat_send_error', { openId, status: res.status, body: err })
+  // WeChat returns HTTP 200 with {errcode, errmsg} even on failure (see
+  // wechat-send-result.ts). Read the body once, then fail on a transport error
+  // OR a non-zero errcode so callers don't mark undelivered messages 'sent'.
+  const bodyText = await res.text()
+  let errcode: number | undefined
+  let errmsg: string | undefined
+  try {
+    const parsed = JSON.parse(bodyText) as { errcode?: number; errmsg?: string }
+    errcode = parsed.errcode
+    errmsg = parsed.errmsg
+  } catch {
+    // non-JSON body — leave errcode undefined; res.ok still gates transport
   }
+  if (!res.ok || (typeof errcode === 'number' && errcode !== 0)) {
+    log('error', 'wechat_send_error', { openId, status: res.status, errcode, errmsg })
+  }
+  assertWeChatSendOk({ ok: res.ok, status: res.status, errcode, errmsg })
 }
 
 async function sendResponse(openId: string, text: string) {
