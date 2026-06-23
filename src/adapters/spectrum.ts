@@ -30,8 +30,8 @@ import { captureFactsFromTurn } from '../memory/capture.js'
 import { TURN_EVALUATORS, dispatchEvaluators } from '../agent/evaluators/registry.js'
 import type { EvalContext } from '../agent/evaluators/types.js'
 import { supabase } from '../db/client.js'
-import { extractCodeFromStartMessage, runHandshake } from '../onboarding/handshake.js'
-import { lookupByCode, linkImessageHandle, lookupByImessageHandle, markGreeted } from '../onboarding/pending-users.js'
+import { extractCodeFromStartMessage, runHandshake, resendOnboardLink, shouldRelink } from '../onboarding/handshake.js'
+import { lookupByCode, linkImessageHandle, lookupByImessageHandle, markGreeted, markReminded } from '../onboarding/pending-users.js'
 import { checkInjection, INJECTION_REJECTIONS } from '../security/injection-filter.js'
 import { normalizeHandle } from '../services/phone-handle.js'
 import { tryHandleUserCommand } from '../agent/user-command-router.js'
@@ -234,6 +234,25 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
         const handled = await runHandshake({ code: byHandle.code, format: 'natural', ...common })
         if (handled) log('info', 'onboarding_handshake', { via: 'handle', code: byHandle.code })
         return handled
+      }
+
+      // Resilience branch: a pending-but-already-greeted user texts in. Either the
+      // greeting's link send (msg 3) was dropped by a flaky transport, or they got
+      // the link and never finished the form. Re-send JUST the link, throttled to
+      // at most one nudge per ONBOARDING_RELINK_HOURS so it never spams. byHandle
+      // is status='pending', so completed users are excluded automatically; the
+      // !greeted_at case above owns the full re-greet, so this only fires once
+      // greeted. A recently-reminded user falls through to the orchestrator.
+      if (byHandle && byHandle.greeted_at && shouldRelink(byHandle.reminded_at)) {
+        await resendOnboardLink({
+          code: byHandle.code,
+          imessageHandle: userId,
+          sendImessage: send,
+          markReminded: (c: string) => markReminded(supabase, c),
+          profileUrlBase: common.profileUrlBase,
+        })
+        log('info', 'onboarding_relink', { code: byHandle.code })
+        return true
       }
       return false
     },
