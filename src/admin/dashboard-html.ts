@@ -356,7 +356,7 @@ async function loadUsers(){
 }
 
 function shortModel(m){ return String(m).replace('claude-','').replace(/-\d{8}$/,'').replace('-4-','4.'); }
-function ctrlBadges(c){ if(!c) return ''; let s=''; if(c.blocked) s+=' <span class="badge block">🚫封禁</span>'; if(c.modelOverride) s+=' <span class="badge model">'+esc(shortModel(c.modelOverride))+'</span>'; if(c.dailyMessageLimit!=null) s+=' <span class="badge lim">限'+c.dailyMessageLimit+'/日</span>'; return s; }
+function ctrlBadges(c){ if(!c) return ''; let s=''; if(c.blocked) s+=' <span class="badge block">🚫封禁</span>'; const main=c.modelOverride||c.mainModel; if(main) s+=' <span class="badge model">主·'+esc(shortModel(main))+'</span>'; if(c.emotionalModel) s+=' <span class="badge model">情·'+esc(shortModel(c.emotionalModel))+'</span>'; if(c.dailyMessageLimit!=null) s+=' <span class="badge lim">限'+c.dailyMessageLimit+'/日</span>'; return s; }
 
 // ── USER drawer ──
 async function openUser(id){
@@ -400,28 +400,39 @@ function renderConvoMsg(m){
     +'<div class="spacer" style="flex:1"></div><span class="time">'+hm(m.createdAt)+'</span></div>'
     +'<div class="content">'+esc(m.content)+'</div></div></div>';
 }
-// Model options are fetched from /admin/api/models (derived from the deployment's
-// real GEORGE_MODEL_FAST/SMART), cached after first load. Falls back to just the
-// "default" option if the fetch fails.
-let MODELS=[['','默认（继承全局）']];
+// Model options are fetched from /admin/api/models per TIER (main / emotional),
+// each derived from the deployment's model catalog (env-filtered), cached after
+// first load. Falls back to just the "default" option if the fetch fails.
+let MODELS_MAIN=[['','默认（继承全局）']], MODELS_EMO=[['','默认（继承全局）']];
 let MODELS_LOADED=false;
 async function loadModels(){
   if(MODELS_LOADED) return;
   try{
-    const c=(await api('/models')).choices;
-    if(Array.isArray(c)&&c.length){ MODELS=c.map(x=>[x.id,x.label]); MODELS_LOADED=true; }
+    const [mm,me]=await Promise.all([api('/models?tier=main'),api('/models?tier=emotional')]);
+    if(Array.isArray(mm.choices)&&mm.choices.length) MODELS_MAIN=mm.choices.map(x=>[x.id,x.label]);
+    if(Array.isArray(me.choices)&&me.choices.length) MODELS_EMO=me.choices.map(x=>[x.id,x.label]);
+    MODELS_LOADED=true;
   }catch(e){ /* keep fallback */ }
+}
+function modelOptions(models,cur){
+  const known=models.some(m=>m[0]===cur);
+  return models.map(m=>'<option value="'+esc(m[0])+'"'+(m[0]===cur?' selected':'')+'>'+esc(m[1])+'</option>').join('')+'<option value="__custom"'+((!known&&cur)?' selected':'')+'>自定义…</option>';
 }
 function controlsPanel(d){
   const c=d.controls||{}, u=d.usage||{};
-  const cur=c.modelOverride||'';
-  const known=MODELS.some(m=>m[0]===cur);
-  const opts=MODELS.map(m=>'<option value="'+esc(m[0])+'"'+(m[0]===cur?' selected':'')+'>'+esc(m[1])+'</option>').join('')+'<option value="__custom"'+((!known&&cur)?' selected':'')+'>自定义…</option>';
+  // PR-1: 主模型 still lives on the existing modelOverride field (stays live, no
+  // regression); 情绪模型 writes the new emotionalModel field (stored but dormant
+  // until PR-2 wires it into the fast path).
+  const curMain=c.modelOverride||'';
+  const curEmo=c.emotionalModel||'';
+  const mKnown=MODELS_MAIN.some(m=>m[0]===curMain), eKnown=MODELS_EMO.some(m=>m[0]===curEmo);
   const usageStr = u.limit!=null ? (u.used+' / '+u.limit+' 条（今日）') : (u.used+' 条（今日）· 无限额');
-  return '<div class="panel"><h3>使用控制 <span class="tag">模型 / 每日限额 / 封禁 · 保存后实时生效</span></h3>'
+  return '<div class="panel"><h3>使用控制 <span class="tag">主/情绪模型 · 每日限额 · 封禁</span></h3>'
     +'<div class="ctrl-grid">'
-      +'<label>模型 Model<select id="ctlModel" onchange="onModelSel()">'+opts+'</select></label>'
-      +'<label id="ctlCustomWrap" class="'+((!known&&cur)?'':'hide')+'">自定义模型 ID<input id="ctlCustom" value="'+((!known&&cur)?esc(cur):'')+'" placeholder="e.g. deepseek-v4-pro"></label>'
+      +'<label>主模型 Main<span class="tag">orchestrator + 子agent</span><select id="ctlModel" onchange="onModelSel(\'ctlModel\',\'ctlCustomWrap\')">'+modelOptions(MODELS_MAIN,curMain)+'</select></label>'
+      +'<label id="ctlCustomWrap" class="'+((!mKnown&&curMain)?'':'hide')+'">自定义主模型 ID<input id="ctlCustom" value="'+((!mKnown&&curMain)?esc(curMain):'')+'" placeholder="e.g. deepseek-chat"></label>'
+      +'<label>情绪模型 Emotional<span class="tag">快速回复 · PR-2 才生效</span><select id="ctlEmo" onchange="onModelSel(\'ctlEmo\',\'ctlEmoCustomWrap\')">'+modelOptions(MODELS_EMO,curEmo)+'</select></label>'
+      +'<label id="ctlEmoCustomWrap" class="'+((!eKnown&&curEmo)?'':'hide')+'">自定义情绪模型 ID<input id="ctlEmoCustom" value="'+((!eKnown&&curEmo)?esc(curEmo):'')+'" placeholder="e.g. doubao-seed-2-0-lite-260215"></label>'
       +'<label>每日消息上限<input id="ctlLimit" type="number" min="0" value="'+(c.dailyMessageLimit!=null?c.dailyMessageLimit:'')+'" placeholder="留空 = 不限"></label>'
       +'<label class="ck"><input id="ctlBlocked" type="checkbox"'+(c.blocked?' checked':'')+'> 封禁此用户（直接拒绝，不调用模型）</label>'
       +'<label class="fb">封禁/限额时给用户看的提示语（留空用默认）<textarea id="ctlFeedback" rows="2" placeholder="例如：你的提问额度今天用完啦，明天再来找学长哈～">'+(c.feedbackMessage?esc(c.feedbackMessage):'')+'</textarea></label>'
@@ -430,12 +441,15 @@ function controlsPanel(d){
     +(c.updatedAt?'<div class="skel" style="font-size:11px;margin-top:8px">上次更新 '+hm(c.updatedAt)+' · by '+esc(c.updatedBy||'—')+'</div>':'')
     +'<div id="ctlMsg" class="err"></div></div>';
 }
-function onModelSel(){ const sel=document.getElementById('ctlModel'),w=document.getElementById('ctlCustomWrap'); if(w) w.classList.toggle('hide',sel.value!=='__custom'); }
+function onModelSel(selId,wrapId){ const sel=document.getElementById(selId),w=document.getElementById(wrapId); if(w) w.classList.toggle('hide',sel.value!=='__custom'); }
 async function saveControls(){
   if(!curUser) return;
   const sel=document.getElementById('ctlModel').value;
   const cust=document.getElementById('ctlCustom'); const custom=cust?cust.value.trim():'';
   const modelOverride = sel==='__custom' ? custom : sel;
+  const eSel=document.getElementById('ctlEmo').value;
+  const eCust=document.getElementById('ctlEmoCustom'); const eCustom=eCust?eCust.value.trim():'';
+  const emotionalModel = eSel==='__custom' ? eCustom : eSel;
   const limRaw=document.getElementById('ctlLimit').value.trim();
   const msg=document.getElementById('ctlMsg'); msg.style.color='';
   let dailyMessageLimit=null;
@@ -449,8 +463,8 @@ async function saveControls(){
   const fb=document.getElementById('ctlFeedback'); const feedbackMessage = fb ? fb.value.trim() : '';
   msg.textContent='保存中…';
   try{
-    await api('/user/'+encodeURIComponent(curUser)+'/controls',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({modelOverride,dailyMessageLimit,blocked,feedbackMessage})});
-    msg.style.color='var(--good)'; msg.textContent='已保存 ✓ 实时生效（后端下一条消息即按此执行）';
+    await api('/user/'+encodeURIComponent(curUser)+'/controls',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({modelOverride,emotionalModel,dailyMessageLimit,blocked,feedbackMessage})});
+    msg.style.color='var(--good)'; msg.textContent='已保存 ✓ 主模型实时生效；情绪模型已存（PR-2 接线后生效）';
     if(TAB==='users') loadUsers();
   }catch(e){ msg.style.color='var(--bad)'; msg.textContent='保存失败：'+e.message; }
 }

@@ -15,6 +15,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+// Dependency-free model catalog (only reads process.env). Safe to import here
+// without pulling in config.ts — keeps the standalone dashboard deployable with
+// only SUPABASE_* set (see the note above).
+import { availableModels, type Tier } from '../agent/model-catalog.js';
 
 // Lazily create our OWN service-role client from env instead of importing
 // ../db/client (which pulls in config.ts and would require ANTHROPIC_API_KEY).
@@ -29,10 +33,22 @@ function db(): SupabaseClient {
   return _sb;
 }
 
-const STORE_PATH = path.resolve(process.cwd(), 'data', 'user-controls.json');
+// The store path. Overridable via GEORGE_USER_CONTROLS_PATH so tests (and any
+// alternate deploy layout) can point at a scratch file instead of clobbering the
+// live data/user-controls.json. Unset in prod → identical path as before. Read at
+// call time so a test can set it after the module is imported.
+function storePath(): string {
+  const override = process.env.GEORGE_USER_CONTROLS_PATH;
+  return override ? path.resolve(override) : path.resolve(process.cwd(), 'data', 'user-controls.json');
+}
 
 export interface UserControls {
-  modelOverride: string | null; // null/empty = inherit global default
+  modelOverride: string | null; // [main tier] the LIVE field today; PR-2 migrates this to mainModel
+  // PR-1 dormant fields — STORED from the dashboard but NOT read at runtime yet.
+  // PR-2 repoints resolveModelForUser to mainModel and wires emotionalModel into
+  // the fast path (shipped together with the sub-agent collapse).
+  mainModel: string | null; // [main tier] orchestrator + sub-agents — dormant in PR-1
+  emotionalModel: string | null; // [emotional tier] fast-path quick reply — dormant in PR-1
   dailyMessageLimit: number | null; // null = unlimited
   blocked: boolean;
   // Optional custom message shown to the user when they are blocked or hit the
@@ -46,6 +62,8 @@ export interface UserControls {
 
 const DEFAULTS: UserControls = {
   modelOverride: null,
+  mainModel: null,
+  emotionalModel: null,
   dailyMessageLimit: null,
   blocked: false,
   feedbackMessage: null,
@@ -59,31 +77,35 @@ type Store = Record<string, UserControls>;
 // Short in-process cache so the orchestrator hot path doesn't re-read the file
 // every turn. Writes bust it in-process; cross-process (dashboard → server)
 // changes take effect within TTL.
-let _cache: { store: Store; at: number } | null = null;
+// Cache is keyed by path so a path switch (e.g. a test pointing at a scratch file)
+// never serves another path's store within the TTL.
+let _cache: { path: string; store: Store; at: number } | null = null;
 const TTL_MS = 3000;
 
 function readStore(): Store {
-  if (_cache && Date.now() - _cache.at < TTL_MS) return _cache.store;
+  const p = storePath();
+  if (_cache && _cache.path === p && Date.now() - _cache.at < TTL_MS) return _cache.store;
   let store: Store = {};
   try {
-    if (fs.existsSync(STORE_PATH)) {
-      store = JSON.parse(fs.readFileSync(STORE_PATH, 'utf-8')) as Store;
+    if (fs.existsSync(p)) {
+      store = JSON.parse(fs.readFileSync(p, 'utf-8')) as Store;
     }
   } catch (err) {
     console.error('[user-controls] read failed:', (err as Error).message);
     store = {};
   }
-  _cache = { store, at: Date.now() };
+  _cache = { path: p, store, at: Date.now() };
   return store;
 }
 
 function writeStore(store: Store): void {
+  const p = storePath();
   try {
-    fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true });
-    const tmp = STORE_PATH + '.tmp';
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const tmp = p + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(store, null, 2));
-    fs.renameSync(tmp, STORE_PATH); // atomic swap
-    _cache = { store, at: Date.now() };
+    fs.renameSync(tmp, p); // atomic swap
+    _cache = { path: p, store, at: Date.now() };
   } catch (err) {
     console.error('[user-controls] write failed:', (err as Error).message);
     throw err;
@@ -101,7 +123,7 @@ export function listUserControls(): Store {
 
 export function setUserControls(
   userId: string,
-  patch: Partial<Pick<UserControls, 'modelOverride' | 'dailyMessageLimit' | 'blocked' | 'feedbackMessage' | 'note'>>,
+  patch: Partial<Pick<UserControls, 'modelOverride' | 'mainModel' | 'emotionalModel' | 'dailyMessageLimit' | 'blocked' | 'feedbackMessage' | 'note'>>,
   updatedBy = 'admin',
 ): UserControls {
   const store = { ...readStore() };
@@ -109,6 +131,8 @@ export function setUserControls(
   const next: UserControls = {
     ...prev,
     ...('modelOverride' in patch ? { modelOverride: normStr(patch.modelOverride) } : {}),
+    ...('mainModel' in patch ? { mainModel: normStr(patch.mainModel) } : {}),
+    ...('emotionalModel' in patch ? { emotionalModel: normStr(patch.emotionalModel) } : {}),
     ...('dailyMessageLimit' in patch ? { dailyMessageLimit: normLimit(patch.dailyMessageLimit) } : {}),
     ...('blocked' in patch ? { blocked: !!patch.blocked } : {}),
     ...('feedbackMessage' in patch ? { feedbackMessage: normStr(patch.feedbackMessage) } : {}),
@@ -223,34 +247,23 @@ function normLimit(v: unknown): number | null {
   return Math.floor(n);
 }
 
-// The model choices the dashboard offers — DERIVED from the actual runtime
-// config (GEORGE_MODEL_FAST/SMART + the CLI default), not a hardcoded guess, so
-// the dropdown always reflects models this deployment can really run. Admin can
-// still type a custom id (validated by resolveModelForUser's prefix check).
+// The model choices the dashboard offers for a TIER, derived from the model
+// catalog (model-catalog.ts) filtered by what this deployment's env actually has
+// (availableModels). Setting a provider key makes its models appear here with zero
+// code change. Always leads with the "inherit global default" option; the dashboard
+// adds a "custom id" escape hatch client-side (a hand-typed id is validated by
+// resolveModelForUser's MODEL_ID_RE prefix check at runtime). Defaults to the
+// 'main' tier for backward compatibility with the single-dropdown caller.
 //
 // Note on this project's convention: model ids are written as Claude ids
-// (claude-haiku/sonnet/opus). Locally the DeepSeek `/anthropic` gateway
-// auto-maps them to deepseek tiers (haiku/sonnet→deepseek-v4-flash,
-// opus→deepseek-v4-pro); in prod they hit real Claude. So the SAME id is
-// portable across both — that's intentional, not a misconfig.
-export function getModelChoices(): Array<{ id: string; label: string }> {
+// (claude-haiku/sonnet/opus). Locally the DeepSeek `/anthropic` gateway auto-maps
+// them; in prod they hit real Claude. The SAME id is portable — intentional.
+export function getModelChoices(tier: Tier = 'main'): Array<{ id: string; label: string }> {
   const fast = process.env.GEORGE_MODEL_FAST || 'claude-sonnet-4-6';
-  const smart = process.env.GEORGE_MODEL_SMART || 'claude-sonnet-4-6';
-  const cli = process.env.ANTHROPIC_MODEL;
-  const viaDeepSeek = (process.env.ANTHROPIC_BASE_URL || '').includes('deepseek');
-  const map = viaDeepSeek ? '（本地经 DeepSeek 网关映射）' : '';
   const out: Array<{ id: string; label: string }> = [{ id: '', label: `默认 · 继承全局（FAST=${fast}）` }];
   const seen = new Set<string>(['']);
-  const add = (id: string | undefined, label: string) => {
-    if (id && !seen.has(id)) { seen.add(id); out.push({ id, label }); }
-  };
-  add(fast, `FAST 档：${fast}${map}`);
-  add(smart, `SMART 档：${smart}${map}`);
-  add(cli, `CLI 默认：${cli}`);
-  // Doubao (火山方舟 Ark) — offered when DOUBAO_API_KEY + DOUBAO_MODEL are set,
-  // so an admin can A/B a single user onto Doubao from the dashboard. Routed to
-  // Ark's Anthropic endpoint per-call (see model-providers.ts).
-  const doubao = process.env.DOUBAO_MODEL;
-  if (process.env.DOUBAO_API_KEY && doubao) add(doubao, `Doubao 豆包：${doubao}（火山方舟）`);
+  for (const m of availableModels(tier)) {
+    if (!seen.has(m.id)) { seen.add(m.id); out.push({ id: m.id, label: m.label }); }
+  }
   return out;
 }
