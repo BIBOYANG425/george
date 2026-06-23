@@ -1,0 +1,68 @@
+[
+  {
+    "name": "already +86 E.164 passes through",
+    "input": "+8615522499291",
+    "opts": null,
+    "expected": { "ok": true, "e164": "+8615522499291" }
+  },
+  {
+    "name": "the +86/+853 bug: full +86 number typed, dropdown said Macau (+853) -> trust the number, never the blind +853 concat",
+    "input": "8615522499291",
+    "opts": { "dialCode": "+853" },
+    "expected": { "ok": true, "e164": "+8615522499291" }
+  },
+  {
+    "name": "bare CN mobile (no country code) with matching +86 dial code -> prepend +86",
+    "input": "13812345678",
+    "opts": { "dialCode": "+86" },
+    "expected": { "ok": true, "e164": "+8613812345678" }
+  },
+  {
+    "name": "normal US national number with +1 dial code -> prepend +1",
+    "input": "(213) 555-0142",
+    "opts": { "dialCode": "+1" },
+    "expected": { "ok": true, "e164": "+12135550142" }
+  },
+  {
+    "name": "already +1 E.164 passes through (no opts)",
+    "input": "+12135550142",
+    "opts": null,
+    "expected": { "ok": true, "e164": "+12135550142" }
+  },
+  {
+    "name": "already +1 E.164 is idempotent even with a +1 dial code supplied",
+    "input": "+12135550142",
+    "opts": { "dialCode": "+1" },
+    "expected": { "ok": true, "e164": "+12135550142" }
+  },
+  {
+    "name": "leading 00 international prefix becomes + (China)",
+    "input": "008615522499291",
+    "opts": null,
+    "expected": { "ok": true, "e164": "+8615522499291" }
+  },
+  {
+    "name": "non-numeric junk -> ok:false",
+    "input": "hello",
+    "opts": null,
+    "expected": { "ok": false }
+  },
+  {
+    "name": "bare + with one digit, not a real number -> ok:false",
+    "input": "+1",
+    "opts": null,
+    "expected": { "ok": false }
+  },
+  {
+    "name": "two digits, too short to be a number -> ok:false",
+    "input": "12",
+    "opts": null,
+    "expected": { "ok": false }
+  },
+  {
+    "name": "empty string -> ok:false",
+    "input": "",
+    "opts": null,
+    "expected": { "ok": false }
+  }
+]

@@ -102,15 +102,9 @@ export async function runHandshake(opts: HandshakeOptions): Promise<boolean> {
     return true;
   }
 
+  // Link the handle up front: binding identity is correct even if the greeting
+  // send below fails, and it's a cheap idempotent write.
   await opts.linkImessageHandle(opts.code, opts.imessageHandle);
-  // Stamp greeted BEFORE sending the (multi-second) greeting, not after. The
-  // by-handle path keys off greeted_at to decide whether to greet; the welcome
-  // is 3 sequential sends that take several seconds, far longer than the loop's
-  // ~1.5s debounce. Marking up front closes the race where a follow-up arriving
-  // mid-greeting ("im hungry") re-triggers the whole welcome. Trade-off: a send
-  // that fails partway still counts as greeted — strictly better than spamming
-  // the carousel. Falls through to the orchestrator on the next message.
-  if (opts.markGreeted) await opts.markGreeted(opts.code);
 
   // Message 1: greeting + vcf contact card (single iMessage with text + file)
   await opts.sendImessage({
@@ -118,6 +112,22 @@ export async function runHandshake(opts: HandshakeOptions): Promise<boolean> {
     text: "yo, welcome. I'm george. save my contact so I stay in your messages.",
     filePaths: [CONTACT_CARD_PATH],
   });
+
+  // Stamp greeted AFTER the first send succeeds, not before. The by-handle path
+  // keys off greeted_at to decide whether to greet. Two failure modes to balance:
+  //   - Mark up front: a flaky transport that drops the very first send still
+  //     leaves the user marked greeted but with nothing delivered, and the
+  //     by-handle re-greet path (`!greeted_at`) never fires again — the user is
+  //     silently stuck, never onboarded. This is the prod bug we're fixing.
+  //   - Mark after the WHOLE welcome: a follow-up arriving mid-greeting (the
+  //     slow part is sends 2-3) would re-trigger the whole welcome.
+  // Marking here splits the difference: a first-send failure throws before this
+  // line, so the user is NOT marked greeted and gets re-greeted next time; once
+  // the greeting has actually landed we mark immediately, so the slow carousel +
+  // link sends (2-3) can't be raced into a re-greet. If sends 2-3 fail the user
+  // stays greeted — acceptable, they got the real greeting, and re-greeting would
+  // just re-send message 1 they already have.
+  if (opts.markGreeted) await opts.markGreeted(opts.code);
 
   // Message 2: intro + 5-image carousel (single iMessage with text + grid).
   // Placeholder/missing images are filtered out; zero real images → text-only.
@@ -134,5 +144,47 @@ export async function runHandshake(opts: HandshakeOptions): Promise<boolean> {
     to: opts.imessageHandle,
     text: `ready to set up? takes 2 min. ${opts.profileUrlBase}?code=${opts.code}`,
   });
+  return true;
+}
+
+// Default throttle window for the link-resend nudge: at most one resend per 24h
+// per pending user until they complete the profile form.
+const DEFAULT_RELINK_HOURS = 24;
+
+// Throttle gate for resendOnboardLink. Returns true when a pending-but-greeted
+// user is due for another link nudge: never reminded (null) OR last reminded
+// longer ago than ONBOARDING_RELINK_HOURS (default 24). Pure + exported so the
+// spectrum branch ordering stays unit-testable without a live clock or DB.
+export function shouldRelink(remindedAt: string | null, now: Date = new Date()): boolean {
+  if (!remindedAt) return true;
+  const hours = Number(process.env.ONBOARDING_RELINK_HOURS) || DEFAULT_RELINK_HOURS;
+  const last = new Date(remindedAt).getTime();
+  return now.getTime() - last >= hours * 60 * 60 * 1000;
+}
+
+// Subset of HandshakeOptions for the link-only resend path. Carries just what a
+// single link send + reminded stamp needs.
+export interface ResendOnboardLinkOptions {
+  code: string;
+  imessageHandle: string;
+  sendImessage: (msg: OutgoingMessage) => Promise<void>;
+  markReminded: (code: string) => Promise<void>;
+  profileUrlBase: string;
+}
+
+// Self-heal for pending-not-completed users: the greeting landed (greeted_at set)
+// but they either never received the link (sends 2-3 dropped) or got it and never
+// finished the form. Re-send ONLY the link with a short nudge.
+//
+// markReminded runs AFTER the send succeeds, mirroring the greeted-after-send
+// guarantee in runHandshake: a failed resend throws before stamping reminded_at,
+// so the user is NOT throttled out and gets re-nudged on their next message.
+// Returns true (it handled the message).
+export async function resendOnboardLink(opts: ResendOnboardLinkOptions): Promise<boolean> {
+  await opts.sendImessage({
+    to: opts.imessageHandle,
+    text: `looks like you didn't finish setting up yet, here's your link again: ${opts.profileUrlBase}?code=${opts.code}`,
+  });
+  await opts.markReminded(opts.code);
   return true;
 }

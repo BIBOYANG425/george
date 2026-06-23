@@ -74,6 +74,18 @@ export async function markGreeted(supabase: SupabaseClient, code: string): Promi
   if (error) throw new Error(`markGreeted failed: ${error.message}`);
 }
 
+// Stamp reminded_at for a code after a link-resend nudge lands. The relink path
+// (spectrum tryHandshake) throttles off this column, so it must only be set
+// after the resend send actually succeeds — a failed resend leaves it null/stale
+// so the user gets re-nudged on their next message instead of being throttled out.
+export async function markReminded(supabase: SupabaseClient, code: string): Promise<void> {
+  const { error } = await supabase
+    .from('pending_users')
+    .update({ reminded_at: new Date().toISOString() })
+    .eq('code', code);
+  if (error) throw new Error(`markReminded failed: ${error.message}`);
+}
+
 // Only purges 'pending' rows. Completed rows must survive so a returning user
 // who re-sends their welcome code gets "you're already in" instead of
 // "couldn't find that code".
