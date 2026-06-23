@@ -1,44 +1,48 @@
 // src/services/phone-handle.ts
-// Normalizes an iMessage sender handle so Spectrum's E.164 phone matches the
-// format stored in students.imessage_id. Emails are lowercased/trimmed. Phones
-// are reduced to E.164 (+<country><number>): any explicit country code (a
-// leading "+" or the "00" international dialing prefix) is preserved as-is, so
-// +86 (China), +44, +33, etc. survive intact. Bare North-American numbers (10
-// digits, or 11 starting with 1) default to +1. Pure, no I/O.
+// Normalizes an iMessage sender handle so a phone matches the canonical E.164
+// format stored in students.imessage_id. This delegates phone normalization to
+// the SINGLE shared canonicalizer (phone-canonical.ts, spec §3) so george's
+// handle path and bia-roommate's signup path produce identical E.164 strings and
+// can't drift (the drift caused the +86 -> +853 identity fork in prod).
 //
-// Known limit: a bare 11-digit number starting with 1 is ambiguous between a US
-// "1 + area code" and a Chinese mobile (1[3-9]xxxxxxxxx) when no country code is
-// present. We default to +1 because iMessage/Spectrum always delivers Chinese
-// numbers as +86 E.164, so the country code is present on the real inbound path.
+// Pass-through rule: only phone-shaped handles (a leading "+" or all/mostly
+// digits) are canonicalized. Everything else — emails, "web-anon",
+// "relay-smoke", a WeChat openid, any non-numeric handle — is returned
+// UNCHANGED. If a phone-shaped handle fails to canonicalize (ok:false), it is
+// also returned unchanged rather than dropped, so no inbound handle is ever lost.
+// Pure, no I/O.
 //
-// Header last reviewed: 2026-06-18
+// Header last reviewed: 2026-06-23
+
+import { canonicalizePhone } from './phone-canonical.js'
 
 export function normalizeHandle(raw: string): string {
   const s = (raw ?? '').trim()
   if (s === '') return ''
   if (s.includes('@')) return s.toLowerCase()
 
-  // Keep only digits and a leading "+".
-  let digits = s.replace(/[^\d+]/g, '')
+  // Phone-shaped? A leading "+", or a value that is all/mostly digits (allowing
+  // the usual phone punctuation: spaces, dashes, parens, dots). Anything else
+  // (e.g. a WeChat openid, "web-anon", "relay-smoke") is not a phone and passes
+  // through untouched.
+  if (!looksLikePhone(s)) return raw
 
-  // "00" is the international dialing prefix, equivalent to a leading "+"
-  // (e.g. 008613812345678 -> +8613812345678). Normalize it so the country code
-  // is not mistaken for part of the subscriber number.
-  if (!digits.startsWith('+') && digits.startsWith('00')) {
-    digits = `+${digits.slice(2)}`
-  }
+  // george has no country dropdown, so a bare national number with no leading
+  // "+" is interpreted as US/North-American (the prior behavior and the dominant
+  // inbound for this product). An explicit "+" or a full foreign number's own
+  // country code still wins inside canonicalizePhone, so this only affects
+  // genuinely bare local numbers. Production handles arrive as E.164 anyway.
+  const result = canonicalizePhone(s, { defaultCountry: 'US' })
+  if (result.ok) return result.e164
 
-  // Any explicit country code is trusted as-is. This is the common case: every
-  // Spectrum/iMessage handle arrives as E.164, so +8613..., +15551234567,
-  // +447911123456 all pass through unchanged.
-  if (digits.startsWith('+')) return digits
+  // Phone-shaped but not canonicalizable: pass through unchanged, never drop.
+  return raw
+}
 
-  // Bare numbers with no country code. CN mobiles are 11 digits, so a 10-digit
-  // bare number is unambiguously North American.
-  if (digits.length === 10) return `+1${digits}`
-  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`
-
-  // Otherwise assume the leading digits already include a country code
-  // (8613812345678 -> +8613812345678, 447911123456 -> +447911123456).
-  return `+${digits}`
+// A handle is phone-shaped if it starts with "+", or if — after removing common
+// phone punctuation — it is non-empty and entirely digits.
+function looksLikePhone(s: string): boolean {
+  if (s.startsWith('+')) return true
+  const digitsOnly = s.replace(/[\s()\-.]/g, '')
+  return digitsOnly.length > 0 && /^\d+$/.test(digitsOnly)
 }

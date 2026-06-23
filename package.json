@@ -32,6 +32,7 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "js-yaml": "^4.1.1",
+    "libphonenumber-js": "^1.13.7",
     "lru-cache": "^11.3.5",
     "node-cron": "^4.2.1",
     "spectrum-ts": "^3.1.0",
