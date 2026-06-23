@@ -9,19 +9,19 @@ export interface ShowcaseItem {
 export const SHOWCASE: readonly ShowcaseItem[] = [
   {
     path: 'assets/onboarding/showcase-1.png',
-    caption: 'tap me to find your hike crew, study group, or hotpot squad',
+    caption: 'ask me anything usc. academics, dps zones, iya, the works',
   },
   {
     path: 'assets/onboarding/showcase-2.png',
-    caption: 'weekly briefs of bia and usc events, in your inbox',
+    caption: 'tap me to find your hike crew, study group, or hotpot squad',
   },
   {
     path: 'assets/onboarding/showcase-3.png',
-    caption: "tell me what you're looking for, I find the right people",
+    caption: 'weekly briefs of bia and usc events, in your inbox',
   },
   {
     path: 'assets/onboarding/showcase-4.png',
-    caption: 'ask me anything usc. academics, dps zones, iya, the works',
+    caption: "tell me what you're looking for, I find the right people",
   },
   {
     path: 'assets/onboarding/showcase-5.png',
