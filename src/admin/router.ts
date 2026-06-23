@@ -83,18 +83,27 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
   api.post('/user/:id/resume', wrap((req) => setHeartbeatPaused(sb, String(req.params.id), false)));
 
   // Per-user admin controls: model override + daily message limit + hard block.
-  api.get('/models', wrap(async () => ({ choices: getModelChoices() })));
+  // ?tier=main|emotional selects which tier's catalog to return (defaults to main
+  // for the legacy single-dropdown caller).
+  api.get('/models', wrap(async (req) => {
+    const tier = req.query.tier === 'emotional' ? 'emotional' : 'main';
+    return { choices: getModelChoices(tier) };
+  }));
   api.get('/user/:id/controls', wrap(async (req) => {
     const id = String(req.params.id);
     return { controls: getUserControls(id), usage: await getUsageSnapshot(id) };
   }));
   api.post('/user/:id/controls', wrap(async (req) => {
     const id = String(req.params.id);
-    const b = (req.body ?? {}) as { modelOverride?: string; dailyMessageLimit?: unknown; blocked?: boolean; feedbackMessage?: string; note?: string };
+    const b = (req.body ?? {}) as { modelOverride?: string; mainModel?: string; emotionalModel?: string; dailyMessageLimit?: unknown; blocked?: boolean; feedbackMessage?: string; note?: string };
     const next = setUserControls(
       id,
       {
+        // modelOverride stays the live MAIN field in PR-1; mainModel/emotionalModel
+        // are stored but dormant until PR-2 wires them.
         modelOverride: b.modelOverride,
+        mainModel: b.mainModel,
+        emotionalModel: b.emotionalModel,
         dailyMessageLimit: b.dailyMessageLimit as number | null | undefined,
         blocked: b.blocked,
         feedbackMessage: b.feedbackMessage,
