@@ -95,14 +95,12 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
   }));
   api.post('/user/:id/controls', wrap(async (req) => {
     const id = String(req.params.id);
-    const b = (req.body ?? {}) as { modelOverride?: string; mainModel?: string; emotionalModel?: string; dailyMessageLimit?: unknown; blocked?: boolean; feedbackMessage?: string; note?: string };
+    const b = (req.body ?? {}) as { modelOverride?: string; emotionalModel?: string; dailyMessageLimit?: unknown; blocked?: boolean; feedbackMessage?: string; note?: string };
     const next = setUserControls(
       id,
       {
-        // modelOverride stays the live MAIN field in PR-1; mainModel/emotionalModel
-        // are stored but dormant until PR-2 wires them.
+        // modelOverride = MAIN tier (orchestrator + sub-agents); emotionalModel = fast path.
         modelOverride: b.modelOverride,
-        mainModel: b.mainModel,
         emotionalModel: b.emotionalModel,
         dailyMessageLimit: b.dailyMessageLimit as number | null | undefined,
         blocked: b.blocked,

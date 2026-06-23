@@ -3,7 +3,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { getUserControls, setUserControls, resolveModelForUser, getModelChoices } from '../../src/admin/user-controls'
+import {
+  getUserControls,
+  setUserControls,
+  resolveModelForUser,
+  getMainModelOverride,
+  resolveEmotionalModelForUser,
+  getModelChoices,
+} from '../../src/admin/user-controls'
 
 // Point the file store at a throwaway path so tests NEVER touch the live
 // data/user-controls.json. The module reads GEORGE_USER_CONTROLS_PATH at call
@@ -27,20 +34,18 @@ afterEach(() => {
   }
 })
 
-describe('UserControls — PR-1 two new dormant fields', () => {
-  it('DEFAULTS include mainModel + emotionalModel as null (no undefined leak)', () => {
+describe('UserControls — two model fields (modelOverride = main, emotionalModel)', () => {
+  it('DEFAULTS read both model fields as null (no undefined leak)', () => {
     const c = getUserControls('nobody')
     expect(c.modelOverride).toBeNull()
-    expect(c.mainModel).toBeNull()
     expect(c.emotionalModel).toBeNull()
   })
 
-  it('setUserControls persists mainModel + emotionalModel without touching modelOverride', () => {
-    setUserControls('u1', { mainModel: 'doubao-seed-1.6', emotionalModel: 'claude-sonnet-4-6' })
+  it('setUserControls persists modelOverride + emotionalModel', () => {
+    setUserControls('u1', { modelOverride: 'doubao-seed-1.6', emotionalModel: 'claude-sonnet-4-6' })
     const c = getUserControls('u1')
-    expect(c.mainModel).toBe('doubao-seed-1.6')
+    expect(c.modelOverride).toBe('doubao-seed-1.6')
     expect(c.emotionalModel).toBe('claude-sonnet-4-6')
-    expect(c.modelOverride).toBeNull()
   })
 
   it('partial patch leaves the other fields intact', () => {
@@ -51,32 +56,52 @@ describe('UserControls — PR-1 two new dormant fields', () => {
     expect(c.blocked).toBe(true)
   })
 
-  it('back-fills a legacy row (only modelOverride) — new fields read as null', () => {
+  it('back-fills a legacy row missing the emotional field', () => {
     fs.writeFileSync(
       storeFile,
       JSON.stringify({ legacy: { modelOverride: 'claude-sonnet-4-6', dailyMessageLimit: null, blocked: false } }),
     )
     const c = getUserControls('legacy')
     expect(c.modelOverride).toBe('claude-sonnet-4-6')
-    expect(c.mainModel).toBeNull()
     expect(c.emotionalModel).toBeNull()
   })
 })
 
-describe('resolveModelForUser — PR-1 inertness boundary', () => {
-  it('IGNORES mainModel (still reads only modelOverride) — proves PR-1 changes no routing', () => {
-    setUserControls('u3', { mainModel: 'doubao-seed-1.6' })
-    expect(resolveModelForUser('u3', 'claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
+describe('resolveModelForUser / getMainModelOverride — main tier reads modelOverride', () => {
+  it('reads the modelOverride field as the main-tier override', () => {
+    setUserControls('u3', { modelOverride: 'doubao-seed-1.6' })
+    expect(resolveModelForUser('u3', 'claude-sonnet-4-6')).toBe('doubao-seed-1.6')
+    expect(getMainModelOverride('u3')).toBe('doubao-seed-1.6')
   })
 
-  it('still honors the live modelOverride field', () => {
-    setUserControls('u4', { modelOverride: 'doubao-seed-1.6' })
-    expect(resolveModelForUser('u4', 'claude-sonnet-4-6')).toBe('doubao-seed-1.6')
+  it('returns the fallback / null when no override is set', () => {
+    expect(resolveModelForUser('nobody2', 'claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
+    expect(getMainModelOverride('nobody2')).toBeNull()
   })
 
-  it('falls back when modelOverride is an unrecognized id', () => {
+  it('falls back when the override is an unrecognized id', () => {
     setUserControls('u5', { modelOverride: 'not-a-real-prefix' })
     expect(resolveModelForUser('u5', 'claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
+    expect(getMainModelOverride('u5')).toBeNull()
+  })
+})
+
+describe('resolveEmotionalModelForUser — fast-path tier', () => {
+  it('returns the validated emotional override', () => {
+    setUserControls('e1', { emotionalModel: 'doubao-seed-2-0-lite-260215' })
+    expect(resolveEmotionalModelForUser('e1')).toBe('doubao-seed-2-0-lite-260215')
+  })
+
+  it('is independent of the main tier', () => {
+    setUserControls('e2', { modelOverride: 'claude-sonnet-4-6', emotionalModel: 'gpt-4o-mini' })
+    expect(resolveEmotionalModelForUser('e2')).toBe('gpt-4o-mini')
+    expect(resolveModelForUser('e2', 'fb')).toBe('claude-sonnet-4-6')
+  })
+
+  it('returns null when unset or unrecognized', () => {
+    expect(resolveEmotionalModelForUser('nobody3')).toBeNull()
+    setUserControls('e3', { emotionalModel: 'bogus' })
+    expect(resolveEmotionalModelForUser('e3')).toBeNull()
   })
 })
 

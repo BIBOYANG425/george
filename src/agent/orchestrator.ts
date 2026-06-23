@@ -31,7 +31,7 @@ import { renderActivityBlock } from './activity-state.js';
 import { getWorldStateStore, worldStateEnabled } from './world-state.js';
 import { fastReply } from './fast-path.js';
 import { detectUnsourcedClaim } from './fast-path-guard.js';
-import { checkUsageAllowed, resolveModelForUser } from '../admin/user-controls.js';
+import { checkUsageAllowed, getMainModelOverride, resolveEmotionalModelForUser } from '../admin/user-controls.js';
 
 // Register george's 23 tools as an in-process SDK MCP server so the model can
 // actually CALL them. Without this, the orchestrator/sub-agents only had tool
@@ -553,16 +553,38 @@ export interface QueryOptionsInputs {
   // user_id (resolved internally → students.user_id). Only surfaces in the prompt
   // when GEORGE_RECALL_TOOL_ENABLED is on; '' / unset → byte-identical OFF.
   handle?: string | null;
-  // Already resolved by the caller. OFF path uses resolveModelForUser(userId,
-  // ORCHESTRATOR_MODEL); trunk path uses resolveModelForUser(userId, TRUNK_MODEL).
+  // Already resolved by the caller from getMainModelOverride: resolvedModel =
+  // override ?? ORCHESTRATOR_MODEL; trunkModel = override ?? TRUNK_MODEL (trunk path).
   resolvedModel: string;
   trunkModel: string;
+  // The raw per-user MAIN-model override (getMainModelOverride), or null/undefined
+  // when none. When set, every dispatched sub-agent collapses onto it (see
+  // applyMainModelCollapse). Optional so callers/tests that omit it get the OFF
+  // behavior (no collapse) and stay byte-identical.
+  mainModelOverride?: string | null;
   // Pre-built for the OFF branches (kept identical to today's call sites).
   systemPrompt: string;
   agentsConfig: Record<string, { description: string; prompt: string; tools: string[]; model?: string }>;
   orchestratorTools: string[];
   maxTurns?: number;
   abortController?: AbortController;
+}
+
+// Per-user MAIN-model collapse. When a user has a main-model override, every in-turn
+// sub-agent must run that SAME model — not its static FAST/SMART tier — because the
+// SDK sets the provider env ONCE per query() from the top-level model
+// (model-providers.ts). A non-Anthropic main (e.g. Doubao) with sub-agents left on
+// their Claude ids would send a Claude id to the Doubao base URL and break. Collapse
+// closes that. override null/undefined (no per-user override) returns the SAME object
+// so the default FAST/SMART tiering and the OFF-path byte-equivalence both hold.
+export function applyMainModelCollapse(
+  agents: Record<string, { description: string; prompt: string; tools: string[]; model?: string }>,
+  override: string | null | undefined,
+): Record<string, { description: string; prompt: string; tools: string[]; model?: string }> {
+  if (!override) return agents;
+  const out: typeof agents = {};
+  for (const [name, def] of Object.entries(agents)) out[name] = { ...def, model: override };
+  return out;
 }
 
 /**
@@ -611,11 +633,9 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
       mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
       tools: trunkAllow,
       allowedTools: trunkAllow,
-      agents: buildTrunkAgentsConfig(
-        inputs.profile,
-        inputs.studentId,
-        inputs.webAllowed,
-        inputs.delayContext,
+      agents: applyMainModelCollapse(
+        buildTrunkAgentsConfig(inputs.profile, inputs.studentId, inputs.webAllowed, inputs.delayContext),
+        inputs.mainModelOverride,
       ),
       maxTurns: inputs.maxTurns ?? 10,
       abortController: inputs.abortController,
@@ -656,7 +676,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
     mcpServers: { [MCP_SERVER_NAME]: georgeToolServer },
     tools: inputs.orchestratorTools,
     allowedTools: ['Task', 'Agent', 'WebSearch', ...Object.keys(ALL_TOOLS).map(nsTool)],
-    agents: inputs.agentsConfig,
+    agents: applyMainModelCollapse(inputs.agentsConfig, inputs.mainModelOverride),
     maxTurns: inputs.maxTurns ?? 12,
     abortController: inputs.abortController,
     settingSources: [],
@@ -774,6 +794,10 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
         historyPrefix,
         profileBlock: buildUserProfileBlock(profile),
         recallBlock,
+        // Per-user emotional-tier model (admin dashboard). null when unset → fast
+        // path keeps its default selection. Keyed off the RAW handle (args.userId),
+        // matching resolveModelForUser — this runs before studentId resolution.
+        emotionalModel: resolveEmotionalModelForUser(args.userId),
       });
   if (fast !== null) {
     yield { type: 'result', result: fast };
@@ -866,8 +890,15 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // Per-user model control (set from the admin dashboard). Falls back to the
   // global ORCHESTRATOR_MODEL (OFF/single paths) or TRUNK_MODEL (trunk path) when
   // no override is configured for this user.
-  const resolvedModel = resolveModelForUser(args.userId, ORCHESTRATOR_MODEL);
-  const trunkModel = resolveModelForUser(args.userId, TRUNK_MODEL);
+  // Resolve the per-user MAIN-model override ONCE (raw, or null when none). All three
+  // downstream values derive from it, so we don't re-read the control store per
+  // fallback. null → default users keep the FAST/SMART tiering and the sub-agent
+  // collapse is a no-op (see applyMainModelCollapse + the cross-provider env hazard it
+  // closes). trunkModel only matters in the trunk-hybrid branch, so its fallback is
+  // computed lazily there.
+  const mainModelOverride = getMainModelOverride(args.userId);
+  const resolvedModel = mainModelOverride ?? ORCHESTRATOR_MODEL;
+  const trunkModel = trunkHybrid ? (mainModelOverride ?? TRUNK_MODEL) : TRUNK_MODEL;
   const queryOptions = buildQueryOptions({
     trunkHybrid,
     singleAgent,
@@ -880,6 +911,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     handle: args.userId,
     resolvedModel,
     trunkModel,
+    mainModelOverride,
     systemPrompt,
     agentsConfig,
     orchestratorTools,

@@ -10,12 +10,11 @@
 // thinking model, so reasoning_effort defaults to 'minimal' to keep the fast path
 // fast (~2-3s); override via DOUBAO_REASONING_EFFORT.
 
-import { log } from '../observability/logger.js';
+import { openaiChat, type FastMessage } from './openai-fast-client.js';
 
-export interface DoubaoMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-}
+// Doubao messages are OpenAI-format chat messages (kept as a named export for
+// existing importers).
+export type DoubaoMessage = FastMessage;
 
 const DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3';
 
@@ -23,33 +22,23 @@ export function isDoubaoConfigured(): boolean {
   return !!(process.env.DOUBAO_API_KEY && process.env.DOUBAO_MODEL);
 }
 
-// One OpenAI-format chat completion against Ark. Throws on any non-2xx so the
-// caller can fall back to the existing lightweight tier.
-export async function doubaoChat(messages: DoubaoMessage[], opts?: { maxTokens?: number }): Promise<string> {
+// One OpenAI-format chat completion against Ark, via the shared openaiChat primitive.
+// Throws on any non-2xx so the caller can fall back to the lightweight tier.
+//
+// `opts.model` lets a per-user emotional override pick a specific Ark id; it defaults
+// to DOUBAO_MODEL (the global fast-path model) so the OFF/default path is unchanged.
+export async function doubaoChat(messages: DoubaoMessage[], opts?: { maxTokens?: number; model?: string }): Promise<string> {
   const apiKey = process.env.DOUBAO_API_KEY;
-  const model = process.env.DOUBAO_MODEL;
+  const model = opts?.model || process.env.DOUBAO_MODEL;
   if (!apiKey || !model) throw new Error('Doubao not configured (DOUBAO_API_KEY / DOUBAO_MODEL)');
   const baseUrl = process.env.DOUBAO_BASE_URL || DEFAULT_BASE_URL;
-  const effort = process.env.DOUBAO_REASONING_EFFORT || 'minimal';
-
-  const body: Record<string, unknown> = { model, messages, max_tokens: opts?.maxTokens ?? 350 };
   // reasoning_effort applies to thinking models (seed-1.6 family). Harmless on
   // non-thinking ids; unset DOUBAO_REASONING_EFFORT to omit it.
-  if (effort) body.reasoning_effort = effort;
-
-  const res = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
+  const effort = process.env.DOUBAO_REASONING_EFFORT || 'minimal';
+  return openaiChat({ baseUrl, apiKey, model }, messages, {
+    maxTokens: opts?.maxTokens,
+    extraBody: effort ? { reasoning_effort: effort } : undefined,
+    errorEvent: 'doubao_api_error',
+    errorLabel: 'Doubao API',
   });
-  if (!res.ok) {
-    const t = await res.text();
-    log('error', 'doubao_api_error', { status: res.status, body: t.slice(0, 200) });
-    throw new Error(`Doubao API ${res.status}: ${t.slice(0, 200)}`);
-  }
-  // Thinking models return the answer in message.content (reasoning lives in a
-  // separate reasoning_content field we don't surface).
-  const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-  return json.choices?.[0]?.message?.content ?? '';
 }

@@ -356,7 +356,7 @@ async function loadUsers(){
 }
 
 function shortModel(m){ return String(m).replace('claude-','').replace(/-\d{8}$/,'').replace('-4-','4.'); }
-function ctrlBadges(c){ if(!c) return ''; let s=''; if(c.blocked) s+=' <span class="badge block">🚫封禁</span>'; const main=c.modelOverride||c.mainModel; if(main) s+=' <span class="badge model">主·'+esc(shortModel(main))+'</span>'; if(c.emotionalModel) s+=' <span class="badge model">情·'+esc(shortModel(c.emotionalModel))+'</span>'; if(c.dailyMessageLimit!=null) s+=' <span class="badge lim">限'+c.dailyMessageLimit+'/日</span>'; return s; }
+function ctrlBadges(c){ if(!c) return ''; let s=''; if(c.blocked) s+=' <span class="badge block">🚫封禁</span>'; if(c.modelOverride) s+=' <span class="badge model">主·'+esc(shortModel(c.modelOverride))+'</span>'; if(c.emotionalModel) s+=' <span class="badge model">情·'+esc(shortModel(c.emotionalModel))+'</span>'; if(c.dailyMessageLimit!=null) s+=' <span class="badge lim">限'+c.dailyMessageLimit+'/日</span>'; return s; }
 
 // ── USER drawer ──
 async function openUser(id){
@@ -420,9 +420,8 @@ function modelOptions(models,cur){
 }
 function controlsPanel(d){
   const c=d.controls||{}, u=d.usage||{};
-  // PR-1: 主模型 still lives on the existing modelOverride field (stays live, no
-  // regression); 情绪模型 writes the new emotionalModel field (stored but dormant
-  // until PR-2 wires it into the fast path).
+  // 主模型 → modelOverride field (orchestrator + sub-agents); 情绪模型 → emotionalModel
+  // field (fast-path quick reply). Both are live.
   const curMain=c.modelOverride||'';
   const curEmo=c.emotionalModel||'';
   const mKnown=MODELS_MAIN.some(m=>m[0]===curMain), eKnown=MODELS_EMO.some(m=>m[0]===curEmo);
@@ -431,7 +430,7 @@ function controlsPanel(d){
     +'<div class="ctrl-grid">'
       +'<label>主模型 Main<span class="tag">orchestrator + 子agent</span><select id="ctlModel" onchange="onModelSel(\'ctlModel\',\'ctlCustomWrap\')">'+modelOptions(MODELS_MAIN,curMain)+'</select></label>'
       +'<label id="ctlCustomWrap" class="'+((!mKnown&&curMain)?'':'hide')+'">自定义主模型 ID<input id="ctlCustom" value="'+((!mKnown&&curMain)?esc(curMain):'')+'" placeholder="e.g. deepseek-chat"></label>'
-      +'<label>情绪模型 Emotional<span class="tag">快速回复 · PR-2 才生效</span><select id="ctlEmo" onchange="onModelSel(\'ctlEmo\',\'ctlEmoCustomWrap\')">'+modelOptions(MODELS_EMO,curEmo)+'</select></label>'
+      +'<label>情绪模型 Emotional<span class="tag">快速回复 fast-path</span><select id="ctlEmo" onchange="onModelSel(\'ctlEmo\',\'ctlEmoCustomWrap\')">'+modelOptions(MODELS_EMO,curEmo)+'</select></label>'
       +'<label id="ctlEmoCustomWrap" class="'+((!eKnown&&curEmo)?'':'hide')+'">自定义情绪模型 ID<input id="ctlEmoCustom" value="'+((!eKnown&&curEmo)?esc(curEmo):'')+'" placeholder="e.g. doubao-seed-2-0-lite-260215"></label>'
       +'<label>每日消息上限<input id="ctlLimit" type="number" min="0" value="'+(c.dailyMessageLimit!=null?c.dailyMessageLimit:'')+'" placeholder="留空 = 不限"></label>'
       +'<label class="ck"><input id="ctlBlocked" type="checkbox"'+(c.blocked?' checked':'')+'> 封禁此用户（直接拒绝，不调用模型）</label>'
@@ -464,7 +463,7 @@ async function saveControls(){
   msg.textContent='保存中…';
   try{
     await api('/user/'+encodeURIComponent(curUser)+'/controls',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({modelOverride,emotionalModel,dailyMessageLimit,blocked,feedbackMessage})});
-    msg.style.color='var(--good)'; msg.textContent='已保存 ✓ 主模型实时生效；情绪模型已存（PR-2 接线后生效）';
+    msg.style.color='var(--good)'; msg.textContent='已保存 ✓ 主模型 + 情绪模型实时生效（后端下一条消息即按此执行）';
     if(TAB==='users') loadUsers();
   }catch(e){ msg.style.color='var(--bad)'; msg.textContent='保存失败：'+e.message; }
 }
