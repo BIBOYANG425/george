@@ -20,8 +20,9 @@ import { isRecallToolEnabled } from '../tools/recall-memory.js';
 import type { SessionStore, TurnTelemetry } from './session-store.js';
 import type { Profile, ProfileStore } from '../memory/profile.js';
 import { recallForTurn } from '../memory/recall.js';
-import { resolveStudentId, resolveProfileUserId } from '../db/students.js';
+import { resolveStudentId, resolveProfileUserId, setShippingNotifOptOut } from '../db/students.js';
 import { log } from '../observability/logger.js';
+import { matchShippingControl, shippingControlReply } from './shipping-optout.js';
 import { isWebSearchOverCap, recordWebSearchUse } from '../services/web-search-budget.js';
 import { trustedDomains } from '../services/web-search-config.js';
 import { providerOptionsForModel } from './model-providers.js';
@@ -716,6 +717,31 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     }
     yield { type: 'text', text: `[mock] received: ${args.text}` };
     return;
+  }
+
+  // ── Shipping-notification opt-out / opt-in (compliance) ──
+  // A student can always stop or resume shipping pushes by replying e.g. "TD" /
+  // "退订" — handled here, BEFORE the usage gate and any LLM cost, so opt-out
+  // works even for a usage-blocked user. 'cron' has no inbound user text. Yield
+  // both a 'text' and a 'result' so every adapter renders it (wechat reads
+  // 'text'; index/imessage read 'result') — each ignores the other type, so
+  // there is no double-send.
+  if (args.channel !== 'cron') {
+    const control = matchShippingControl(args.text);
+    if (control) {
+      const platform = args.channel === 'imessage' ? 'imessage' : 'wechat';
+      let updated = false;
+      try {
+        updated = await setShippingNotifOptOut(args.userId, platform, control === 'opt_out');
+      } catch (err) {
+        log('warn', 'shipping_optout_error', { userId: args.userId, error: (err as Error).message });
+      }
+      log('info', 'shipping_control', { channel: args.channel, control, updated });
+      const reply = shippingControlReply(control, updated);
+      yield { type: 'text', text: reply };
+      yield { type: 'result', result: reply };
+      return;
+    }
   }
 
   // ── Admin usage gate (per-user controls, set from the dashboard) ──
