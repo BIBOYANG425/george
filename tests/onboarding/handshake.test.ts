@@ -151,7 +151,7 @@ describe('markGreeted callback (by-handle funnel idempotency)', () => {
     expect(markGreeted).toHaveBeenCalledWith('g7k2m4');
   });
 
-  it('stamps greeted BEFORE sending the welcome (closes the re-greet race)', async () => {
+  it('stamps greeted AFTER message 1 succeeds, before messages 2-3 (still closes the re-greet race on the slow part)', async () => {
     const order: string[] = [];
     const markGreeted = vi.fn(async () => { order.push('mark'); });
     const sendImessage = vi.fn(async () => { order.push('send'); });
@@ -165,8 +165,52 @@ describe('markGreeted callback (by-handle funnel idempotency)', () => {
       linkImessageHandle: vi.fn(),
       markGreeted,
     });
-    expect(order.indexOf('mark')).toBe(0);
-    expect(order.indexOf('send')).toBeGreaterThan(order.indexOf('mark'));
+    // Exactly one mark, positioned after the first send and before sends 2-3.
+    expect(markGreeted).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['send', 'mark', 'send', 'send']);
+  });
+
+  it('does NOT stamp greeted when the first send throws (prod bug: never silently marked greeted without delivery)', async () => {
+    const markGreeted = vi.fn(async () => {});
+    const linkHandle = vi.fn(async () => {});
+    // Transport drops the very first send (the flaky-Spectrum prod scenario).
+    const sendImessage = vi.fn(async () => { throw new Error('spectrum transport down'); });
+    await expect(runHandshake({
+      imessageHandle: '+15551234567',
+      profileUrlBase: 'https://uscbia.com/george/profile',
+      code: 'g7k2m4',
+      format: 'natural',
+      sendImessage,
+      lookupPending: vi.fn(async () => ({ code: 'g7k2m4', status: 'pending' })) as any,
+      linkImessageHandle: linkHandle,
+      markGreeted,
+    })).rejects.toThrow('spectrum transport down');
+    // Core fix: a failed first send must NOT mark the user greeted, so the
+    // by-handle path (`!greeted_at`) re-greets them next time.
+    expect(markGreeted).not.toHaveBeenCalled();
+    // Handle linking still ran before message 1 (binding identity is correct
+    // even when the greeting fails to send).
+    expect(linkHandle).toHaveBeenCalledWith('g7k2m4', '+15551234567');
+    // Only the first send was attempted before the throw.
+    expect(sendImessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('links the handle before message 1', async () => {
+    const order: string[] = [];
+    const linkHandle = vi.fn(async () => { order.push('link'); });
+    const sendImessage = vi.fn(async () => { order.push('send'); });
+    await runHandshake({
+      imessageHandle: '+15551234567',
+      profileUrlBase: 'https://uscbia.com/george/profile',
+      code: 'g7k2m4',
+      format: 'natural',
+      sendImessage,
+      lookupPending: vi.fn(async () => ({ code: 'g7k2m4', status: 'pending' })) as any,
+      linkImessageHandle: linkHandle,
+      markGreeted: vi.fn(async () => {}),
+    });
+    expect(order[0]).toBe('link');
+    expect(order.indexOf('link')).toBeLessThan(order.indexOf('send'));
   });
 
   it('does NOT stamp on "already in" or lookup miss', async () => {
