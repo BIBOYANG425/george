@@ -181,12 +181,29 @@ export async function countTodayUserMessages(userId: string): Promise<number> {
 // rather than bricking the user.
 const MODEL_ID_RE = /^(claude-|deepseek|moonshot|kimi|gpt-|o[0-9]|gemini-|doubao|ark-|us\.anthropic\.|anthropic\.)/i;
 
-// Resolve the model a user should run on (override or the supplied fallback).
-export function resolveModelForUser(userId: string, fallback: string): string {
+// The raw per-user MAIN model override, or null when none/invalid. Reads `mainModel`
+// first (the canonical field), falling back to the legacy `modelOverride` so existing
+// rows keep working without a migration script. An id that doesn't match a known
+// provider prefix is treated as no-override (ignored), not a brick. Callers that need
+// to know WHETHER an override exists (e.g. the sub-agent collapse) use this directly,
+// since resolveModelForUser collapses "no override" into the fallback string.
+export function getMainModelOverride(userId: string): string | null {
   const c = getUserControls(userId);
-  const override = c.modelOverride?.trim();
-  if (override && MODEL_ID_RE.test(override)) return override;
-  return fallback;
+  const v = (c.mainModel ?? c.modelOverride)?.trim();
+  return v && MODEL_ID_RE.test(v) ? v : null;
+}
+
+// Resolve the MAIN model a user should run on (override or the supplied fallback).
+export function resolveModelForUser(userId: string, fallback: string): string {
+  return getMainModelOverride(userId) ?? fallback;
+}
+
+// The raw per-user EMOTIONAL (fast-path) model override, or null when none/invalid.
+// Consumed by the fast path (fastReply) to pick the emotional-tier client. Same
+// MODEL_ID_RE gate as the main tier — an unrecognized id falls back to the default.
+export function resolveEmotionalModelForUser(userId: string): string | null {
+  const v = getUserControls(userId).emotionalModel?.trim();
+  return v && MODEL_ID_RE.test(v) ? v : null;
 }
 
 // In-voice defaults shown to a user who is blocked or over their daily limit.

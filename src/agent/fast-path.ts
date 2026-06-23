@@ -14,6 +14,7 @@
 
 import { callLightweightLLM } from './llm-providers.js';
 import { doubaoChat, isDoubaoConfigured } from './doubao-client.js';
+import { openaiFastReply } from './openai-fast-client.js';
 import { MASTER_PROMPT } from './agents.config.js';
 import { renderMoodBlock, renderDateBlock } from './calendar-mood.js';
 import { log } from '../observability/logger.js';
@@ -72,6 +73,9 @@ export async function fastReply(args: {
   historyPrefix: string;
   profileBlock: string;
   recallBlock?: string;
+  // Per-user emotional-tier model (admin dashboard). null/undefined → today's
+  // default selection (Doubao-if-configured, else lightweight). See routing below.
+  emotionalModel?: string | null;
 }): Promise<string | null> {
   const system = [MASTER_PROMPT, renderDateBlock(), renderMoodBlock(), args.profileBlock, args.recallBlock, FAST_INSTRUCTION]
     .filter(Boolean)
@@ -81,12 +85,29 @@ export async function fastReply(args: {
       { role: 'system' as const, content: system },
       { role: 'user' as const, content: `${args.historyPrefix}${args.text}` },
     ];
-    // Emotional/小聊天 turns run on Doubao (中文情绪价值) when configured — a single
-    // no-tool OpenAI-format call. On any Doubao failure, fall back to the existing
-    // lightweight tier (Kimi/Claude) so a Doubao outage never pushes casual chat to
-    // the slow full agent. No Doubao → the original lightweight path, unchanged.
+    // Emotional-tier model selection. A per-user `emotionalModel` routes by id-prefix:
+    //   doubao/ark → Ark (doubaoChat)   gpt/openai → OpenAI (openaiFastReply)
+    //   else (claude/deepseek/moonshot) → lightweight (Anthropic SDK / Kimi)
+    // Any explicit-model failure falls back to the lightweight tier so a provider
+    // outage never pushes casual chat to the slow full agent. When emotionalModel is
+    // null/unset the path below is byte-for-byte the original (Doubao-if-configured,
+    // else lightweight).
     let raw: string;
-    if (isDoubaoConfigured()) {
+    const em = args.emotionalModel?.trim() || null;
+    if (em) {
+      try {
+        if (/^(doubao|ark-)/i.test(em) && isDoubaoConfigured()) {
+          raw = await doubaoChat(messages, { maxTokens: 350, model: em });
+        } else if (/^(gpt-|o[0-9]|openai)/i.test(em)) {
+          raw = await openaiFastReply(messages, em, { maxTokens: 350 });
+        } else {
+          raw = await callLightweightLLM(messages, { maxTokens: 350, model: em });
+        }
+      } catch (e) {
+        log('warn', 'fast_path_emotional_fallback', { error: (e as Error).message, model: em });
+        raw = await callLightweightLLM(messages, { maxTokens: 350 });
+      }
+    } else if (isDoubaoConfigured()) {
       try {
         raw = await doubaoChat(messages, { maxTokens: 350 });
       } catch (e) {

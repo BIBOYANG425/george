@@ -3,7 +3,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { getUserControls, setUserControls, resolveModelForUser, getModelChoices } from '../../src/admin/user-controls'
+import {
+  getUserControls,
+  setUserControls,
+  resolveModelForUser,
+  getMainModelOverride,
+  resolveEmotionalModelForUser,
+  getModelChoices,
+} from '../../src/admin/user-controls'
 
 // Point the file store at a throwaway path so tests NEVER touch the live
 // data/user-controls.json. The module reads GEORGE_USER_CONTROLS_PATH at call
@@ -63,20 +70,52 @@ describe('UserControls — PR-1 two new dormant fields', () => {
   })
 })
 
-describe('resolveModelForUser — PR-1 inertness boundary', () => {
-  it('IGNORES mainModel (still reads only modelOverride) — proves PR-1 changes no routing', () => {
+describe('resolveModelForUser / getMainModelOverride — PR-2 reads mainModel ?? modelOverride', () => {
+  it('reads mainModel (PR-2 repoint — the main override now drives the model)', () => {
     setUserControls('u3', { mainModel: 'doubao-seed-1.6' })
-    expect(resolveModelForUser('u3', 'claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
+    expect(resolveModelForUser('u3', 'claude-sonnet-4-6')).toBe('doubao-seed-1.6')
+    expect(getMainModelOverride('u3')).toBe('doubao-seed-1.6')
   })
 
-  it('still honors the live modelOverride field', () => {
+  it('mainModel takes precedence over a legacy modelOverride', () => {
+    setUserControls('u3b', { modelOverride: 'claude-sonnet-4-6', mainModel: 'doubao-seed-1.6' })
+    expect(resolveModelForUser('u3b', 'fallback-x')).toBe('doubao-seed-1.6')
+  })
+
+  it('falls back to the legacy modelOverride when mainModel is unset (back-compat, no migration)', () => {
     setUserControls('u4', { modelOverride: 'doubao-seed-1.6' })
     expect(resolveModelForUser('u4', 'claude-sonnet-4-6')).toBe('doubao-seed-1.6')
+    expect(getMainModelOverride('u4')).toBe('doubao-seed-1.6')
   })
 
-  it('falls back when modelOverride is an unrecognized id', () => {
-    setUserControls('u5', { modelOverride: 'not-a-real-prefix' })
+  it('returns the fallback / null when neither field is set', () => {
+    expect(resolveModelForUser('nobody2', 'claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
+    expect(getMainModelOverride('nobody2')).toBeNull()
+  })
+
+  it('falls back when the override is an unrecognized id', () => {
+    setUserControls('u5', { mainModel: 'not-a-real-prefix' })
     expect(resolveModelForUser('u5', 'claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
+    expect(getMainModelOverride('u5')).toBeNull()
+  })
+})
+
+describe('resolveEmotionalModelForUser — PR-2 fast-path tier', () => {
+  it('returns the validated emotional override', () => {
+    setUserControls('e1', { emotionalModel: 'doubao-seed-2-0-lite-260215' })
+    expect(resolveEmotionalModelForUser('e1')).toBe('doubao-seed-2-0-lite-260215')
+  })
+
+  it('is independent of the main tier', () => {
+    setUserControls('e2', { mainModel: 'claude-sonnet-4-6', emotionalModel: 'gpt-4o-mini' })
+    expect(resolveEmotionalModelForUser('e2')).toBe('gpt-4o-mini')
+    expect(resolveModelForUser('e2', 'fb')).toBe('claude-sonnet-4-6')
+  })
+
+  it('returns null when unset or unrecognized', () => {
+    expect(resolveEmotionalModelForUser('nobody3')).toBeNull()
+    setUserControls('e3', { emotionalModel: 'bogus' })
+    expect(resolveEmotionalModelForUser('e3')).toBeNull()
   })
 })
 
