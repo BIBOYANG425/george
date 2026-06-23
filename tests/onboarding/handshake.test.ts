@@ -1,6 +1,11 @@
 // tests/onboarding/handshake.test.ts
-import { describe, it, expect, vi } from 'vitest';
-import { extractCodeFromStartMessage, runHandshake } from '../../src/onboarding/handshake.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  extractCodeFromStartMessage,
+  runHandshake,
+  resendOnboardLink,
+  shouldRelink,
+} from '../../src/onboarding/handshake.js';
 
 describe('extractCodeFromStartMessage', () => {
   it('extracts code from natural prefill "i\'m ready to try george (g7k2m4)"', () => {
@@ -116,6 +121,83 @@ describe('runHandshake', () => {
     expect(handled).toBe(true);
     expect(sent.length).toBe(1);
     expect(sent[0].text).toMatch(/already in/i);
+  });
+});
+
+describe('shouldRelink (resend throttle)', () => {
+  const HOUR = 60 * 60 * 1000;
+  afterEach(() => {
+    delete process.env.ONBOARDING_RELINK_HOURS;
+  });
+
+  it('returns true when never reminded (reminded_at is null)', () => {
+    expect(shouldRelink(null)).toBe(true);
+  });
+
+  it('returns true when last reminded 25h ago (older than the 24h default)', () => {
+    const now = new Date();
+    const remindedAt = new Date(now.getTime() - 25 * HOUR).toISOString();
+    expect(shouldRelink(remindedAt, now)).toBe(true);
+  });
+
+  it('returns false when last reminded 1h ago (within the 24h default)', () => {
+    const now = new Date();
+    const remindedAt = new Date(now.getTime() - 1 * HOUR).toISOString();
+    expect(shouldRelink(remindedAt, now)).toBe(false);
+  });
+
+  it('respects the ONBOARDING_RELINK_HOURS override', () => {
+    process.env.ONBOARDING_RELINK_HOURS = '2';
+    const now = new Date();
+    // 3h ago is now PAST the 2h window → due for a relink.
+    expect(shouldRelink(new Date(now.getTime() - 3 * HOUR).toISOString(), now)).toBe(true);
+    // 1h ago is still WITHIN the 2h window → throttled.
+    expect(shouldRelink(new Date(now.getTime() - 1 * HOUR).toISOString(), now)).toBe(false);
+  });
+});
+
+describe('resendOnboardLink', () => {
+  const baseOpts = {
+    code: 'g7k2m4',
+    imessageHandle: '+15551234567',
+    profileUrlBase: 'https://uscbia.com/george/profile',
+  };
+
+  it('sends exactly one message containing the ?code= link and returns true', async () => {
+    const sent: any[] = [];
+    const sendImessage = vi.fn(async (msg: any) => { sent.push(msg); });
+    const markReminded = vi.fn(async () => {});
+    const handled = await resendOnboardLink({ ...baseOpts, sendImessage, markReminded });
+    expect(handled).toBe(true);
+    expect(sent.length).toBe(1);
+    expect(sent[0].to).toBe('+15551234567');
+    expect(sent[0].text).toContain('?code=g7k2m4');
+    expect(sent[0].text).toContain('https://uscbia.com/george/profile');
+    // No carousel/vcf — this is the link-only path.
+    expect(sent[0].imagePaths).toBeUndefined();
+    expect(sent[0].filePaths).toBeUndefined();
+  });
+
+  it('calls markReminded exactly once AFTER the send succeeds', async () => {
+    const order: string[] = [];
+    const sendImessage = vi.fn(async () => { order.push('send'); });
+    const markReminded = vi.fn(async () => { order.push('mark'); });
+    await resendOnboardLink({ ...baseOpts, sendImessage, markReminded });
+    expect(markReminded).toHaveBeenCalledTimes(1);
+    expect(markReminded).toHaveBeenCalledWith('g7k2m4');
+    expect(order).toEqual(['send', 'mark']);
+  });
+
+  it('does NOT stamp reminded_at when the send throws (so it retries next message)', async () => {
+    // Same guarantee as the greeted-after-send fix: a failed resend must not
+    // mark reminded, or the user is throttled out with no link ever delivered.
+    const sendImessage = vi.fn(async () => { throw new Error('spectrum transport down'); });
+    const markReminded = vi.fn(async () => {});
+    await expect(
+      resendOnboardLink({ ...baseOpts, sendImessage, markReminded }),
+    ).rejects.toThrow('spectrum transport down');
+    expect(markReminded).not.toHaveBeenCalled();
+    expect(sendImessage).toHaveBeenCalledTimes(1);
   });
 });
 

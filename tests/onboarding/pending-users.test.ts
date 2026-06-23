@@ -4,6 +4,7 @@ import {
   createPendingUser,
   lookupByCode,
   lookupByImessageHandle,
+  markReminded,
   cleanupOld,
 } from '../../src/onboarding/pending-users.js';
 
@@ -82,6 +83,25 @@ describe('lookupByImessageHandle', () => {
   it('returns null when no row matches', async () => {
     const { client } = recordingSupabase({ data: [], error: null });
     expect(await lookupByImessageHandle(client, '+1555')).toBeNull();
+  });
+});
+
+describe('markReminded', () => {
+  it('sets reminded_at scoped to the given code', async () => {
+    const { calls, client } = recordingSupabase({ data: null, error: null });
+    await markReminded(client, 'g7k2m4');
+    // Updates reminded_at to a timestamp...
+    const update = calls.find(c => c.method === 'update');
+    expect(update).toBeTruthy();
+    expect(update!.args[0]).toHaveProperty('reminded_at');
+    expect(typeof update!.args[0].reminded_at).toBe('string');
+    // ...scoped to exactly that code.
+    expect(calls).toContainEqual({ method: 'eq', args: ['code', 'g7k2m4'] });
+  });
+
+  it('throws when the update errors', async () => {
+    const { client } = recordingSupabase({ data: null, error: { message: 'boom' } });
+    await expect(markReminded(client, 'g7k2m4')).rejects.toThrow(/markReminded failed: boom/);
   });
 });
 

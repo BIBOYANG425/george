@@ -146,3 +146,45 @@ export async function runHandshake(opts: HandshakeOptions): Promise<boolean> {
   });
   return true;
 }
+
+// Default throttle window for the link-resend nudge: at most one resend per 24h
+// per pending user until they complete the profile form.
+const DEFAULT_RELINK_HOURS = 24;
+
+// Throttle gate for resendOnboardLink. Returns true when a pending-but-greeted
+// user is due for another link nudge: never reminded (null) OR last reminded
+// longer ago than ONBOARDING_RELINK_HOURS (default 24). Pure + exported so the
+// spectrum branch ordering stays unit-testable without a live clock or DB.
+export function shouldRelink(remindedAt: string | null, now: Date = new Date()): boolean {
+  if (!remindedAt) return true;
+  const hours = Number(process.env.ONBOARDING_RELINK_HOURS) || DEFAULT_RELINK_HOURS;
+  const last = new Date(remindedAt).getTime();
+  return now.getTime() - last >= hours * 60 * 60 * 1000;
+}
+
+// Subset of HandshakeOptions for the link-only resend path. Carries just what a
+// single link send + reminded stamp needs.
+export interface ResendOnboardLinkOptions {
+  code: string;
+  imessageHandle: string;
+  sendImessage: (msg: OutgoingMessage) => Promise<void>;
+  markReminded: (code: string) => Promise<void>;
+  profileUrlBase: string;
+}
+
+// Self-heal for pending-not-completed users: the greeting landed (greeted_at set)
+// but they either never received the link (sends 2-3 dropped) or got it and never
+// finished the form. Re-send ONLY the link with a short nudge.
+//
+// markReminded runs AFTER the send succeeds, mirroring the greeted-after-send
+// guarantee in runHandshake: a failed resend throws before stamping reminded_at,
+// so the user is NOT throttled out and gets re-nudged on their next message.
+// Returns true (it handled the message).
+export async function resendOnboardLink(opts: ResendOnboardLinkOptions): Promise<boolean> {
+  await opts.sendImessage({
+    to: opts.imessageHandle,
+    text: `looks like you didn't finish setting up yet, here's your link again: ${opts.profileUrlBase}?code=${opts.code}`,
+  });
+  await opts.markReminded(opts.code);
+  return true;
+}
