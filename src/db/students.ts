@@ -3,6 +3,27 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+// Short-TTL memo for handle→user_id. The mapping is effectively immutable for a
+// student (a handle binds to one account at onboarding and doesn't churn), and
+// resolveProfileUserId now sits on the per-turn memory-capture hot path, so a
+// few-minute cache removes a redundant `students` round-trip every turn. Only
+// POSITIVE resolutions are cached — a null (not-yet-onboarded handle) is always
+// re-queried, so a student who onboards mid-session isn't stuck invisible. uuid
+// pass-throughs never reach the cache (there's no query to save).
+const RESOLVE_TTL_MS = 5 * 60_000
+// Partitioned by the Supabase client instance (WeakMap), NOT a flat handle→uuid
+// Map: in production there's one `supabase` client so it behaves as a single cache,
+// but an injected test/fake client gets its OWN partition — so a cached resolution
+// from one client can never be returned for a different client querying the same
+// handle (the silent-`sb`-bypass codex flagged).
+let resolveCache = new WeakMap<SupabaseClient, Map<string, { uuid: string; expiresAt: number }>>()
+
+// Test-only: drop the memo so a fresh fake `sb` isn't shadowed by a prior test's
+// cached resolution. Not used in production.
+export function __resetResolveProfileCache(): void {
+  resolveCache = new WeakMap()
+}
+
 // Resolve a channel handle (phone / wechat openid) to the student's `user_id` —
 // the uuid that `user_profiles` is keyed by. The conversation path only ever has
 // the handle (e.g. "+17474638880"), but user_profiles.user_id is students.user_id
@@ -16,6 +37,9 @@ export async function resolveProfileUserId(
 ): Promise<string | null> {
   if (!handle) return null
   if (UUID_RE.test(handle)) return handle
+  let perClient = resolveCache.get(sb)
+  const cached = perClient?.get(handle)
+  if (cached && cached.expiresAt > Date.now()) return cached.uuid
   // Two scoped equality lookups (never interpolate the handle into an .or() filter,
   // and never .eq the uuid user_id column with a phone string — that throws).
   for (const column of ['imessage_id', 'wechat_open_id'] as const) {
@@ -26,9 +50,44 @@ export async function resolveProfileUserId(
       .not('user_id', 'is', null)
       .limit(1)
       .maybeSingle()
-    if (data?.user_id) return data.user_id as string
+    if (data?.user_id) {
+      const uuid = data.user_id as string
+      if (!perClient) {
+        perClient = new Map()
+        resolveCache.set(sb, perClient)
+      }
+      perClient.set(handle, { uuid, expiresAt: Date.now() + RESOLVE_TTL_MS })
+      return uuid
+    }
   }
   return null
+}
+
+// Whether the student behind this resolved user_id (uuid) has consented to
+// long-term memory writes — the per-turn capturer AND the update_memory tool both
+// gate on it before persisting any fact to user_profiles. Mirrors the heartbeat's
+// consent_proactive_messages gate. FAIL-CLOSED: any miss returns false — no config
+// row, a null value, the consent_memory column not yet migrated in bia-admin, or a
+// read error — so George never writes PII to a profile without an explicit opt-in.
+// `select('*')` (not the named column) is deliberate: a not-yet-migrated column is
+// then simply absent from the row rather than a PostgREST "column does not exist"
+// error. `id` must already be a students.user_id (uuid); `sb` injectable for tests.
+export async function getMemoryConsent(
+  id: string,
+  sb: SupabaseClient = supabase,
+): Promise<boolean> {
+  if (!id) return false
+  try {
+    const { data, error } = await sb
+      .from('user_heartbeat_config')
+      .select('*')
+      .eq('user_id', id)
+      .maybeSingle()
+    if (error) return false
+    return (data as { consent_memory?: boolean } | null)?.consent_memory === true
+  } catch {
+    return false
+  }
 }
 
 export async function getStudentById(id: string) {
