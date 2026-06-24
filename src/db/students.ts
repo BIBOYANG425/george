@@ -43,6 +43,25 @@ export async function updateStudent(id: string, updates: Record<string, unknown>
     .eq('id', id)
 }
 
+// Flip the shipping-notification opt-out flag for the student behind a channel
+// handle. Does NOT create a student — a bare "TD" from an unknown handle is a
+// no-op. Returns whether a matching student row was updated. `sb` injectable for
+// tests.
+export async function setShippingNotifOptOut(
+  userId: string,
+  platform: 'wechat' | 'imessage',
+  optOut: boolean,
+  sb: SupabaseClient = supabase,
+): Promise<boolean> {
+  const column = platform === 'wechat' ? 'wechat_open_id' : 'imessage_id'
+  const { data } = await sb
+    .from('students')
+    .update({ shipping_notif_opt_out: optOut, updated_at: new Date().toISOString() })
+    .eq(column, userId)
+    .select('id')
+  return Array.isArray(data) && data.length > 0
+}
+
 export async function resolveStudentId(userId: string, platform: 'wechat' | 'imessage'): Promise<string> {
   const column = platform === 'wechat' ? 'wechat_open_id' : 'imessage_id'
   const { data } = await supabase
