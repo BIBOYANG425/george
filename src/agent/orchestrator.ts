@@ -17,10 +17,12 @@ import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOO
 import { getFullCatalog } from '../skills/index.js';
 import { ALL_TOOLS } from '../tools/index.js';
 import { isRecallToolEnabled } from '../tools/recall-memory.js';
+import { isUpdateMemoryToolEnabled } from '../tools/update-memory.js';
 import type { SessionStore, TurnTelemetry } from './session-store.js';
 import type { Profile, ProfileStore } from '../memory/profile.js';
 import { recallForTurn } from '../memory/recall.js';
-import { resolveStudentId, resolveProfileUserId, setShippingNotifOptOut } from '../db/students.js';
+import { resolveStudentId, resolveProfileUserId, setShippingNotifOptOut, getMemoryConsent } from '../db/students.js';
+import { isCaptureEnabled } from '../memory/capture.js';
 import { log } from '../observability/logger.js';
 import { matchShippingControl, shippingControlReply } from './shipping-optout.js';
 import { isWebSearchOverCap, recordWebSearchUse } from '../services/web-search-budget.js';
@@ -159,22 +161,37 @@ function buildStudentIdBlock(studentId?: string | null): string {
   ].join('\n');
 }
 
-// P6 Phase 5 (post-MVP): context for the deliberate recall_memory tool. The tool
-// keys observations by the RAW channel handle (resolved internally via
+// P6: context for the deliberate memory tools (recall_memory + update_memory).
+// Both key the student by the RAW channel handle (resolved internally via
 // resolveProfileUserId → students.user_id), NOT by the students.id in
 // buildStudentIdBlock — those are different columns, so we must hand the model the
-// handle to pass as recall_memory's user_id. Gated by GEORGE_RECALL_TOOL_ENABLED:
-// '' when the flag is off, so the prompt is byte-identical to pre-feature behavior
-// (and the tool itself is absent from the allowlist on that path anyway).
-function buildRecallToolContextBlock(handle?: string | null): string {
-  if (!isRecallToolEnabled() || !handle) return '';
-  return [
-    '# RECALL MEMORY TOOL',
-    'You can deliberately search your memory of this student with the recall_memory',
-    `tool. When you call it, pass user_id: ${handle} (exactly this value) plus a`,
-    'query describing what to recall. It returns only real stored observations; an',
-    'empty result means you genuinely have nothing on it — say so, never invent one.',
-  ].join('\n');
+// handle to pass as their user_id. Present when EITHER tool's flag is on (else ''
+// → byte-identical to pre-feature behavior, and the tools are absent from the
+// allowlist on that path anyway). The block lists ONLY the tool(s) actually
+// enabled — so when just one flag is on we never advertise the other, absent tool.
+function buildMemoryToolsContextBlock(handle?: string | null): string {
+  const recall = isRecallToolEnabled();
+  const update = isUpdateMemoryToolEnabled();
+  if ((!recall && !update) || !handle) return '';
+  const lines = [
+    '# MEMORY TOOLS',
+    `When you call a memory tool, pass user_id: ${handle} (exactly this value).`,
+  ];
+  if (recall) {
+    lines.push(
+      'recall_memory — deliberately search your memory of this student with a query of what to',
+      'recall. It returns only real stored observations; an empty result means you genuinely',
+      'have nothing on it — say so, never invent one.',
+    );
+  }
+  if (update) {
+    lines.push(
+      'update_memory — when the student tells you a durable fact about themselves (major, year,',
+      'housing, interests, relationships, ongoing situation), save ONE such fact to the right',
+      'block. Record only what they actually said; skip chit-chat and one-off details.',
+    );
+  }
+  return lines.join('\n');
 }
 
 // `delayContext` (long-gap note), `worldStateBlock` (World Info timed-state
@@ -219,8 +236,8 @@ export function buildOrchestratorPrompt(
   if (studentIdBlock) parts.push(studentIdBlock);
   // recall_memory tool context (P6 Phase 5): '' unless GEORGE_RECALL_TOOL_ENABLED
   // is on AND a handle is supplied, so OFF is byte-identical.
-  const recallToolBlock = buildRecallToolContextBlock(handle);
-  if (recallToolBlock) parts.push(recallToolBlock);
+  const memoryToolsBlock = buildMemoryToolsContextBlock(handle);
+  if (memoryToolsBlock) parts.push(memoryToolsBlock);
   // Web-search guidance reaches the orchestrator only while the student is under
   // their daily cap (paired with the WebSearch tool in buildOrchestratorToolNames).
   // The orchestrator answers general / current-web queries directly (e.g. "recent
@@ -296,8 +313,8 @@ export function buildSingleAgentPrompt(
   const studentIdBlock = buildStudentIdBlock(studentId);
   if (studentIdBlock) parts.push(studentIdBlock);
   // recall_memory tool context (P6 Phase 5): '' unless the flag is on, byte-identical OFF.
-  const recallToolBlock = buildRecallToolContextBlock(handle);
-  if (recallToolBlock) parts.push(recallToolBlock);
+  const memoryToolsBlock = buildMemoryToolsContextBlock(handle);
+  if (memoryToolsBlock) parts.push(memoryToolsBlock);
   if (webAllowed) parts.push(webSearchGuidance());
   const catalog = getFullCatalog();
   if (catalog) parts.push(catalog);
@@ -398,8 +415,8 @@ export function buildTrunkPrompt(
   const studentIdBlock = buildStudentIdBlock(studentId);
   if (studentIdBlock) parts.push(studentIdBlock);
   // recall_memory tool context (P6 Phase 5): '' unless the flag is on, byte-identical OFF.
-  const recallToolBlock = buildRecallToolContextBlock(handle);
-  if (recallToolBlock) parts.push(recallToolBlock);
+  const memoryToolsBlock = buildMemoryToolsContextBlock(handle);
+  if (memoryToolsBlock) parts.push(memoryToolsBlock);
   if (webAllowed) parts.push(webSearchGuidance());
   const catalog = getFullCatalog();
   if (catalog) parts.push(catalog);
@@ -772,7 +789,17 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // handle → user_id first, then load by that. Null key (no onboarded student)
   // → no profile. Silently falls back to no profile when profileStore is absent.
   const profileKey = await resolveProfileUserId(args.userId);
-  const profile = args.profileStore && profileKey ? await args.profileStore.loadProfile(profileKey) : null;
+  let profile = args.profileStore && profileKey ? await args.profileStore.loadProfile(profileKey) : null;
+  // PII read-gate: once a memory-WRITE feature is live (per-turn capture or the
+  // update_memory tool), consent_memory gates INJECTION too, not just writes — a
+  // student who hasn't consented has their stored profile withheld from the prompt
+  // (真正"别记我"), fail-closed via getMemoryConsent. Inert by default: with both
+  // flags off this branch never runs, so existing profile injection is byte-for-byte
+  // unchanged — no deploy-time regression before the bia-admin consent_memory column
+  // + onboarding consent collection land.
+  if (profile && profileKey && (isCaptureEnabled() || isUpdateMemoryToolEnabled())) {
+    if (!(await getMemoryConsent(profileKey))) profile = null;
+  }
 
   // P6 observational-memory recall + conversation history, fetched in parallel.
   // recall: the per-turn "## THINGS YOU REMEMBER" block, fetched ONCE here with the

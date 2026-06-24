@@ -68,35 +68,39 @@ describe('recall_memory gating — ON', () => {
 // builders is a strict no-op when the flag is OFF (the recall-tool context block
 // is '' on that path), so OFF stays byte-for-byte unchanged regardless of handle.
 describe('recall_memory gating — prompt byte-identity OFF', () => {
-  it('handle param is a no-op in all 3 builders when flag OFF (no # RECALL MEMORY TOOL)', async () => {
+  it('handle param is a no-op in all 3 builders when both memory-tool flags OFF (no # MEMORY TOOLS)', async () => {
     vi.resetModules();
     delete process.env.GEORGE_RECALL_TOOL_ENABLED;
+    delete process.env.GEORGE_UPDATE_MEMORY_TOOL_ENABLED;
     const o = await import('../../src/agent/orchestrator.js');
     const HANDLE = '+17474638880';
 
     const orch0 = o.buildOrchestratorPrompt(null, 'sid', undefined, '', false, '');
     const orchH = o.buildOrchestratorPrompt(null, 'sid', undefined, '', false, '', HANDLE);
     expect(orchH).toBe(orch0);
-    expect(orchH).not.toContain('# RECALL MEMORY TOOL');
+    expect(orchH).not.toContain('# MEMORY TOOLS');
 
     const single0 = o.buildSingleAgentPrompt(null, 'sid', false, undefined, '', '');
     const singleH = o.buildSingleAgentPrompt(null, 'sid', false, undefined, '', '', HANDLE);
     expect(singleH).toBe(single0);
-    expect(singleH).not.toContain('# RECALL MEMORY TOOL');
+    expect(singleH).not.toContain('# MEMORY TOOLS');
 
     const trunk0 = o.buildTrunkPrompt(null, 'sid', false, undefined, '', '');
     const trunkH = o.buildTrunkPrompt(null, 'sid', false, undefined, '', '', HANDLE);
     expect(trunkH).toBe(trunk0);
-    expect(trunkH).not.toContain('# RECALL MEMORY TOOL');
+    expect(trunkH).not.toContain('# MEMORY TOOLS');
   });
 
-  it('handle param surfaces the # RECALL MEMORY TOOL block when flag ON', async () => {
+  it('handle param surfaces the # MEMORY TOOLS block (mentioning recall_memory) when recall flag ON', async () => {
     vi.resetModules();
     process.env.GEORGE_RECALL_TOOL_ENABLED = 'true';
+    delete process.env.GEORGE_UPDATE_MEMORY_TOOL_ENABLED;
     const o = await import('../../src/agent/orchestrator.js');
     const HANDLE = '+17474638880';
     const prompt = o.buildOrchestratorPrompt(null, 'sid', undefined, '', false, '', HANDLE);
-    expect(prompt).toContain('# RECALL MEMORY TOOL');
+    expect(prompt).toContain('# MEMORY TOOLS');
+    expect(prompt).toContain('recall_memory');
+    expect(prompt).not.toContain('update_memory'); // only the enabled tool is advertised
     expect(prompt).toContain(HANDLE);
   });
 });
