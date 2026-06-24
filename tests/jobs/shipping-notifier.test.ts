@@ -188,6 +188,32 @@ describe('sendPendingShippingNotifications', () => {
     expect(h.markSent).not.toHaveBeenCalled()
   })
 
+  it('falls back to the other channel when the primary send throws', async () => {
+    h.getPending.mockResolvedValue([
+      row({ students: student({ wechat_open_id: 'wx-1', imessage_id: '+1555' }) }),
+    ])
+    // primary = WeChat (throws, e.g. 48h-window errcode) → fall back to iMessage
+    h.send
+      .mockRejectedValueOnce(new Error('wechat errcode 45015'))
+      .mockResolvedValueOnce(undefined)
+    await sendPendingShippingNotifications()
+    expect(h.send).toHaveBeenNthCalledWith(1, 'wechat', 'wx-1', expect.any(String))
+    expect(h.send).toHaveBeenNthCalledWith(2, 'imessage', '+1555', expect.any(String))
+    expect(h.markSent).toHaveBeenCalledWith('n1')
+    expect(h.markFailed).not.toHaveBeenCalled()
+  })
+
+  it('marks failed only after ALL channels fail', async () => {
+    h.getPending.mockResolvedValue([
+      row({ students: student({ wechat_open_id: 'wx-1', imessage_id: '+1555' }) }),
+    ])
+    h.send.mockRejectedValue(new Error('both channels down'))
+    await sendPendingShippingNotifications()
+    expect(h.send).toHaveBeenCalledTimes(2)
+    expect(h.markFailed).toHaveBeenCalledWith('n1', 'both channels down')
+    expect(h.markSent).not.toHaveBeenCalled()
+  })
+
   it('in-flight guard: a second run while one is draining bails out (Codex #3)', async () => {
     let release: () => void = () => {}
     const gate = new Promise<void>((r) => {
