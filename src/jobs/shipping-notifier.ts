@@ -139,20 +139,48 @@ export async function sendPendingShippingNotifications() {
       await markShippingNotificationSkipped(id, 'opted_out')
       continue
     }
-    const platform = student.wechat_open_id ? ('wechat' as const) : ('imessage' as const)
-    const platformId = (student.wechat_open_id || student.imessage_id) as string | null
-    if (!platformId) {
+    // Delivery targets, primary first: WeChat if linked, else iMessage. If the
+    // primary throws (e.g. WeChat 48h-window errcode after the errcode fix, or
+    // the Mac's iMessage SDK is disconnected), fall back to the other channel so
+    // a dual-linked student still gets the update. Stop at the first success —
+    // no double-send.
+    const wechatId = (student.wechat_open_id ?? null) as string | null
+    const imessageId = (student.imessage_id ?? null) as string | null
+    const targets: Array<{ platform: 'wechat' | 'imessage'; id: string }> = []
+    if (wechatId) targets.push({ platform: 'wechat', id: wechatId })
+    if (imessageId) targets.push({ platform: 'imessage', id: imessageId })
+    if (targets.length === 0) {
       await markShippingNotificationSkipped(id, 'no_platform_id')
       continue
     }
 
-    try {
-      await sendPlatformMessage(platform, platformId, text)
-      await markShippingNotificationSent(id)
-      log('info', 'shipping_notification_sent', { id, kind, platform })
-    } catch (err) {
-      await markShippingNotificationFailed(id, (err as Error).message)
-      log('error', 'shipping_notification_error', { id, error: (err as Error).message })
+    let delivered = false
+    let lastErr = ''
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i]
+      try {
+        await sendPlatformMessage(t.platform, t.id, text)
+        await markShippingNotificationSent(id)
+        log('info', 'shipping_notification_sent', {
+          id,
+          kind,
+          platform: t.platform,
+          fellBack: i > 0,
+        })
+        delivered = true
+        break
+      } catch (err) {
+        lastErr = (err as Error).message
+        log('warn', 'shipping_notification_send_failed', {
+          id,
+          platform: t.platform,
+          error: lastErr,
+        })
+      }
+    }
+    if (!delivered) {
+      await markShippingNotificationFailed(id, lastErr)
+      log('error', 'shipping_notification_error', { id, error: lastErr })
     }
   }
   } finally {
