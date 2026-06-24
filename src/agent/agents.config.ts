@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { config } from '../config.js';
 import { applyNoReplyGate } from './noreply-gate.js';
 import { isRecallToolEnabled } from '../tools/recall-memory.js';
+import { isUpdateMemoryToolEnabled } from '../tools/update-memory.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = path.resolve(__dirname, '../../prompts');
@@ -120,7 +121,11 @@ export const SUB_AGENTS = {
 // the flag is OFF the array is byte-identical to before, so every allowlist derived
 // from it (orchestrator restriction list, TRUNK_TOOLS) is unchanged → tool absent.
 const RECALL_TOOL_DIRECT: readonly string[] = isRecallToolEnabled() ? ['recall_memory'] : [];
-export const ORCHESTRATOR_DIRECT_TOOLS = ['set_reminder', 'load_skill', 'react_to_user', ...RECALL_TOOL_DIRECT] as const;
+// The deliberate memory-WRITE tool sits on the orchestrator for the same reason as
+// recall — personal continuity is the main agent's job, not a domain sub-agent's.
+// Appended ONLY when GEORGE_UPDATE_MEMORY_TOOL_ENABLED is on; OFF → array unchanged.
+const UPDATE_MEMORY_DIRECT: readonly string[] = isUpdateMemoryToolEnabled() ? ['update_memory'] : [];
+export const ORCHESTRATOR_DIRECT_TOOLS = ['set_reminder', 'load_skill', 'react_to_user', ...RECALL_TOOL_DIRECT, ...UPDATE_MEMORY_DIRECT] as const;
 
 export type SubAgentName = keyof typeof SUB_AGENTS;
 

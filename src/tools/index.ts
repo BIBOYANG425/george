@@ -32,6 +32,7 @@ export { distanceCompareTool } from './distance-compare.js'
 export { safeRouteTool } from './safe-route.js'
 export { findPlacesTool } from './find-places.js'
 export { recallMemoryTool, isRecallToolEnabled } from './recall-memory.js'
+export { updateMemoryTool, isUpdateMemoryToolEnabled } from './update-memory.js'
 
 import { createSquadPostTool } from './create-squad-post.js'
 import { findSquadPostsTool } from './find-squad-posts.js'
@@ -68,6 +69,7 @@ import { safeRouteTool } from './safe-route.js'
 import { findPlacesTool } from './find-places.js'
 import { geCandidatesTool } from './ge-candidates.js'
 import { recallMemoryTool, isRecallToolEnabled } from './recall-memory.js'
+import { updateMemoryTool, isUpdateMemoryToolEnabled } from './update-memory.js'
 
 export const ALL_TOOLS = {
   create_squad_post: createSquadPostTool,
@@ -111,4 +113,8 @@ export const ALL_TOOLS = {
   // inclusion (ORCHESTRATOR_DIRECT_TOOLS / TRUNK_TOOLS) reads the same flag at the
   // same time, so registration and allowlisting stay in lockstep.
   ...(isRecallToolEnabled() ? { recall_memory: recallMemoryTool } : {}),
+  // The deliberate memory-WRITE tool, gated by GEORGE_UPDATE_MEMORY_TOOL_ENABLED
+  // (default-OFF) — same lockstep registration/allowlisting as recall_memory above:
+  // OFF → key absent → byte-identical pre-feature tool set.
+  ...(isUpdateMemoryToolEnabled() ? { update_memory: updateMemoryTool } : {}),
 }

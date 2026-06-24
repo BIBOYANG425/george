@@ -14,6 +14,13 @@ export const BLOCK_NAMES = [
 
 export type BlockName = (typeof BLOCK_NAMES)[number];
 
+// The blocks that hold durable, student-originated FACTS — every block except
+// george_notes (the scratchpad). Single source of truth for the write-allowlist
+// shared by the per-turn capturer, the update_memory tool, and the reflector, so
+// the allowlist can't drift between them. Lives here (not in capture.ts) so a
+// caller can import it without dragging in the extractor/LLM/observation deps.
+export const DURABLE_FACT_BLOCKS: BlockName[] = BLOCK_NAMES.filter((b) => b !== 'george_notes');
+
 export interface Profile {
   identity: string;
   academic: string;
