@@ -23,6 +23,7 @@ import {
 import { startSpectrumWatchdog, stopSpectrumWatchdog } from './spectrum-watchdog.js'
 import { parseControlTokens, isNoReplyEnabled, getReadReceiptDelayMs } from './split-response.js'
 import { stageReadReceiptDelay, stageGenerate, stageSend } from './spectrum-stages.js'
+import { checkRateLimit } from './rate-limiter.js'
 import { log } from '../observability/logger.js'
 import { renderDelayContext } from '../agent/activity-state.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
@@ -59,6 +60,33 @@ export interface SpectrumHandlers {
 
 const DEDUP_CAP = 2000
 
+// Burst guard config (default-OFF, SPECTRUM_BURST_GUARD_ENABLED). Read at call
+// time from env — mirrors the MEMORY_CAPTURE_ENABLED / GROUNDED_PROACTIVE
+// precedent, so config.ts stays free of eager validation and tests toggle env
+// directly. When disabled, the inbound loop and the user-row save are
+// byte-for-byte today's behavior.
+//
+//   A layer (abuse): sustained volume → 5-10min quiet cooldown (one notice).
+//   B layer (splitter): abort-then-refold so a split thought is answered once.
+function readBurstConfig(): { enabled: boolean; perMin: number; strikes: number; cooldownMs: number; maxRefolds: number } {
+  const int = (v: string | undefined, d: number) => {
+    const n = parseInt(v ?? '', 10)
+    return Number.isFinite(n) && n > 0 ? n : d
+  }
+  return {
+    enabled: process.env.SPECTRUM_BURST_GUARD_ENABLED === 'true',
+    perMin: int(process.env.SPECTRUM_BURST_PER_MIN, 30),
+    strikes: int(process.env.SPECTRUM_BURST_STRIKES, 3),
+    cooldownMs: Math.min(Math.max(int(process.env.SPECTRUM_COOLDOWN_MS, 300_000), 300_000), 600_000), // clamp 5-10min
+    maxRefolds: int(process.env.SPECTRUM_MAX_REFOLDS, 3),
+  }
+}
+
+// One in-voice line sent ONCE when a sender is put on cooldown for flooding, then
+// silence for the window. Transport-level (not agent output), like
+// RATE_LIMIT_RESPONSE. Short, 学长 register, one emoji.
+const BURST_COOLDOWN_NOTICE = '学长这会儿有点接不过来了😮‍💨 你缓几分钟再来找我哈'
+
 export interface LoopOptions {
   debounceMs?: number
   // Send a "still thinking" nudge if the turn exceeds this. Default 9s.
@@ -73,25 +101,49 @@ export async function runSpectrumLoop(
   const debounceMs = opts.debounceMs ?? 1500
   const interimDelayMs = opts.interimDelayMs ?? 9000
   const seen = new Set<string>()
-  const buffers = new Map<string, { texts: string[]; reply: ReplyHandle; timer: ReturnType<typeof setTimeout> }>()
-  // The turn currently running for each sender. When the user fires another
-  // message mid-turn, the message loop aborts this controller so we never reply
-  // to a superseded message — the next turn handles the latest intent (the prior
-  // message is already persisted to history). Keeps replies fast: no debounce
-  // bump, just cancel-and-replace on a rapid follow-up.
-  const inflight = new Map<string, AbortController>()
+  const buffers = new Map<string, { texts: string[]; reply: ReplyHandle; timer: ReturnType<typeof setTimeout>; refolds: number }>()
+  // The turn currently running for each sender. A fresh mid-turn message aborts
+  // this controller so we never reply to a superseded message (Bobby's intent).
+  // With the burst guard ON we ALSO carry the in-flight `texts` forward (refold)
+  // so the superseded content is answered in the next turn, not dropped. `texts`
+  // / `refolds` are unused on the OFF path.
+  const inflight = new Map<string, { ac: AbortController; texts: string[]; refolds: number }>()
   // Wall-clock of George's last reply per sender, kept in-process so a long
   // silence followed by a fresh ping can hand the model delay context (see
   // renderDelayContext). Default-off: empty/no-op unless the activity-state flag
   // is on. In-memory only — a restart simply forgets the gap, which is fine.
   const lastReplyAt = new Map<string, number>()
+  // Burst guard (default-OFF). Read once per connection; OFF → the loop + save
+  // below are byte-for-byte today's behavior.
+  const burst = readBurstConfig()
+  // Per-sender cooldown state, only populated for senders who actually flood.
+  const burstState = new Map<string, { cooldownUntil: number }>()
+  // Evict idle per-sender state so a long-lived process doesn't leak a row per
+  // sender ever seen (same hygiene as rate-limiter.ts's sweep). Cleared on exit.
+  // Created ONLY when the guard is on, so the OFF path is byte-for-byte today
+  // (no extra timer keeping the event loop busy).
+  const sweep: ReturnType<typeof setInterval> | null = burst.enabled
+    ? setInterval(() => {
+        const now = Date.now()
+        const idleCutoff = now - 60 * 60_000 // forget a sender's last-reply after 1h idle
+        for (const [k, t] of lastReplyAt) if (t < idleCutoff) lastReplyAt.delete(k)
+        for (const [k, b] of burstState) if (b.cooldownUntil <= now) burstState.delete(k)
+      }, 10 * 60_000)
+    : null
 
   const flush = async (senderId: string) => {
     const buf = buffers.get(senderId)
     if (!buf) return
+    // Refold-cap path (ON only): a turn is still running because we chose NOT to
+    // abort it (cap hit). Don't start a parallel turn — wait and re-check shortly.
+    // OFF path never hits this (a mid-turn message always aborted the in-flight one).
+    if (burst.enabled && inflight.has(senderId)) {
+      buf.timer = setTimeout(() => void flush(senderId), debounceMs)
+      return
+    }
     buffers.delete(senderId)
     const ac = new AbortController()
-    inflight.set(senderId, ac)
+    inflight.set(senderId, { ac, texts: buf.texts, refolds: buf.refolds })
     // If it's been a long time since George last replied to this sender, prepend
     // a small situational note so he CAN acknowledge the gap naturally. This is
     // pure context — no artificial delay is added; the reply still goes out fast.
@@ -132,36 +184,79 @@ export async function runSpectrumLoop(
       // nothing. Only a genuine failure is logged.
       if (!ac.signal.aborted) log('error', 'spectrum_turn_error', { senderId, error: (err as Error).message })
     } finally {
-      if (inflight.get(senderId) === ac) inflight.delete(senderId)
+      if (inflight.get(senderId)?.ac === ac) inflight.delete(senderId)
       await buf.reply.stopTyping().catch(() => {})
     }
   }
 
-  for await (const [reply, message] of client.messages()) {
-    recordSpectrumInbound()
-    if (message.messageId) {
-      if (seen.has(message.messageId)) continue
-      seen.add(message.messageId)
-      if (seen.size > DEDUP_CAP) for (const id of Array.from(seen).slice(0, DEDUP_CAP / 2)) seen.delete(id)
+  try {
+    for await (const [reply, message] of client.messages()) {
+      recordSpectrumInbound()
+      if (message.messageId) {
+        if (seen.has(message.messageId)) continue
+        seen.add(message.messageId)
+        if (seen.size > DEDUP_CAP) for (const id of Array.from(seen).slice(0, DEDUP_CAP / 2)) seen.delete(id)
+      }
+      if (message.contentType !== 'text') continue
+
+      // ── A layer: abuse cooldown (default-OFF) ──
+      if (burst.enabled) {
+        const now = Date.now()
+        const cd = burstState.get(message.senderId)
+        if (cd && cd.cooldownUntil > now) continue // cooling: drop silently (the one notice was sent on entry)
+        // Sustained-volume signal via the shared limiter: >perMin*strikes msgs in
+        // strikes*60s ("avg >perMin/min for ~strikes min"). A short vent spike stays
+        // well under it; a real flood/bot trips it. Keyed distinctly from squad-draft.
+        const rl = checkRateLimit(`spectrum:${message.senderId}`, { max: burst.perMin * burst.strikes, windowMs: burst.strikes * 60_000 })
+        if (!rl.allowed) {
+          burstState.set(message.senderId, { cooldownUntil: now + burst.cooldownMs })
+          log('info', 'spectrum_burst_cooldown', { senderId: message.senderId, cooldownMs: burst.cooldownMs })
+          await reply.sendText(BURST_COOLDOWN_NOTICE).catch(() => {})
+          continue // one notice on entry, then silence for the window
+        }
+      }
+
+      // ── B layer: supersede (abort) + coalesce (debounce) ──
+      const running = inflight.get(message.senderId)
+      if (running && !running.ac.signal.aborted) {
+        if (burst.enabled && running.refolds < burst.maxRefolds) {
+          // abort-then-refold: kill the in-flight turn (its reply is suppressed by
+          // the not-aborted gate so no stale reply leaks — Bobby's intent) and carry
+          // its texts into the next buffer so the whole thought is answered once.
+          running.ac.abort()
+          const carried = running.texts
+          const refolds = running.refolds + 1
+          const existing = buffers.get(message.senderId)
+          if (existing) {
+            existing.texts = [...carried, ...existing.texts, message.text]
+            existing.refolds = Math.max(existing.refolds, refolds)
+            clearTimeout(existing.timer)
+            existing.timer = setTimeout(() => void flush(message.senderId), debounceMs)
+          } else {
+            buffers.set(message.senderId, { texts: [...carried, message.text], reply, refolds, timer: setTimeout(() => void flush(message.senderId), debounceMs) })
+          }
+          continue
+        }
+        // OFF path: today's behavior — abort, the latest starts fresh.
+        // ON + refold cap reached: do NOT abort; let the in-flight finish (its
+        // reply goes out), and this message buffers below; its flush waits (guard
+        // above) until the in-flight clears, so it rides the next turn.
+        if (!burst.enabled) running.ac.abort()
+      }
+      const existing = buffers.get(message.senderId)
+      if (existing) {
+        existing.texts.push(message.text)
+        clearTimeout(existing.timer)
+        existing.timer = setTimeout(() => void flush(message.senderId), debounceMs)
+      } else {
+        // All messages in a per-sender burst share one conversation; the first
+        // message's reply handle is representative for the coalesced turn.
+        const entry = { texts: [message.text], reply, refolds: 0, timer: setTimeout(() => void flush(message.senderId), debounceMs) }
+        buffers.set(message.senderId, entry)
+      }
     }
-    if (message.contentType !== 'text') continue
-    // Rapid-fire supersede: a fresh message means the user is still talking, so
-    // any turn already running for them is now stale — abort it so we don't reply
-    // to a superseded message. (The coalesce path below batches messages that
-    // arrive before a turn starts; this handles the ones that land mid-turn.)
-    const running = inflight.get(message.senderId)
-    if (running && !running.signal.aborted) running.abort()
-    const existing = buffers.get(message.senderId)
-    if (existing) {
-      existing.texts.push(message.text)
-      clearTimeout(existing.timer)
-      existing.timer = setTimeout(() => void flush(message.senderId), debounceMs)
-    } else {
-      // All messages in a per-sender burst share one conversation; the first
-      // message's reply handle is representative for the coalesced turn.
-      const entry = { texts: [message.text], reply, timer: setTimeout(() => void flush(message.senderId), debounceMs) }
-      buffers.set(message.senderId, entry)
-    }
+  } finally {
+    if (sweep) clearInterval(sweep)
   }
   // Drain any pending buffers when the stream ends.
   await Promise.all(Array.from(buffers.keys()).map(flush))
@@ -198,7 +293,9 @@ export function buildTextHandler(deps: TextHandlerDeps) {
 
 // Build the downstream pipeline handlers (injection → handshake → user
 // commands → orchestrator). Pure of any connection — reused across reconnects.
-function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
+// Exported for tests (the three-state user-row save in runOrchestratorText is the
+// burst guard's load-bearing correctness path). Not part of the public adapter API.
+export function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
   const handleText = buildTextHandler({
     checkInjection,
     pickRejection: () => INJECTION_REJECTIONS[Math.floor(Math.random() * INJECTION_REJECTIONS.length)],
@@ -265,50 +362,75 @@ function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandlers {
 
     runOrchestratorText: async (userId: string, text: string, abortController?: AbortController, delayContext?: string, reply?: ReplyHandle): Promise<string> => {
       const turnStart = Date.now()
-      // Persist the user turn before running so it survives an orchestrator
-      // failure, then run WITH the session + profile stores so george loads
-      // prior conversation context (buildHistoryPrefix). Mirrors POST /chat.
-      if (deps.sessionStore) {
-        await deps.sessionStore.save(userId, {
-          sessionId: userId,
-          messages: [{ role: 'user', content: text }],
-          systemContext: {},
-        })
+      const burst = readBurstConfig()
+      const saveUserTurn = async () => {
+        if (deps.sessionStore) {
+          await deps.sessionStore.save(userId, {
+            sessionId: userId,
+            messages: [{ role: 'user', content: text }],
+            systemContext: {},
+          })
+        }
       }
+      // OFF path: persist the user turn BEFORE running so it survives an
+      // orchestrator failure (today's behavior, byte-for-byte). ON path: defer to
+      // AFTER the run so a SUPERSEDED (aborted) turn persists nothing — its text is
+      // refolded into the next turn — while a genuine ERROR still saves the user
+      // turn (see the catch), keeping the survives-failure guarantee. Deferring
+      // also removes a pre-existing dup (the just-saved row showed up in
+      // buildHistoryPrefix AND as the live prompt text).
+      if (!burst.enabled) await saveUserTurn()
       let finalText = ''
       let turnTelemetry: import('../agent/session-store.js').TurnTelemetry | undefined
-      for await (const event of runOrchestrator({
-        userId,
-        channel: 'imessage',
-        text,
-        sessionStore: deps.sessionStore,
-        profileStore: deps.profileStore,
-        abortController,
-        delayContext,
-      })) {
-        const e = event as {
-          type?: string
-          result?: string
-          emoji?: string
-          telemetry?: import('../agent/session-store.js').TurnTelemetry
-          message?: { content?: Array<{ type?: string; text?: string }> }
+      try {
+        for await (const event of runOrchestrator({
+          userId,
+          channel: 'imessage',
+          text,
+          sessionStore: deps.sessionStore,
+          profileStore: deps.profileStore,
+          abortController,
+          delayContext,
+        })) {
+          const e = event as {
+            type?: string
+            result?: string
+            emoji?: string
+            telemetry?: import('../agent/session-store.js').TurnTelemetry
+            message?: { content?: Array<{ type?: string; text?: string }> }
+          }
+          if (e.type === 'reaction' && typeof e.emoji === 'string' && e.emoji && reply?.react) {
+            // George tapped back (react_to_user). Apply the native iMessage
+            // tapback to the inbound message; best-effort, never blocks the reply.
+            void reply.react(e.emoji).catch(() => {})
+          } else if (e.type === 'telemetry') {
+            turnTelemetry = e.telemetry
+          } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
+            finalText = e.result
+          } else if (e.type === 'assistant' && e.message?.content && finalText === '') {
+            const t = e.message.content
+              .filter((c) => c.type === 'text' && typeof c.text === 'string')
+              .map((c) => c.text as string)
+              .join('')
+            if (t) finalText = t
+          }
         }
-        if (e.type === 'reaction' && typeof e.emoji === 'string' && e.emoji && reply?.react) {
-          // George tapped back (react_to_user). Apply the native iMessage
-          // tapback to the inbound message; best-effort, never blocks the reply.
-          void reply.react(e.emoji).catch(() => {})
-        } else if (e.type === 'telemetry') {
-          turnTelemetry = e.telemetry
-        } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
-          finalText = e.result
-        } else if (e.type === 'assistant' && e.message?.content && finalText === '') {
-          const t = e.message.content
-            .filter((c) => c.type === 'text' && typeof c.text === 'string')
-            .map((c) => c.text as string)
-            .join('')
-          if (t) finalText = t
+      } catch (err) {
+        // ON path: a SUPERSEDED (aborted) turn persists NOTHING — its text is
+        // refolded into the next turn. A genuine ERROR still saves the user turn
+        // so the message survives the failure (today's guarantee). OFF path:
+        // rethrow exactly as before (the loop's flush catch logs it).
+        if (burst.enabled) {
+          if (!abortController?.signal.aborted) await saveUserTurn()
+          return ''
         }
+        throw err
       }
+      // ON path: superseded after completing → persist nothing, send nothing.
+      if (burst.enabled && abortController?.signal.aborted) return ''
+      // ON path: completed and not superseded → persist the user turn now
+      // (deferred from before-run).
+      if (burst.enabled) await saveUserTurn()
       // Persist the assistant turn (with per-turn telemetry) so the dashboard
       // captures cost/tokens/model for the production iMessage path too.
       if (deps.sessionStore && finalText) {

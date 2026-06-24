@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { runSpectrumLoop } from '../../src/adapters/spectrum.js'
 import { sendWithRetry, redactHandle, isTransientSendError } from '../../src/adapters/spectrum-client.js'
 import type { SpectrumClient, InboundMessage, ReplyHandle } from '../../src/adapters/spectrum-client.js'
@@ -233,5 +233,93 @@ describe('runSpectrumLoop', () => {
     expect(firstAborted).toBe(true)               // the stale turn was cancelled
     expect(sent).toContain('REPLY-SECOND')        // the latest intent is answered
     expect(sent).not.toContain('REPLY-FIRST')     // and the superseded reply never goes out
+  })
+})
+
+// ── Burst guard (SPECTRUM_BURST_GUARD_ENABLED) ──────────────────────────────
+// The flag-OFF behavior is covered by the tests above (default env). These cover
+// the ON path: abort-then-refold (B layer) and the sustained-volume cooldown (A
+// layer), plus the vent-not-falsely-cooled guard. Unique senderIds per test keep
+// the module-global rate-limiter counters from leaking across tests.
+describe('runSpectrumLoop — burst guard (flag ON)', () => {
+  const BURST_ENV = ['SPECTRUM_BURST_GUARD_ENABLED', 'SPECTRUM_BURST_PER_MIN', 'SPECTRUM_BURST_STRIKES', 'SPECTRUM_MAX_REFOLDS'] as const
+  const saved: Record<string, string | undefined> = {}
+  let uniq = 0
+  const sender = () => `+1999000${String(uniq++).padStart(4, '0')}` // fresh per test → fresh rate-limiter window
+  beforeEach(() => { for (const k of BURST_ENV) saved[k] = process.env[k] })
+  afterEach(() => { for (const k of BURST_ENV) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k] } })
+
+  it('B layer — refolds a mid-turn follow-up into the next turn (answers the whole thought once, not just the latest)', async () => {
+    process.env.SPECTRUM_BURST_GUARD_ENABLED = 'true'
+    const id = sender()
+    const sent: string[] = []
+    const reply: ReplyHandle = {
+      sendText: async (t) => { sent.push(t) },
+      sendAttachment: async () => {}, startTyping: async () => {}, stopTyping: async () => {},
+    }
+    let turnStarted!: () => void
+    const started = new Promise<void>((r) => { turnStarted = r })
+    let firstAborted = false
+    const calls: string[] = []
+    const handleText = async (_u: string, text: string, _r: ReplyHandle, ac?: AbortController): Promise<string | null> => {
+      calls.push(text)
+      if (text === 'first') {
+        turnStarted()
+        await new Promise<void>((resolve, reject) => {
+          ac?.signal.addEventListener('abort', () => { firstAborted = true; reject(new Error('aborted')) })
+          setTimeout(resolve, 2000)
+        })
+        return 'REPLY-FIRST'
+      }
+      return 'REPLY-SECOND'
+    }
+    const client: SpectrumClient = {
+      async *messages() {
+        yield [reply, msg({ senderId: id, messageId: 'a', text: 'first' })] as const
+        await started
+        yield [reply, msg({ senderId: id, messageId: 'b', text: 'second' })] as const
+        // Keep the stream open so the refold buffer's debounce timer fires (and
+        // its turn runs) INSIDE the loop, rather than after it returns.
+        await new Promise<void>((r) => setTimeout(r, 300))
+      },
+      getLocation: async () => null, close: async () => {},
+    }
+    await runSpectrumLoop(client, { handleText, handleLocation: vi.fn() }, { debounceMs: 50, interimDelayMs: 60_000 })
+
+    expect(firstAborted).toBe(true)                          // in-flight turn still aborted (Bobby's intent kept)
+    expect(sent).not.toContain('REPLY-FIRST')                // no stale reply leaks
+    // The refold carried 'first' forward: the surviving turn saw BOTH, joined.
+    expect(calls).toContain('first\nsecond')
+    expect(sent).toContain('REPLY-SECOND')
+  })
+
+  it('A layer — a sustained flood trips ONE cooldown notice, then drops silently', async () => {
+    process.env.SPECTRUM_BURST_GUARD_ENABLED = 'true'
+    process.env.SPECTRUM_BURST_PER_MIN = '1'
+    process.env.SPECTRUM_BURST_STRIKES = '1' // max = 1*1 = 1 in 60s → the 2nd msg this window trips
+    const id = sender()
+    const { client, sent } = fakeClient([
+      msg({ senderId: id, messageId: 'a', text: 'one' }),
+      msg({ senderId: id, messageId: 'b', text: 'two' }),
+      msg({ senderId: id, messageId: 'c', text: 'three' }),
+      msg({ senderId: id, messageId: 'd', text: 'four' }),
+    ])
+    const handle = vi.fn(async () => 'ok')
+    await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() }, { debounceMs: 0 })
+    // First message answered; flood notice sent exactly once; rest dropped.
+    const notices = sent.filter((s) => s.includes('接不过来'))
+    expect(notices).toHaveLength(1)
+    expect(handle).toHaveBeenCalledTimes(1) // only the 1st (pre-cooldown) message reached the handler
+  })
+
+  it('A layer — does NOT cool down a normal burst under the line (vent-safe)', async () => {
+    process.env.SPECTRUM_BURST_GUARD_ENABLED = 'true' // default 30/min * 3 = 90 in 180s
+    const id = sender()
+    const msgs = Array.from({ length: 12 }, (_, i) => msg({ senderId: id, messageId: `v${i}`, text: `vent ${i}` }))
+    const { client, sent } = fakeClient(msgs)
+    const handle = vi.fn(async () => 'there there')
+    await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() }, { debounceMs: 0 })
+    expect(sent.some((s) => s.includes('接不过来'))).toBe(false) // no cooldown for a 12-message vent
+    expect(handle).toHaveBeenCalled()                            // the burst is answered (coalesced)
   })
 })
