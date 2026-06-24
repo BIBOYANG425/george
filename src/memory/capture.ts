@@ -20,8 +20,8 @@
 // no-op: no LLM call, no writes — byte-identical to the pre-P6 behavior.
 
 import { callLightweightLLM } from '../agent/llm-providers.js';
-import { ProfileStore, BLOCK_NAMES, BlockName } from './profile.js';
-import { resolveProfileUserId } from '../db/students.js';
+import { ProfileStore, DURABLE_FACT_BLOCKS, BlockName } from './profile.js';
+import { resolveProfileUserId, getMemoryConsent } from '../db/students.js';
 import { log } from '../observability/logger.js';
 import {
   embedObservation,
@@ -37,9 +37,35 @@ export function isObserveEnabled(): boolean {
   return process.env.GEORGE_OBSERVE_ENABLED === 'true';
 }
 
-// Blocks the capturer may write to. george_notes is George's own scratchpad, not
-// a place for extracted user facts, so it is excluded.
-const CAPTURE_BLOCKS: BlockName[] = BLOCK_NAMES.filter((b) => b !== 'george_notes');
+// Which blocks the capturer (and the update_memory tool) may write to is the
+// shared DURABLE_FACT_BLOCKS allowlist from profile.ts — every block except
+// george_notes (George's own scratchpad). Imported, not redefined, so capture and
+// the tool can never drift apart on what's writable.
+
+// Lightweight in-process counters so a capture run is OBSERVABLE even when it
+// writes nothing or fails silently (gap A): today a swallowed error only emits a
+// `warn` log the caller can't see. ok counts completed runs, failed counts
+// extractor/write errors. Exported so tests (and a future metrics scrape) can read
+// the failure rate instead of inferring it from logs.
+export const captureMetrics = { ok: 0, failed: 0 };
+
+// Source-grounding (anti-fabrication, code-level — mirrors the fast-path
+// scanFabricationRisk philosophy): a captured fact is only persisted if its
+// `quote` — the student's own words the extractor copied — actually appears in the
+// STUDENT text. This drops facts the model paraphrased from GEORGE's suggestions
+// or invented outright. Normalized (lowercase + collapsed whitespace) so trivial
+// formatting differences don't reject a real quote; an empty/missing quote fails
+// closed (not grounded → not written). Exported for direct unit testing.
+export function isGroundedInStudentText(quote: string | undefined, studentText: string): boolean {
+  const norm = (s: string): string => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const q = norm(quote ?? '');
+  // Reject degenerate quotes: an empty quote, or one so short it's a substring of
+  // almost any text (e.g. "I", "我", "yes", "ok"). Without this floor the model
+  // could attach a trivial 1-char quote to a fabricated fact and slip past the
+  // substring check. <4 normalized chars carries no real evidentiary weight.
+  if (q.length < 4) return false;
+  return norm(studentText).includes(q);
+}
 
 // salience and kind constraints mirror the user_observations DB CHECKs. The
 // caller (this module) clamps salience and validates kind before insert; the
@@ -51,11 +77,12 @@ const OBSERVATION_KINDS = ['fact', 'event', 'emotion', 'preference', 'relationsh
 
 const EXTRACT_SYSTEM = [
   "You extract two things about a student from ONE chat turn, for an AI campus companion's memory.",
-  'Return STRICT JSON only: {"facts":[{"block":"<identity|academic|interests|relationships|state>","fact":"<short third-person fact>"}],"observations":[{"content":"<short third-person note>","salience":<1-5>,"kind":"<fact|event|emotion|preference|relationship>"}]}',
+  'Return STRICT JSON only: {"facts":[{"block":"<identity|academic|interests|relationships|state>","fact":"<short third-person fact>","quote":"<the student\'s VERBATIM words proving it, copied EXACTLY from the STUDENT line>"}],"observations":[{"content":"<short third-person note>","salience":<1-5>,"kind":"<fact|event|emotion|preference|relationship>"}]}',
   'FACTS — durable, long-term things worth knowing next time:',
   '- Capture ONLY durable facts: major, year, hometown, dorm/housing, interests/hobbies, ongoing situations, relationships, stable preferences.',
   '- Do NOT capture transient chit-chat, the assistant\'s suggestions/questions, or anything the student did not clearly state.',
   '- Each fact: a short third-person statement, e.g. "studies CS, sophomore", "lives in the village", "into hiking and hotpot".',
+  '- Each fact MUST carry a `quote`: the student\'s exact words it came from, copied verbatim from the STUDENT line (never from GEORGE). If you cannot quote the student verbatim, DROP that fact — facts without a real student quote are discarded.',
   '- Never invent. Only what the student actually said. If nothing durable, return "facts":[].',
   'OBSERVATIONS — only what a real friend would actually REMEMBER about this person weeks later:',
   '- Be STINGY. Most turns have NOTHING memorable. That is the normal, correct case. Default to "observations":[].',
@@ -83,14 +110,14 @@ interface RawObservation {
 // both the per-turn capturer and the backfill share this raw shape and clamp
 // before insert.
 export interface ExtractedMemory {
-  facts: Array<{ block?: string; fact?: string }>;
+  facts: Array<{ block?: string; fact?: string; quote?: string }>;
   observations: Array<{ content?: string; salience?: number; kind?: string }>;
 }
 
 // callLightweightLLM's non-Kimi fallback does not force JSON, so be tolerant:
 // pull the first {...} object out of whatever came back. One parse, both arrays.
 function parseExtract(raw: string): {
-  facts: Array<{ block?: string; fact?: string }>;
+  facts: Array<{ block?: string; fact?: string; quote?: string }>;
   observations: RawObservation[];
 } {
   try {
@@ -98,7 +125,7 @@ function parseExtract(raw: string): {
     const end = raw.lastIndexOf('}');
     if (start === -1 || end === -1 || end < start) return { facts: [], observations: [] };
     const obj = JSON.parse(raw.slice(start, end + 1)) as {
-      facts?: Array<{ block?: string; fact?: string }>;
+      facts?: Array<{ block?: string; fact?: string; quote?: string }>;
       observations?: RawObservation[];
     };
     return {
@@ -170,6 +197,14 @@ export async function captureFactsFromTurn(
   // keyed by the same uuid, so this gate applies to both paths.
   const profileKey = await resolveProfileUserId(userId);
   if (!profileKey) return;
+  // PII consent gates ONLY the facts→user_profiles write. It is queried solely
+  // when capture is on, and it does NOT gate the observation path (that has its
+  // own GEORGE_OBSERVE_ENABLED flag) — so this never breaks an observe-only run.
+  // FAIL-CLOSED via getMemoryConsent (false on any miss, incl. the not-yet-migrated
+  // column). If capture is the only writer and consent is absent, there's nothing
+  // left to write, so skip the extraction LLM call entirely.
+  const consented = capture ? await getMemoryConsent(profileKey) : false;
+  if (!observe && !consented) return;
   // Construct the real ObservationDB lazily — only when observe is on and no fake
   // was injected — so capture-only mode never spins up a Supabase client.
   const observationDB = observe ? deps.observationDB ?? createSupabaseObservationDB() : undefined;
@@ -177,10 +212,13 @@ export async function captureFactsFromTurn(
     const { facts, observations } = await extractMemoryFromTurn(userText, assistantText);
 
     let written = 0;
-    if (capture) {
+    if (capture && consented) {
       for (const f of facts) {
         const block = f.block as BlockName;
-        if (!f.fact || !CAPTURE_BLOCKS.includes(block)) continue;
+        if (!f.fact || !DURABLE_FACT_BLOCKS.includes(block)) continue;
+        // Anti-fabrication: drop any fact whose quote isn't verifiably the
+        // student's own words (paraphrased-from-GEORGE or invented → discarded).
+        if (!isGroundedInStudentText(f.quote, userText)) continue;
         await store.appendToBlock(profileKey, block, f.fact.trim());
         written++;
       }
@@ -199,8 +237,13 @@ export async function captureFactsFromTurn(
       }
     }
 
-    if (written || observed) log('info', 'memory_capture', { userId, written, observed });
+    captureMetrics.ok++;
+    // Log COUNTS only — never the raw userId (a phone number / WeChat openid is PII
+    // and these logs hit stdout). Correlation, if ever needed, goes through the
+    // resolved internal uuid, not the channel handle.
+    if (written || observed) log('info', 'memory_capture', { written, observed });
   } catch (err) {
+    captureMetrics.failed++;
     log('warn', 'memory_capture_failed', { error: (err as Error).message });
   }
 }

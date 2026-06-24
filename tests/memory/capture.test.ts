@@ -7,9 +7,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // vi.hoisted so the mock fns exist before the module factories run. Tests
 // reconfigure them per-case (the LLM JSON, the resolved profile key).
-const { llmMock, resolveMock, embedMock, logMock } = vi.hoisted(() => ({
+const { llmMock, resolveMock, consentMock, embedMock, logMock } = vi.hoisted(() => ({
   llmMock: vi.fn(),
   resolveMock: vi.fn(),
+  consentMock: vi.fn(),
   embedMock: vi.fn(),
   logMock: vi.fn(),
 }));
@@ -20,6 +21,7 @@ vi.mock('../../src/agent/llm-providers.js', () => ({
 
 vi.mock('../../src/db/students.js', () => ({
   resolveProfileUserId: resolveMock,
+  getMemoryConsent: consentMock,
 }));
 
 // Mock observations.js so embedObservation never touches Supabase and
@@ -39,6 +41,8 @@ import {
   captureFactsFromTurn,
   isCaptureEnabled,
   isObserveEnabled,
+  isGroundedInStudentText,
+  captureMetrics,
 } from '../../src/memory/capture.js';
 
 const HANDLE = '+17474638880';
@@ -78,12 +82,15 @@ function makeObservationDB() {
 beforeEach(() => {
   llmMock.mockReset();
   resolveMock.mockReset();
+  consentMock.mockReset();
   embedMock.mockReset();
   logMock.mockReset();
   delete process.env.MEMORY_CAPTURE_ENABLED;
   delete process.env.GEORGE_OBSERVE_ENABLED;
-  // Sensible defaults: handle resolves to a real uuid, embedding present.
+  // Sensible defaults: handle resolves to a real uuid, the student has consented,
+  // embedding present. Consent-denied cases override consentMock per-test.
   resolveMock.mockResolvedValue(UID);
+  consentMock.mockResolvedValue(true);
   embedMock.mockResolvedValue([0.1, 0.2, 0.3]);
 });
 
@@ -222,18 +229,19 @@ describe('captureFactsFromTurn — salience clamping & validation', () => {
 describe('captureFactsFromTurn — capture ON, observe OFF', () => {
   it('appends facts to blocks and inserts no observations', async () => {
     process.env.MEMORY_CAPTURE_ENABLED = 'true';
+    // Each fact carries a `quote` the source-grounding check finds in the STUDENT text.
     llmMock.mockResolvedValue(
       JSON.stringify({
         facts: [
-          { block: 'academic', fact: 'studies CS, sophomore' },
-          { block: 'interests', fact: 'into hiking and hotpot' },
+          { block: 'academic', fact: 'studies CS, sophomore', quote: 'I study CS' },
+          { block: 'interests', fact: 'into hiking and hotpot', quote: 'into hiking and hotpot' },
         ],
         observations: [{ content: 'felt stressed about midterms', salience: 4, kind: 'emotion' }],
       }),
     );
     const { store, appends } = makeStore();
     const { db, inserts } = makeObservationDB();
-    await captureFactsFromTurn(store, HANDLE, 'x', 'y', { observationDB: db });
+    await captureFactsFromTurn(store, HANDLE, "I study CS, sophomore — also into hiking and hotpot", 'y', { observationDB: db });
 
     expect(appends).toEqual([
       { userId: UID, block: 'academic', content: 'studies CS, sophomore' },
@@ -249,19 +257,109 @@ describe('captureFactsFromTurn — both ON', () => {
     process.env.GEORGE_OBSERVE_ENABLED = 'true';
     llmMock.mockResolvedValue(
       JSON.stringify({
-        facts: [{ block: 'identity', fact: 'from Shanghai' }],
+        facts: [{ block: 'identity', fact: 'from Shanghai', quote: 'from Shanghai' }],
         observations: [{ content: 'celebrated an offer', salience: 5, kind: 'event' }],
       }),
     );
     const { store, appends } = makeStore();
     const { db, inserts } = makeObservationDB();
-    await captureFactsFromTurn(store, HANDLE, 'x', 'y', { observationDB: db });
+    await captureFactsFromTurn(store, HANDLE, "I'm from Shanghai", 'y', { observationDB: db });
 
     expect(appends).toHaveLength(1);
     expect(inserts).toHaveLength(1);
     const captureLog = logMock.mock.calls.find((c) => c[1] === 'memory_capture');
     expect(captureLog).toBeDefined();
     expect(captureLog![2]).toMatchObject({ written: 1, observed: 1 });
+    // PII: the raw handle must NOT be logged (phone/openid → stdout).
+    expect(captureLog![2]).not.toHaveProperty('userId');
+  });
+});
+
+describe('captureFactsFromTurn — PII consent gate (capture path only)', () => {
+  it('capture ON, observe OFF, NOT consented → zero writes AND no LLM call (nothing to write)', async () => {
+    process.env.MEMORY_CAPTURE_ENABLED = 'true';
+    consentMock.mockResolvedValue(false);
+    const { store, appends } = makeStore();
+    const { db, inserts } = makeObservationDB();
+    await captureFactsFromTurn(store, HANDLE, 'I study CS', 'y', { observationDB: db });
+    expect(llmMock).not.toHaveBeenCalled(); // no consent + no observe → skip extraction entirely
+    expect(appends).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+
+  it('capture ON, observe ON, NOT consented → facts withheld but observations STILL written (gate must not hurt observe path)', async () => {
+    process.env.MEMORY_CAPTURE_ENABLED = 'true';
+    process.env.GEORGE_OBSERVE_ENABLED = 'true';
+    consentMock.mockResolvedValue(false);
+    llmMock.mockResolvedValue(
+      JSON.stringify({
+        facts: [{ block: 'academic', fact: 'studies CS', quote: 'I study CS' }],
+        observations: [{ content: 'stressed about a midterm', salience: 4, kind: 'emotion' }],
+      }),
+    );
+    const { store, appends } = makeStore();
+    const { db, inserts } = makeObservationDB();
+    await captureFactsFromTurn(store, HANDLE, 'I study CS', 'y', { observationDB: db });
+    expect(appends).toEqual([]); // no consent → no fact write
+    expect(inserts).toHaveLength(1); // observe path independent of consent
+  });
+});
+
+describe('captureFactsFromTurn — source-grounding (anti-fabrication)', () => {
+  it('drops a fact whose quote is NOT in the student text; keeps one that is', async () => {
+    process.env.MEMORY_CAPTURE_ENABLED = 'true';
+    llmMock.mockResolvedValue(
+      JSON.stringify({
+        facts: [
+          { block: 'academic', fact: 'studies CS', quote: 'I study CS' }, // grounded → kept
+          { block: 'identity', fact: 'is from Beijing', quote: 'from Beijing' }, // NOT in text → dropped
+          { block: 'interests', fact: 'likes hiking' }, // no quote at all → dropped
+        ],
+        observations: [],
+      }),
+    );
+    const { store, appends } = makeStore();
+    const { db } = makeObservationDB();
+    await captureFactsFromTurn(store, HANDLE, 'I study CS at USC', 'y', { observationDB: db });
+    expect(appends).toEqual([{ userId: UID, block: 'academic', content: 'studies CS' }]);
+  });
+});
+
+describe('isGroundedInStudentText', () => {
+  it('true only when the quote (normalized) appears in the student text', () => {
+    expect(isGroundedInStudentText('I study CS', 'well, I Study  CS at USC')).toBe(true); // case + whitespace tolerant
+    expect(isGroundedInStudentText('from Beijing', 'I study CS')).toBe(false);
+    expect(isGroundedInStudentText('', 'anything')).toBe(false); // empty quote fails closed
+    expect(isGroundedInStudentText(undefined, 'anything')).toBe(false);
+  });
+
+  it('rejects degenerate short quotes even when present in the text (anti-bypass)', () => {
+    expect(isGroundedInStudentText('I', 'I study CS')).toBe(false); // 1-char latin
+    expect(isGroundedInStudentText('我', '我是大二')).toBe(false); // single CJK
+    expect(isGroundedInStudentText('yes', 'yes I do')).toBe(false); // 3-char filler
+    expect(isGroundedInStudentText('我是大二', 'well 我是大二 now')).toBe(true); // 4 chars, substantive
+  });
+});
+
+describe('captureFactsFromTurn — failure is observable (gap A)', () => {
+  it('extractor throws → captureMetrics.failed increments (no longer silent)', async () => {
+    process.env.GEORGE_OBSERVE_ENABLED = 'true';
+    llmMock.mockRejectedValue(new Error('extractor boom'));
+    const before = captureMetrics.failed;
+    const { store } = makeStore();
+    const { db } = makeObservationDB();
+    await expect(captureFactsFromTurn(store, HANDLE, 'x', 'y', { observationDB: db })).resolves.toBeUndefined();
+    expect(captureMetrics.failed).toBe(before + 1);
+  });
+
+  it('successful run increments captureMetrics.ok', async () => {
+    process.env.GEORGE_OBSERVE_ENABLED = 'true';
+    llmMock.mockResolvedValue(JSON.stringify({ facts: [], observations: [] }));
+    const before = captureMetrics.ok;
+    const { store } = makeStore();
+    const { db } = makeObservationDB();
+    await captureFactsFromTurn(store, HANDLE, 'hi', 'hey', { observationDB: db });
+    expect(captureMetrics.ok).toBe(before + 1);
   });
 });
 
