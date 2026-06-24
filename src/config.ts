@@ -74,6 +74,18 @@ export const config = {
     // SHIPPING_NOTIFIER_ENABLED=true to start delivering (queue-health check +
     // dry-run first).
     enabled: process.env.SHIPPING_NOTIFIER_ENABLED === 'true',
+    // Phase-1 dry-run allowlist: comma-separated wechat_open_id / imessage_id
+    // values. When non-empty, ONLY these recipients receive notifications;
+    // everyone else is skipped ('not_in_allowlist'). Empty = no filtering (full
+    // operation). Verify end-to-end delivery to one test recipient before wide.
+    allowlist: (process.env.SHIPPING_NOTIFIER_ALLOWLIST ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    // Alert threshold: when one tick stale-drops >= this many rows (the notifier
+    // fell >24h behind — likely a george host outage), log at 'error' with event
+    // 'shipping_queue_alert'. Default 200.
+    queueAlertDepth: Number(process.env.SHIPPING_QUEUE_ALERT_DEPTH ?? 200),
   },
   // When set on a bridge-mode deployment (e.g. Mac mini), the iMessage adapter
   // forwards new messages to this URL instead of calling processMessage locally.

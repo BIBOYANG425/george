@@ -20,6 +20,9 @@ const h = vi.hoisted(() => ({
   markFailed: vi.fn(async () => {}),
   send: vi.fn(async () => {}),
   log: vi.fn(),
+  // Mutable shippingNotifier config (the notifier imports config.js, which would
+  // otherwise load real env). Reset in beforeEach.
+  cfg: { allowlist: [] as string[], queueAlertDepth: 99999 },
 }))
 
 vi.mock('../../src/db/shipping-notifications.js', () => ({
@@ -33,6 +36,9 @@ vi.mock('../../src/adapters/send-message.js', () => ({
   sendPlatformMessage: h.send,
 }))
 vi.mock('../../src/observability/logger.js', () => ({ log: h.log }))
+vi.mock('../../src/config.js', () => ({
+  config: { shippingNotifier: h.cfg },
+}))
 
 import {
   sendPendingShippingNotifications,
@@ -60,6 +66,9 @@ const row = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   vi.clearAllMocks()
   h.markStale.mockResolvedValue(0)
+  // clearAllMocks doesn't touch the plain cfg object — reset it by hand.
+  h.cfg.allowlist = []
+  h.cfg.queueAlertDepth = 99999
 })
 
 describe('messageForKind', () => {
@@ -235,5 +244,48 @@ describe('sendPendingShippingNotifications', () => {
     )
     release()
     await first
+  })
+
+  it('allowlist: delivers to a recipient whose handle is listed', async () => {
+    h.send.mockResolvedValue(undefined) // prior test left a reject impl (clearAllMocks keeps impls)
+    h.cfg.allowlist = ['+15551234567'] // the default student's imessage_id
+    h.getPending.mockResolvedValue([row()])
+    await sendPendingShippingNotifications()
+    expect(h.send).toHaveBeenCalledTimes(1)
+    expect(h.markSent).toHaveBeenCalledWith('n1')
+  })
+
+  it('allowlist: skips a recipient not in the list (not_in_allowlist)', async () => {
+    h.cfg.allowlist = ['someone-else-openid']
+    h.getPending.mockResolvedValue([row()])
+    await sendPendingShippingNotifications()
+    expect(h.send).not.toHaveBeenCalled()
+    expect(h.markSkipped).toHaveBeenCalledWith('n1', 'not_in_allowlist')
+  })
+
+  it('alerts when one tick stale-drops >= queueAlertDepth rows', async () => {
+    h.cfg.queueAlertDepth = 5
+    h.markStale.mockResolvedValue(10)
+    h.getPending.mockResolvedValue([])
+    await sendPendingShippingNotifications()
+    expect(h.log).toHaveBeenCalledWith(
+      'error',
+      'shipping_queue_alert',
+      expect.objectContaining({ reason: 'stale_backlog_dropped', count: 10 }),
+    )
+  })
+
+  it('alerts when pending hits the per-tick limit (backlog falling behind)', async () => {
+    h.getPending.mockResolvedValue(
+      Array.from({ length: 100 }, (_, i) =>
+        row({ id: `n${i}`, students: student({ shipping_notif_opt_out: true }) }),
+      ),
+    )
+    await sendPendingShippingNotifications()
+    expect(h.log).toHaveBeenCalledWith(
+      'error',
+      'shipping_queue_alert',
+      expect.objectContaining({ reason: 'backlog_at_tick_limit' }),
+    )
   })
 })
