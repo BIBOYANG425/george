@@ -10,7 +10,13 @@ FROM node:20-slim AS build
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY package*.json tsconfig.json ./
+# .npmrc scopes @biboyang425 to GitHub Packages with ${NODE_AUTH_TOKEN}; Railway
+# passes the NODE_AUTH_TOKEN service variable as this build ARG (a read:packages
+# PAT), which npm ci expands to authenticate the private @biboyang425/bia-shared
+# install. The token lives only in the build stage; the runtime stage copies the
+# already-installed node_modules and never sees it.
+COPY package*.json tsconfig.json .npmrc ./
+ARG NODE_AUTH_TOKEN
 RUN npm ci
 COPY src/ ./src/
 RUN npm run build && npm prune --omit=dev

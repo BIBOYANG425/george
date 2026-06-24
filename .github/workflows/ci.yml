@@ -32,12 +32,19 @@ jobs:
         with:
           node-version: 20 # matches the Dockerfile (node:20-slim)
           cache: npm
+          registry-url: https://npm.pkg.github.com
+          scope: "@biboyang425"
 
       # npm ci against package-lock.json — same as the Dockerfile build stage.
       # ubuntu-latest ships python3 + build-essential, so native deps
       # (better-sqlite3 via spectrum-ts) compile without extra setup.
+      # NODE_AUTH_TOKEN authenticates the private @biboyang425/bia-shared install
+      # (the committed .npmrc expands ${NODE_AUTH_TOKEN}); GH_PACKAGES_TOKEN is a
+      # read:packages PAT stored as a repo secret.
       - name: Install
         run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
 
       - name: Type-check
         run: npx tsc --noEmit
