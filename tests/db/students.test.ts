@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import {
   resolveProfileUserId,
+  resolveStudentId,
   getMemoryConsent,
   __resetResolveProfileCache,
 } from '../../src/db/students'
@@ -149,5 +150,101 @@ describe('getMemoryConsent (per-user PII consent, FAIL-CLOSED)', () => {
 
   it('false for an empty id without touching the DB', async () => {
     expect(await getMemoryConsent('')).toBe(false)
+  })
+})
+
+// A richer fake than fakeSb: supports the resolveStudentId chains —
+// .from().select().eq().single() (lookup + recovery), .rpc('reconcile_identity'),
+// .from().insert().select().single(), and the awaited .from().update().eq().is()
+// referral backfill (the builder is thenable). Records rpc/insert/update calls so a
+// test can assert that iMessage went through reconcile_identity and never inserted
+// directly.
+function resolveSb(cfg: {
+  existing?: { id: string } | null
+  rpc?: { data?: unknown; error?: unknown }
+  insert?: { data?: { id: string } | null; error?: unknown }
+  recover?: { id: string } | null
+}) {
+  const calls = {
+    rpc: [] as Array<{ name: string; params: unknown }>,
+    inserts: [] as unknown[],
+    updates: [] as unknown[],
+  }
+  let selectSingles = 0
+  const sb = {
+    rpc: async (name: string, params: unknown) => {
+      calls.rpc.push({ name, params })
+      return cfg.rpc ?? { data: null, error: { message: 'function reconcile_identity does not exist' } }
+    },
+    from() {
+      let inserted = false
+      const b: any = {
+        select: () => b,
+        eq: () => b,
+        is: () => b,
+        insert: (v: unknown) => {
+          inserted = true
+          calls.inserts.push(v)
+          return b
+        },
+        update: (v: unknown) => {
+          calls.updates.push(v)
+          return b
+        },
+        single: async () => {
+          if (inserted) return cfg.insert ?? { data: null, error: { message: 'insert failed' } }
+          selectSingles++
+          if (selectSingles === 1) {
+            return { data: cfg.existing ?? null, error: cfg.existing ? null : { message: 'no rows' } }
+          }
+          return { data: cfg.recover ?? null, error: null }
+        },
+        // The referral backfill awaits the builder after .is() (no .single()).
+        then: (resolve: (v: unknown) => void) => resolve({ data: null, error: null }),
+      }
+      return b
+    },
+  } as unknown as SupabaseClient
+  return { sb, calls }
+}
+
+describe('resolveStudentId (handle → students.id; iMessage CREATE routes through reconcile_identity)', () => {
+  it('returns an existing iMessage student without calling reconcile_identity', async () => {
+    const { sb, calls } = resolveSb({ existing: { id: 'existing-id' } })
+    expect(await resolveStudentId('+17474638880', 'imessage', sb)).toBe('existing-id')
+    expect(calls.rpc).toHaveLength(0)
+    expect(calls.inserts).toHaveLength(0)
+  })
+
+  it('on an iMessage miss, creates the canonical row via reconcile_identity (never a direct insert) and backfills referral_code', async () => {
+    const { sb, calls } = resolveSb({
+      existing: null,
+      rpc: { data: [{ student_id: 'reconciled-id', user_id: null }], error: null },
+    })
+    expect(await resolveStudentId('+8615522499291', 'imessage', sb)).toBe('reconciled-id')
+    expect(calls.rpc).toEqual([{ name: 'reconcile_identity', params: { p_phone_e164: '+8615522499291' } }])
+    expect(calls.inserts).toHaveLength(0) // george never directly inserts a phone-keyed student
+    expect(calls.updates).toHaveLength(1) // referral_code backfilled
+  })
+
+  it('falls back to a direct insert when reconcile_identity is unavailable (RPC absent)', async () => {
+    const { sb, calls } = resolveSb({
+      existing: null,
+      rpc: { data: null, error: { message: 'function public.reconcile_identity does not exist' } },
+      insert: { data: { id: 'inserted-id' }, error: null },
+    })
+    expect(await resolveStudentId('+13105550000', 'imessage', sb)).toBe('inserted-id')
+    expect(calls.rpc).toHaveLength(1) // tried the RPC first
+    expect(calls.inserts).toHaveLength(1) // then fell back
+  })
+
+  it('WeChat openids do NOT route through reconcile_identity (phone-first; direct insert)', async () => {
+    const { sb, calls } = resolveSb({
+      existing: null,
+      insert: { data: { id: 'wx-id' }, error: null },
+    })
+    expect(await resolveStudentId('wx_newuser', 'wechat', sb)).toBe('wx-id')
+    expect(calls.rpc).toHaveLength(0)
+    expect(calls.inserts).toHaveLength(1)
   })
 })
