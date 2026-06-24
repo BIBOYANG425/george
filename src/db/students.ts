@@ -121,9 +121,25 @@ export async function setShippingNotifOptOut(
   return Array.isArray(data) && data.length > 0
 }
 
-export async function resolveStudentId(userId: string, platform: 'wechat' | 'imessage'): Promise<string> {
+// Resolve a channel handle to its students.id, creating the row when absent.
+//
+// iMessage (phone) handles route the CREATE through the reconcile_identity RPC
+// (spec §6/§7): george never directly inserts a phone-keyed students row — instead
+// the single, atomic merge primitive creates the row keyed by canonical phone, so a
+// later web signup with the same phone/email MERGES into it rather than forking a
+// second identity (the +86→+853 disease). reconcile_identity doesn't set
+// referral_code, so we backfill it idempotently to keep parity with the legacy
+// insert. WeChat openids are outside reconcile_identity's phone-first scope and keep
+// the direct insert. If the RPC is unavailable (e.g. the migration isn't applied in
+// this environment), iMessage falls back to the legacy insert so george keeps
+// working. `sb` injectable for tests.
+export async function resolveStudentId(
+  userId: string,
+  platform: 'wechat' | 'imessage',
+  sb: SupabaseClient = supabase,
+): Promise<string> {
   const column = platform === 'wechat' ? 'wechat_open_id' : 'imessage_id'
-  const { data } = await supabase
+  const { data } = await sb
     .from('students')
     .select('id')
     .eq(column, userId)
@@ -131,13 +147,23 @@ export async function resolveStudentId(userId: string, platform: 'wechat' | 'ime
 
   if (data) return data.id
 
-  // Race-safe create: two concurrent messages from the same new user both
-  // miss the SELECT above and both try to INSERT. The second one hits the
-  // unique constraint on the platform id column, the insert returns null,
-  // and the old `newStudent!.id` crashed with TypeError. On insert failure
-  // we re-SELECT since the other request presumably created the row.
-  const referralCode = Math.random().toString(36).slice(2, 8).toUpperCase()
-  const { data: newStudent, error: insertError } = await supabase
+  // iMessage miss → get/create the canonical row via reconcile_identity.
+  if (platform === 'imessage') {
+    const reconciledId = await reconcileStudentByPhone(userId, sb)
+    if (reconciledId) {
+      await ensureReferralCode(reconciledId, sb)
+      return reconciledId
+    }
+    // RPC unavailable in this env → fall through to the legacy insert below.
+  }
+
+  // Legacy race-safe create (WeChat, or iMessage when the RPC is absent): two
+  // concurrent messages from the same new user both miss the SELECT above and both
+  // try to INSERT. The second hits the unique constraint on the platform id column,
+  // the insert returns null, so on insert failure we re-SELECT since the other
+  // request presumably created the row.
+  const referralCode = randomReferralCode()
+  const { data: newStudent, error: insertError } = await sb
     .from('students')
     .insert({ [column]: userId, referral_code: referralCode })
     .select('id')
@@ -145,7 +171,7 @@ export async function resolveStudentId(userId: string, platform: 'wechat' | 'ime
 
   if (newStudent) return newStudent.id
 
-  const { data: recovered } = await supabase
+  const { data: recovered } = await sb
     .from('students')
     .select('id')
     .eq(column, userId)
@@ -158,6 +184,42 @@ export async function resolveStudentId(userId: string, platform: 'wechat' | 'ime
       insertError?.message ?? 'unknown insert error'
     }`,
   )
+}
+
+// Get/create the canonical students row for a canonical E.164 phone via the atomic,
+// idempotent reconcile_identity RPC. Returns students.id, or null when the RPC is
+// unavailable (function-not-found / transient error / empty result) so the caller
+// can fall back to a direct insert. The handle is already canonical E.164 from
+// normalizeHandle upstream; the RPC is the only path that creates a phone-keyed row.
+async function reconcileStudentByPhone(
+  phoneE164: string,
+  sb: SupabaseClient,
+): Promise<string | null> {
+  try {
+    const { data, error } = await sb.rpc('reconcile_identity', { p_phone_e164: phoneE164 })
+    if (error) return null
+    // reconcile_identity is `returns table(student_id, user_id)` → an array of rows.
+    const row = Array.isArray(data) ? data[0] : data
+    return (row as { student_id?: string } | null | undefined)?.student_id ?? null
+  } catch {
+    return null
+  }
+}
+
+// Backfill referral_code on a reconcile-created student that has none. The
+// `.is('referral_code', null)` guard makes it idempotent: it never clobbers an
+// existing code and is a no-op once set. A rare unique collision just leaves the
+// code null (same as reconcile_identity's own default), never an error to the caller.
+async function ensureReferralCode(studentId: string, sb: SupabaseClient): Promise<void> {
+  await sb
+    .from('students')
+    .update({ referral_code: randomReferralCode() })
+    .eq('id', studentId)
+    .is('referral_code', null)
+}
+
+function randomReferralCode(): string {
+  return Math.random().toString(36).slice(2, 8).toUpperCase()
 }
 
 export async function generateLinkCode(studentId: string): Promise<string> {
