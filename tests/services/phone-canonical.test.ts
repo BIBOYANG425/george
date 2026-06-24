@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { canonicalizePhone } from '../../src/services/phone-canonical.js'
+import { canonicalizePhone } from '@biboyang425/bia-shared/phone'
 import vector from '../../src/services/phone-canonical.vector.json' with { type: 'json' }
 
 type VectorCase = {
@@ -9,9 +9,10 @@ type VectorCase = {
   expected: { ok: true; e164: string } | { ok: false }
 }
 
-// THE cross-repo parity contract. bia-roommate copies phone-canonical.ts +
-// phone-canonical.vector.json verbatim and runs this same assertion loop, so the
-// two repos' phone normalization can never drift.
+// THE cross-repo no-drift contract. george and bia-roommate both consume the
+// canonicalizer from @biboyang425/bia-shared/phone; this loop asserts that
+// published package matches george's local parity vector, so a future package
+// change that diverged from george's expected E.164 output would fail CI here.
 describe('canonicalizePhone — parity vector', () => {
   for (const c of vector as VectorCase[]) {
     it(c.name, () => {

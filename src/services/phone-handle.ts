@@ -1,9 +1,11 @@
 // src/services/phone-handle.ts
 // Normalizes an iMessage sender handle so a phone matches the canonical E.164
 // format stored in students.imessage_id. This delegates phone normalization to
-// the SINGLE shared canonicalizer (phone-canonical.ts, spec §3) so george's
-// handle path and bia-roommate's signup path produce identical E.164 strings and
-// can't drift (the drift caused the +86 -> +853 identity fork in prod).
+// the SINGLE shared canonicalizer published as @biboyang425/bia-shared/phone, so
+// george's handle path and bia-roommate's signup path call the exact same code
+// and can't drift (the drift caused the +86 -> +853 identity fork in prod). The
+// src/services/phone-canonical.vector.json fixture asserts this package matches
+// george's expected output (see tests/services/phone-canonical.test.ts).
 //
 // Pass-through rule: only phone-shaped handles (a leading "+" or all/mostly
 // digits) are canonicalized. Everything else — emails, "web-anon",
@@ -14,7 +16,7 @@
 //
 // Header last reviewed: 2026-06-23
 
-import { canonicalizePhone } from './phone-canonical.js'
+import { canonicalizePhone } from '@biboyang425/bia-shared/phone'
 
 export function normalizeHandle(raw: string): string {
   const s = (raw ?? '').trim()
