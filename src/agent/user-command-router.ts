@@ -86,7 +86,7 @@ function buildUserCommandDeps(): UserCommandDeps | null {
     async writeAudit(entry: { userId: string; action: string; payload: Record<string, unknown> }) {
       try {
         await supabase.from('admin_audit_log').insert({
-          actor_email: 'system@george',
+          admin_email: 'system@george', // real prod column is admin_email, NOT actor_email
           action: entry.action,
           entity_type: 'user',
           entity_id: entry.userId,

@@ -6,10 +6,12 @@
 // expansion; later PRs move setHeartbeatPaused/setUserControls writes in here
 // too and add flag/clear-block/delete).
 //
-// Audit reuses the EXISTING admin_audit_log table (shape:
-// actor_email/action/entity_type/entity_id/payload), already written by the
-// user-command path (src/agent/user-command-router.ts). We do NOT create a
-// second audit table.
+// Audit reuses the EXISTING admin_audit_log table (owned by bia-admin; actual
+// prod shape: admin_email/action/entity_type/entity_id/payload/ts). We do NOT
+// create a second audit table. NOTE: the column is `admin_email` (not actor_email)
+// and the timestamp is `ts` (not created_at) — george code previously wrote
+// actor_email, which silently failed every insert (the table rejects an unknown
+// column and the write is swallowed). This module uses the real names.
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Request } from 'express';
@@ -41,16 +43,40 @@ export interface AdminAuditEntry {
 export async function logAdminAction(sb: SupabaseClient, entry: AdminAuditEntry): Promise<void> {
   try {
     const { error } = await sb.from('admin_audit_log').insert({
-      actor_email: entry.actor,
+      admin_email: entry.actor, // real prod column is admin_email, NOT actor_email
       action: entry.action,
       entity_type: entry.entityType ?? 'user',
       entity_id: entry.entityId,
       payload: entry.payload ?? {},
+      // `ts` has a default (now()); do not set it.
     });
     if (error) log('warn', 'admin_audit_write_failed', { action: entry.action, error: error.message });
   } catch (err) {
     log('warn', 'admin_audit_write_failed', { action: entry.action, error: (err as Error).message });
   }
+}
+
+// Record a blocked injection attempt at an HTTP boundary into admin_audit_log so
+// the dashboard can show who's probing the door (getInjectionLog reads these back).
+// Reuses the audit table (action=injection_blocked); the "actor" is the offending
+// SENDER, not an admin. Non-throwing (via logAdminAction). textPreview is truncated
+// — never store the full payload. NOTE: this is wired at the HTTP boundary only;
+// orchestrator-internal blocks (the /chat path) are a follow-up.
+export async function auditInjectionBlock(
+  sb: SupabaseClient,
+  input: { source: string; sender: string; reason?: string; textPreview?: string },
+): Promise<void> {
+  await logAdminAction(sb, {
+    actor: input.sender || 'unknown',
+    action: 'injection_blocked',
+    entityType: 'injection',
+    entityId: input.sender || 'unknown',
+    payload: {
+      source: input.source,
+      reason: input.reason ?? null,
+      textPreview: (input.textPreview ?? '').slice(0, 120),
+    },
+  });
 }
 
 // Pull the model id out of the turn's tool_calls telemetry blob (it carries

@@ -41,7 +41,7 @@ describe('adminActor', () => {
 });
 
 describe('logAdminAction', () => {
-  it('writes the admin_audit_log shape (actor→actor_email, defaults applied)', async () => {
+  it('writes the admin_audit_log shape (actor→admin_email, the real prod column, defaults applied)', async () => {
     const { sb, inserts } = fakeSb('ok');
     await logAdminAction(sb, {
       actor: 'long@uscbia.com',
@@ -53,7 +53,7 @@ describe('logAdminAction', () => {
       {
         table: 'admin_audit_log',
         row: {
-          actor_email: 'long@uscbia.com',
+          admin_email: 'long@uscbia.com',
           action: 'set_controls',
           entity_type: 'user',
           entity_id: '+17474638880',
@@ -134,7 +134,7 @@ describe('flagMessage', () => {
     });
 
     const audit = inserts.find((i) => i.table === 'admin_audit_log')!.row;
-    expect(audit).toMatchObject({ actor_email: 'long@uscbia.com', action: 'flag_message', entity_type: 'message', entity_id: 'm1' });
+    expect(audit).toMatchObject({ admin_email: 'long@uscbia.com', action: 'flag_message', entity_type: 'message', entity_id: 'm1' });
   });
 
   it('records the flag with a NULL message_id (FK-safe) + attempted id in snapshot when the row is gone', async () => {

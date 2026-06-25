@@ -143,6 +143,14 @@ export function renderDashboardHtml(): string {
   .rev .r .rtop{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-bottom:4px}
   .rev .r .rtext{font-size:13px;color:var(--txt);white-space:pre-wrap}
   .sig{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid rgba(251,191,36,.35);color:var(--warn)}
+  .sig.danger{color:var(--bad);border-color:rgba(248,113,113,.5)}
+  /* crisis radar */
+  .panel.crisis{border-left:4px solid var(--border)}
+  .panel.crisis.hit{border-left-color:var(--bad);background:color-mix(in srgb,var(--bad) 6%,var(--panel))}
+  .panel.crisis.ok{border-left-color:var(--good)}
+  .panel.crisis.off{border-left-color:var(--faint)}
+  .r.crisisrow{border-color:rgba(248,113,113,.35)}
+  .tabbadge{display:inline-grid;place-items:center;min-width:17px;height:17px;padding:0 4px;margin-left:6px;border-radius:999px;background:var(--bad);color:#fff;font-size:11px;font-weight:700;vertical-align:middle}
 </style>
 </head>
 <body>
@@ -213,8 +221,9 @@ function boot(){
   TOKEN=localStorage.getItem('george_admin_token');
   if(!TOKEN){ show('login'); return; }
   show('shell'); startClock();
-  if(['overview','live','users','system'].includes(view)){ setTab(view); } else { refresh(); }
+  if(['overview','live','users','review','system'].includes(view)){ setTab(view); } else { refresh(); }
   scheduleAuto();
+  refreshCrisisBadge(); // surface the crisis badge without opening 复盘
   const wantUser=u.searchParams.get('user'); if(wantUser){ setTimeout(()=>openUser(wantUser),300); }
 }
 function show(id){ for(const x of ['login','shell']) document.getElementById(x).classList.toggle('hide',x!==id); }
@@ -535,11 +544,14 @@ async function loadReview(){
   const sec=document.getElementById('review');
   try{
     const d=await api('/review');
+    const cr=d.crisis||{enabled:false,queue:[]};
     const fl=d.flagged||{flags:[],tableMissing:false,error:false};
     const fab=d.fabrication||{suspects:[],scanned:0};
+    const inj=d.injection||{entries:[],error:false,tableMissing:false};
+    setCrisisBadge(cr.enabled?(cr.queue||[]).length:0);
     sec.innerHTML=
-      // PR-3 will prepend the crisis queue here.
-      '<div class="panel"><h3>已标记的坏回合 <span class="tag">message_flags · 人工标记</span></h3>'
+      renderCrisisPanel(cr)
+      +'<div class="panel"><h3>已标记的坏回合 <span class="tag">message_flags · 人工标记</span></h3>'
         +(fl.tableMissing?'<div class="empty">该表未迁移（message_flags 不在此环境）— 应用 migration 后开始记录</div>'
           :fl.error?'<div class="empty" style="color:var(--bad)">加载失败（非「无标记」）</div>'
           :(fl.flags.length?'<div class="rev">'+fl.flags.map(renderFlag).join('')+'</div>':'<div class="empty">还没有标记 — 在「实时」或用户抽屉里点 👎 标记坏回合</div>'))
@@ -547,9 +559,57 @@ async function loadReview(){
       +'<div class="panel"><h3>编造哨兵 <span class="tag">有具体声明(课号/价格/评分)却没调用工具 · 启发式，需人工判断 · 仅判定有 telemetry 的近 '+fmt(fab.scanned||0)+' 条</span></h3>'
         +(fab.error?'<div class="empty" style="color:var(--bad)">加载失败（非「无可疑」）— 查询出错</div>'
           :fab.suspects.length?'<div class="rev">'+fab.suspects.map(renderSuspect).join('')+'</div>':'<div class="empty">近期没有可疑回合 👍</div>')
+      +'</div>'
+      +'<div class="panel"><h3>注入拦截日志 <span class="tag">admin_audit_log · 边界拦截</span></h3>'
+        +(inj.tableMissing?'<div class="empty">审计表未迁移</div>'
+          :inj.error?'<div class="empty" style="color:var(--bad)">加载失败</div>'
+          :inj.entries.length?'<div class="rev">'+inj.entries.map(renderInjection).join('')+'</div>':'<div class="empty">近期没有拦截到注入尝试</div>')
       +'</div>';
     stamp();
   }catch(e){ sec.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
+}
+// Crisis queue — TOP of the page, red-bordered. When the radar is OFF it shows the
+// gate explicitly; when ON+empty it shows a REASSURING empty state (not a scary
+// blank); when ON+hits it lists each student for a human to act on per the SOP.
+function renderCrisisPanel(cr){
+  if(!cr.enabled){
+    return '<div class="panel crisis off"><h3>🛟 安危雷达 <span class="tag">未启用 · 需先定危机响应 SOP（谁看 / 多久 / 升级给谁 / 非工作时间）</span></h3>'
+      +'<div class="empty">雷达已就绪但未开启。定好 SOP 后设 GEORGE_CRISIS_RADAR_ENABLED=true 再上线。</div></div>';
+  }
+  const q=cr.queue||[];
+  if(!q.length){
+    return '<div class="panel crisis ok"><h3>🛟 安危雷达 <span class="tag">实时扫描学生消息 + 情绪观察</span></h3>'
+      +'<div class="empty">这会儿没人需要 check-in，一切安好 🌿</div></div>';
+  }
+  return '<div class="panel crisis hit"><h3>🛟 安危雷达 <span class="tag">'+q.length+' 位可能需要关注 · 按 SOP 处理</span></h3>'
+    +'<div class="rev">'+q.map(renderDistress).join('')+'</div></div>';
+}
+function renderDistress(h){
+  return '<div class="r crisisrow"><div class="rtop">'
+    +'<span class="badge block">'+esc(h.handleShort||'—')+'</span>'
+    +(h.signals||[]).map(x=>'<span class="sig danger">'+esc(x)+'</span>').join('')
+    +'<span class="badge">'+esc(h.source==='observation'?'情绪观察':'消息')+'</span>'
+    +'<div class="spacer" style="flex:1"></div><span>'+ago(h.createdAt)+'前</span></div>'
+    +'<div class="rtext">'+esc(h.snippet||'')+'</div></div>';
+}
+function renderInjection(e){
+  return '<div class="r"><div class="rtop">'
+    +'<span>'+esc(e.handleShort||'—')+'</span>'
+    +(e.source?'<span class="badge ch">'+esc(e.source)+'</span>':'')
+    +'<div class="spacer" style="flex:1"></div><span>'+ago(e.createdAt)+'前</span></div>'
+    +(e.preview?'<div class="rtext skel">'+esc(e.preview)+'</div>':'')+'</div>';
+}
+// Set/clear the 复盘 tab badge — only shows when there is at least one crisis hit.
+function setCrisisBadge(n){
+  const tab=document.querySelector('.tab[data-tab="review"]');
+  if(!tab) return;
+  let b=tab.querySelector('.tabbadge');
+  if(n>0){ if(!b){ b=document.createElement('span'); b.className='tabbadge'; tab.appendChild(b);} b.textContent=n; }
+  else if(b){ b.remove(); }
+}
+// Lightweight boot probe so the crisis badge can appear without opening 复盘.
+async function refreshCrisisBadge(){
+  try{ const d=await api('/review'); const cr=d.crisis||{}; setCrisisBadge(cr.enabled?(cr.queue||[]).length:0); }catch(e){}
 }
 function renderFlag(f){
   return '<div class="r"><div class="rtop">'
