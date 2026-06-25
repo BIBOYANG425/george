@@ -104,6 +104,13 @@ export function renderDashboardHtml(): string {
   .block .bk{color:var(--accent2);font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px}
   .block .bv{color:var(--txt);white-space:pre-wrap;font-size:13px;min-height:18px;color:var(--muted)}
   .convo{display:flex;flex-direction:column;gap:7px;margin-top:8px}
+  /* observations (read-only) */
+  .obs{display:flex;flex-direction:column;gap:7px;margin-top:8px}
+  .obs .o{display:flex;gap:10px;align-items:flex-start;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:9px 11px}
+  .obs .sal{flex:0 0 auto;font-size:11px;font-weight:600;border-radius:6px;padding:2px 7px;border:1px solid var(--border);color:var(--muted)}
+  .obs .sal.hi{color:var(--warn);border-color:rgba(251,191,36,.4)}
+  .obs .otext{flex:1;font-size:13px;color:var(--txt);white-space:pre-wrap}
+  .obs .ometa{color:var(--faint);font-size:11px;margin-top:3px;display:flex;gap:8px;flex-wrap:wrap}
   /* login */
   .login{max-width:420px;margin:14vh auto;background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:26px}
   .login h2{margin:0 0 6px} .login p{color:var(--muted);margin:0 0 16px;font-size:13px}
@@ -386,10 +393,30 @@ async function openUser(id){
       +'<div class="panel"><h3>记忆档案 <span class="tag">user_profiles 6 blocks</span></h3><div class="blocks">'
         + blocks.map(b=>'<div class="block"><div class="bk">'+b.replace('_',' ')+'</div><div class="bv">'+(p[b]?esc(p[b]):'<span class="skel">空</span>')+'</div></div>').join('')
       +'</div></div>'
+      +renderObsPanel(d)
       +'<div class="panel"><h3>对话记录 <span class="tag">'+d.conversation.length+' 条</span></h3><div class="convo">'
         + (d.conversation.length? d.conversation.map(renderConvoMsg).join('') : '<div class="empty">无记录</div>')
       +'</div></div>';
   }catch(e){ document.getElementById('drawerBody').innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
+}
+// Observations panel (read-only). Three states: rows, "未迁移" (table absent in
+// this env — graceful degradation, not an error), or "暂无观察".
+function renderObsPanel(d){
+  const obs=d.observations||[];
+  let inner;
+  if(obs.length) inner='<div class="obs">'+obs.map(renderObs).join('')+'</div>';
+  else if(d.observationsTableMissing) inner='<div class="empty">该表未迁移（user_observations 不在此环境）</div>';
+  else if(d.observationsError) inner='<div class="empty" style="color:var(--bad)">观察加载失败（权限/超时/查询错误）— 不是「没有观察」</div>';
+  else inner='<div class="empty">暂无观察记忆</div>';
+  return '<div class="panel"><h3>观察记忆 <span class="tag">user_observations · 按 salience 排序'+(obs.length?' · '+obs.length+' 条':'')+'</span></h3>'+inner+'</div>';
+}
+function renderObs(o){
+  const hi=Number(o.salience)>=4?' hi':'';
+  return '<div class="o"><span class="sal'+hi+'">S'+esc(String(o.salience))+'</span>'
+    +'<div style="flex:1"><div class="otext">'+esc(o.content)+'</div>'
+    +'<div class="ometa">'+(o.kind?'<span>'+esc(o.kind)+'</span>':'')
+      +(o.consolidated?'<span>已固化</span>':'')
+      +'<span>'+ago(o.createdAt)+'前</span></div></div></div>';
 }
 function renderConvoMsg(m){
   const isUser=m.role==='user';
@@ -481,12 +508,14 @@ async function loadSystem(){
   try{
     const h=await api('/health');
     const tc=h.telemetryCoverage, hb=h.heartbeat;
+    const mc=h.memoryConsent||{configured:0,consented:0};
+    const mcPct=mc.configured?Math.round((mc.consented/mc.configured)*100):0;
     sec.innerHTML=
       '<div class="grid cards">'
         +card('Telemetry 覆盖',tc.tokensPct+'%',fmt(tc.withTokens)+'/'+fmt(tc.total)+' 带 token',tc.tokensPct>50?'good':'warn')
         +card('Agent 标注',tc.agentPct+'%',fmt(tc.withAgent)+'/'+fmt(tc.total)+' 条')
-        +card('Heartbeat 配置',fmt(hb.configured),hb.paused+' 暂停 · '+hb.consented+' 同意')
-        +card('近期 Heartbeat',fmt(hb.recent.length),'最近 ticks')
+        +card('Heartbeat 配置',fmt(hb.configured),hb.paused+' 暂停 · '+hb.consented+' proactive 同意')
+        +card('记忆同意 opt-in',mcPct+'%',fmt(mc.consented)+'/'+fmt(mc.configured)+' 开启长期记忆','accent')
       +'</div>'
       +'<div class="row2">'
         +'<div class="panel"><h3>Heartbeat 近期结果</h3>'+(hb.recentOutcomes.length?barList(hb.recentOutcomes.map(o=>({label:o.outcome,count:o.count}))):'<div class="empty">暂无</div>')+'</div>'

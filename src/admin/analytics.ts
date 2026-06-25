@@ -16,6 +16,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getUserControls, getUsageSnapshot, listUserControls, startOfLADayISO } from './user-controls.js';
+import { resolveProfileKey, resolveHeartbeatConfig, isMissingTableError } from './resolve.js';
 
 const DAY_MS = 86_400_000;
 
@@ -44,6 +45,14 @@ interface StudentRow {
   year: string | null;
   onboarding_complete: boolean | null;
   last_active_at: string | null;
+}
+interface ObservationRow {
+  id: number;
+  content: string;
+  salience: number;
+  kind: string | null;
+  created_at: string;
+  consolidated_at: string | null;
 }
 
 // Build a handle → student lookup across every key a handle might match.
@@ -356,12 +365,44 @@ export async function getUserDetail(sb: SupabaseClient, userId: string) {
     profile = (data ?? [])[0] ?? null;
   }
 
-  // heartbeat config (try handle, then student uuid)
-  let hb: any = null;
-  for (const key of [userId, student?.user_id, student?.id].filter(Boolean)) {
-    const { data } = await sb.from('user_heartbeat_config').select('*').eq('user_id', key as string).maybeSingle();
-    if (data) { hb = data; break; }
+  // Observations (P6 user_observations): keyed by the SAME profile uuid as
+  // user_profiles. Prefer the uuid the profile was actually found under
+  // (profile.user_id) so observations and the profile blocks always agree; fall
+  // back to resolveProfileKey (handle→uuid bridge) then the student uuid. Using
+  // profile.user_id matters when the dashboard handle is a students.id-style uuid:
+  // resolveProfileKey would pass it through unchanged and query the wrong key,
+  // silently showing "no observations" while the profile still renders.
+  const obsKey =
+    ((profile?.user_id as string | undefined) ??
+      (await resolveProfileKey(sb, userId)) ??
+      (student?.user_id ?? null)) || null;
+  let observations: ObservationRow[] = [];
+  let observationsTableMissing = false;
+  let observationsError = false;
+  if (obsKey) {
+    const { data, error } = await sb
+      .from('user_observations')
+      .select('id, content, salience, kind, created_at, consolidated_at')
+      .eq('user_id', obsKey)
+      .order('salience', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(50);
+    if (error) {
+      // Three distinct states, never one masquerading as another:
+      //   - missing table  → "未迁移" panel (expected in envs without the migration)
+      //   - any other error → an explicit error state, NOT "no observations"
+      //     (a perms/timeout/type failure must not read as empty data — that's the
+      //     silent-wrong-result trap that hides prod misconfig).
+      if (isMissingTableError(error.message)) observationsTableMissing = true;
+      else observationsError = true;
+    } else {
+      observations = (data ?? []) as ObservationRow[];
+    }
   }
+
+  // heartbeat config (try handle, then student uuid, then students.id)
+  const hbConfig = await resolveHeartbeatConfig(sb, [userId, student?.user_id, student?.id]);
+  const hb: any = hbConfig?.row ?? null;
 
   let cost = 0;
   let tokens = 0;
@@ -378,6 +419,16 @@ export async function getUserDetail(sb: SupabaseClient, userId: string) {
     handleShort: maskHandle(userId),
     student,
     profile,
+    observations: observations.map((o) => ({
+      id: o.id,
+      content: o.content,
+      salience: o.salience,
+      kind: o.kind,
+      consolidated: !!o.consolidated_at,
+      createdAt: o.created_at,
+    })),
+    observationsTableMissing,
+    observationsError,
     heartbeat: hb,
     controls,
     usage,
@@ -423,9 +474,12 @@ export async function getSystemHealth(sb: SupabaseClient) {
     .eq('role', 'assistant')
     .not('agent', 'is', null);
 
+  // select('*') (not named columns) so a not-yet-migrated consent_memory column is
+  // simply absent from the row rather than a PostgREST "column does not exist" error
+  // (same fail-soft pattern as getMemoryConsent in src/db/students.ts).
   const { data: hbCfgs } = await sb
     .from('user_heartbeat_config')
-    .select('user_id, paused, last_heartbeat_at, consent_proactive_messages');
+    .select('*');
 
   const denom = assistantMsgs ?? 0;
   return {
@@ -443,27 +497,30 @@ export async function getSystemHealth(sb: SupabaseClient) {
       consented: (hbCfgs ?? []).filter((h) => h.consent_proactive_messages).length,
       recent: (hbLog ?? []).slice(0, 10),
     },
+    // Memory opt-in: how many configured users granted consent_memory (the gate the
+    // per-turn capturer + update_memory tool check before writing PII to a profile).
+    // `?? 0` so a not-yet-migrated column (absent from select('*')) reads as 0, not NaN.
+    memoryConsent: {
+      configured: (hbCfgs ?? []).length,
+      consented: (hbCfgs ?? []).filter((h) => (h as { consent_memory?: boolean }).consent_memory === true).length,
+    },
   };
 }
 
 // ── ADMIN ACTIONS (the only writes) ────────────────────────────────────────
 export async function setHeartbeatPaused(sb: SupabaseClient, userId: string, paused: boolean) {
-  // Resolve the heartbeat config key (handle, or the student's uuid).
+  // Resolve the heartbeat config key (handle, the student's uuid, or students.id)
+  // via the shared candidate-ring probe — same resolver getUserDetail reads with.
   const students = await loadStudents(sb);
   const ix = indexStudents(students);
   const student = ix.get(userId);
-  const candidates = [userId, student?.user_id, student?.id].filter(Boolean) as string[];
-  for (const key of candidates) {
-    const { data } = await sb.from('user_heartbeat_config').select('user_id').eq('user_id', key).maybeSingle();
-    if (data) {
-      const { error } = await sb
-        .from('user_heartbeat_config')
-        .update({ paused, pause_until: null, updated_at: new Date().toISOString() })
-        .eq('user_id', key);
-      return { ok: !error, key, error: error?.message };
-    }
-  }
-  return { ok: false, error: 'no heartbeat config row for this user' };
+  const hbConfig = await resolveHeartbeatConfig(sb, [userId, student?.user_id, student?.id]);
+  if (!hbConfig) return { ok: false, error: 'no heartbeat config row for this user' };
+  const { error } = await sb
+    .from('user_heartbeat_config')
+    .update({ paused, pause_until: null, updated_at: new Date().toISOString() })
+    .eq('user_id', hbConfig.key);
+  return { ok: !error, key: hbConfig.key, error: error?.message };
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
