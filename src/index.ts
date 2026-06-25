@@ -37,6 +37,7 @@ import { ALL_TOOLS } from './tools/index.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
 import { supabase } from './db/client.js'
 import { createAdminDashboardRouter } from './admin/router.js'
+import { auditInjectionBlock } from './admin/actions.js'
 import { extractCodeFromStartMessage, runHandshake } from './onboarding/handshake.js'
 import { toPublicAssetUrls } from './onboarding/showcase.js'
 import { lookupByCode, linkImessageHandle } from './onboarding/pending-users.js'
@@ -419,6 +420,15 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
   const check = checkInjection(body.text)
   if (check.blocked) {
     res.status(202).json({ accepted: true, filtered: 'injection' })
+    // Record the boundary block to the admin audit log so it surfaces in the
+    // dashboard's injection panel. Non-blocking — never let an audit write hold up
+    // the refusal enqueue.
+    void auditInjectionBlock(supabase, {
+      source: 'imessage_incoming',
+      sender: body.sender,
+      reason: check.reason,
+      textPreview: body.text,
+    })
     const rejection =
       INJECTION_REJECTIONS[Math.floor(Math.random() * INJECTION_REJECTIONS.length)]
     try {

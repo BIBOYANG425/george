@@ -25,6 +25,8 @@ import {
   setHeartbeatPaused,
   getFlaggedTurns,
   getFabricationSuspects,
+  getDistressQueue,
+  getInjectionLog,
 } from './analytics.js';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { getUserControls, setUserControls, getUsageSnapshot, getModelChoices } from './user-controls.js';
@@ -82,11 +84,17 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
   api.get('/user/:id', wrap((req) => getUserDetail(sb, String(req.params.id))));
   api.get('/health', wrap(() => getSystemHealth(sb)));
 
-  // AI-quality review: flagged turns + fabrication suspects (both read-only,
-  // fail-soft if message_flags isn't migrated). PR-3 prepends the crisis queue here.
+  // Review = safety + AI quality. Crisis queue first (the thing a human must act on
+  // fastest), then flagged turns, fabrication suspects, and the injection log. All
+  // read-only + fail-soft; the crisis queue is gated OFF until the SOP exists.
   api.get('/review', wrap(async () => {
-    const [flagged, fab] = await Promise.all([getFlaggedTurns(sb, 100), getFabricationSuspects(sb, {})]);
-    return { flagged, fabrication: fab };
+    const [crisis, flagged, fab, injection] = await Promise.all([
+      getDistressQueue(sb, {}),
+      getFlaggedTurns(sb, 100),
+      getFabricationSuspects(sb, {}),
+      getInjectionLog(sb, 50),
+    ]);
+    return { crisis, flagged, fabrication: fab, injection };
   }));
 
   // Flag a George turn as a bad reply. Snapshot is built server-side from the

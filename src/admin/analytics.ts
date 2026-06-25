@@ -17,6 +17,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getUserControls, getUsageSnapshot, listUserControls, startOfLADayISO } from './user-controls.js';
 import { resolveProfileKey, resolveHeartbeatConfig, isMissingTableError } from './resolve.js';
+import { distressSignals, crisisRadarEnabled } from './crisis.js';
 
 const DAY_MS = 86_400_000;
 
@@ -53,6 +54,13 @@ interface ObservationRow {
   kind: string | null;
   created_at: string;
   consolidated_at: string | null;
+}
+interface DistressHit {
+  handleShort: string;
+  source: 'message' | 'observation';
+  signals: string[];
+  snippet: string;
+  createdAt: string;
 }
 
 // Build a handle → student lookup across every key a handle might match.
@@ -613,6 +621,95 @@ export async function getFabricationSuspects(sb: SupabaseClient, opts: { scan?: 
   // `scanned` reports the JUDGEABLE window (telemetry-bearing turns), not the raw
   // row count — so the UI's "scanned N" reflects what the heuristic could assess.
   return { suspects, scanned: judgeable, error: false };
+}
+
+// ── SAFETY (crisis radar + injection log) ──────────────────────────────────
+
+// Build a uuid → display-handle map (the reverse of indexStudents): observations
+// are keyed by students.user_id (uuid), but the queue shows the channel handle a
+// human can act on. Falls back to the uuid when no student row maps.
+function userIdToHandle(students: StudentRow[]): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const s of students) {
+    if (s.user_id) m.set(String(s.user_id), s.imessage_id || s.wechat_open_id || String(s.user_id));
+  }
+  return m;
+}
+
+// Crisis radar: students who may be in real distress, for HUMAN review per the SOP.
+// GATED OFF until the SOP exists (crisisRadarEnabled). Two content-matched sources,
+// both run through the curated, hyperbole-aware distressSignals():
+//   1. recent USER messages — the student's own words (primary; most reliable);
+//   2. recent kind='emotion' observations — George's distilled emotional read.
+// Merged per user (most recent hit wins, signals unioned), most-recent first.
+export async function getDistressQueue(sb: SupabaseClient, opts: { scan?: number } = {}) {
+  if (!crisisRadarEnabled()) return { enabled: false, queue: [] as DistressHit[] };
+  const scan = Math.min(opts.scan ?? 1500, 8000);
+
+  const [{ data: msgs }, { data: obs }, students] = await Promise.all([
+    sb
+      .from('messages')
+      .select('user_id, content, created_at')
+      .eq('role', 'user')
+      .order('created_at', { ascending: false })
+      .limit(scan),
+    // user_observations may not be migrated everywhere — tolerate its absence.
+    sb
+      .from('user_observations')
+      .select('user_id, content, salience, kind, created_at')
+      .eq('kind', 'emotion')
+      .order('created_at', { ascending: false })
+      .limit(500)
+      .then((r) => r, () => ({ data: [] as any[] })),
+    loadStudents(sb),
+  ]);
+
+  const handleOf = userIdToHandle(students);
+  const byUser = new Map<string, DistressHit>();
+  const add = (rawKey: string, handle: string, source: 'message' | 'observation', content: string, createdAt: string) => {
+    const signals = distressSignals(content);
+    if (signals.length === 0) return;
+    const key = String(rawKey);
+    const prev = byUser.get(key);
+    const snippet = content.length > 240 ? content.slice(0, 240) + '…' : content;
+    if (!prev) {
+      byUser.set(key, { handleShort: maskHandle(handle), source, signals, snippet, createdAt });
+    } else {
+      for (const s of signals) if (!prev.signals.includes(s)) prev.signals.push(s);
+      if (createdAt > prev.createdAt) { prev.createdAt = createdAt; prev.snippet = snippet; prev.source = source; }
+    }
+  };
+
+  for (const m of (msgs ?? []) as Array<{ user_id: string | null; content: string | null; created_at: string }>) {
+    if (m.user_id && m.content) add(m.user_id, String(m.user_id), 'message', m.content, m.created_at);
+  }
+  for (const o of (obs ?? []) as Array<{ user_id: string | null; content: string | null; created_at: string }>) {
+    if (o.user_id && o.content) add(o.user_id, handleOf.get(String(o.user_id)) ?? String(o.user_id), 'observation', o.content, o.created_at);
+  }
+
+  const queue = Array.from(byUser.values()).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  return { enabled: true, queue, scanned: (msgs ?? []).length };
+}
+
+// Injection attempts recorded at the HTTP boundary (admin_audit_log, action=
+// injection_blocked). §4A fail-soft. Read-only view of who's probing the door.
+export async function getInjectionLog(sb: SupabaseClient, limit = 50) {
+  // Real admin_audit_log columns are admin_email + ts (NOT actor_email/created_at).
+  const { data, error } = await sb
+    .from('admin_audit_log')
+    .select('admin_email, entity_id, payload, ts')
+    .eq('action', 'injection_blocked')
+    .order('ts', { ascending: false })
+    .limit(limit);
+  if (error) return { entries: [], error: !isMissingTableError(error.message), tableMissing: isMissingTableError(error.message) };
+  const entries = (data ?? []).map((r: any) => ({
+    handleShort: r.entity_id ? maskHandle(String(r.entity_id)) : '—',
+    source: (r.payload && typeof r.payload === 'object' ? r.payload.source : null) ?? null,
+    reason: (r.payload && typeof r.payload === 'object' ? r.payload.reason : null) ?? null,
+    preview: (r.payload && typeof r.payload === 'object' ? r.payload.textPreview : null) ?? null,
+    createdAt: r.ts,
+  }));
+  return { entries, error: false, tableMissing: false };
 }
 
 // ── ADMIN ACTIONS (the only writes) ────────────────────────────────────────
