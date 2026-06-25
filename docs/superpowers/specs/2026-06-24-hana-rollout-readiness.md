@@ -1,8 +1,12 @@
 # HANA Rollout Readiness — "Switch George to HANA" staged flip plan
 
-> **For Bobby.** Every HANA-inspired human-realism feature is **built, wired, and tested** in George today — but each ships behind a **default-OFF** flag, so right now George runs byte-identical legacy behavior. "Switching George to HANA" = flipping these flags **in stages**, validating voice + behavior between each, not all at once. This doc is the single-look map: what each flag does, its risk, its prerequisite, and the order to turn them on.
+> **For Bobby.** Every HANA-inspired human-realism feature is **built, wired, and tested** in George, each behind a flag that **defaults OFF in code** (so any unset flag = byte-identical legacy behavior). "Switching George to HANA" = turning these on **in stages** via Railway env, validating voice + behavior between each, not all at once. This doc is the single-look map: what each flag does, its risk, its prerequisite, and the order to turn them on.
 >
 > **Date:** 2026-06-24. **Scope:** the reactive iMessage line (Spectrum) + heartbeat. Voice is the product — every flag that changes what George *says* gets a human read before it goes live.
+
+## Current prod state — VERIFY before flipping (do not assume)
+
+The defaults above are the **code** defaults; the **live `george` Railway service** may already override several. Per the 2026-06-21 companion-feel activation, this band was flipped **ON in prod**: `MEMORY_CAPTURE_ENABLED`, `GEORGE_OBSERVE_ENABLED`, `GEORGE_RECALL_ENABLED`, `GEORGE_REFLECT_ENABLED`, `GROUNDED_PROACTIVE_ENABLED`, `GEORGE_MEMORY_PROACTIVE_ENABLED`, `HEARTBEAT_ENABLED`. So Bands 1, 2 (recall), and 4 (memory-proactive) are **likely already live** — treat them as "verify it's still ON," not "turn on." What's most likely **still OFF and genuinely new to flip**: **Band 0 `GEORGE_PACING_ENABLED`** (new, this work), the **Band 3 voice-tone flags** (`GEORGE_ACTIVITY_STATE_ENABLED`, `WORLD_STATE_ENABLED`, `GEORGE_NOREPLY_ENABLED`), `GEORGE_RELATIONSHIP_EVAL_ENABLED`, and the architecture flags (`SINGLE_AGENT`, `GEORGE_TRUNK_HYBRID`). **Check each flag's current value in the Railway dashboard first** — this doc gives the safe order and risk for whatever is still off; it does not assert the live value of any flag.
 
 ## Why staged, not a big-bang flip
 
@@ -68,13 +72,13 @@ Proactive = George reaching into someone's day unprompted. Turn on only after Ba
 
 - `GEORGE_TRUNK_HYBRID` / `SINGLE_AGENT` (both default-off): collapse the orchestrator + 3 sub-agents into the HANA-shaped single trunk agent + dispatched specialists. This is the deepest structural HANA-alignment but is **not yet shippable** — the trunk path has open must-fixes and no OFF-path equivalence test (per [`2026-06-19-trunk-hybrid-restructure-design.md`](2026-06-19-trunk-hybrid-restructure-design.md)). Treat as its own workstream, not part of this flag rollout.
 
-## One-glance recommended order
+## One-glance recommended order (for whatever is still OFF — verify first)
 
-1. **Apply migrations** (bia-admin#53 outgoing_bubbles; P6 user_observations) — no behavior change.
-2. **Band 0** `GEORGE_PACING_ENABLED` — functional smoke test, no voice read.
-3. **Band 1** `MEMORY_CAPTURE_ENABLED` + `GEORGE_OBSERVE_ENABLED` — silent; build corpus a few days.
-4. **Band 2** `GEORGE_RECALL_ENABLED` + `GEORGE_RELATIONSHIP_EVAL_ENABLED` — **read threads.**
-5. **Band 3** `GEORGE_ACTIVITY_STATE_ENABLED` + `WORLD_STATE_ENABLED` (+ NOREPLY) — **read threads.**
-6. **Band 4** proactive flags — last, smallest blast radius first.
+0. **Apply the pending migration** (bia-admin#53 `outgoing_bubbles`) — no behavior change. (The P6 `user_observations` migration was already applied 2026-06-21.)
+1. **Band 0** `GEORGE_PACING_ENABLED` — the genuinely new one. Functional smoke test (3-bubble reply, restart mid-burst, tail still lands), no voice read.
+2. **Bands 1–2 memory/recall + Band 4 memory-proactive** — *likely already ON* since 2026-06-21; **verify** they're still set, don't re-toggle blindly. If any got reset, re-enable in the silent-first order (capture/observe → recall → reflect → proactive) and read threads after recall.
+3. **`GEORGE_RELATIONSHIP_EVAL_ENABLED`** (if still off) — **read threads** (note tone bleeds into voice).
+4. **Band 3** `GEORGE_ACTIVITY_STATE_ENABLED` + `WORLD_STATE_ENABLED` (+ `GEORGE_NOREPLY_ENABLED`) — the voice-tone band, almost certainly still off; **read threads** after each.
+5. **Architecture** (`SINGLE_AGENT`) — a separate burn-in, now CI-guarded by the OFF-path equivalence test; trunk-hybrid was eval-judged HOLD-OFF on quality, so do not flip `GEORGE_TRUNK_HYBRID`.
 
-Each band: set the var → redeploy `george` → validate → next. Any regression: unset the flag → redeploy → instant rollback.
+Each flip: set the var → redeploy `george` (`railway up`) → validate → next. Any regression: unset the flag → redeploy → instant rollback.
