@@ -8,7 +8,11 @@
 // distinction stay in flush() (NOT pushed into the stages) so suppression
 // semantics are preserved exactly.
 //
-// Header last reviewed: 2026-06-19
+// stageSendPaced is the pacing-ON variant of stageSend (Pacing & Delivery v1,
+// Task 4): bubble 0 inline, bubbles 1..N-1 handed to the durable scheduler. The
+// OFF-path stageSend is unchanged.
+//
+// Header last reviewed: 2026-06-24
 
 import type { ReplyHandle } from './spectrum-client.js'
 import {
@@ -110,4 +114,33 @@ export async function stageSend(
     if (i > 0) await sleep(delay)
     await reply.sendText(parts[i])
   }
+}
+
+export interface StageSendPacedDeps {
+  // Persist bubbles 1..N-1 to the durable scheduler for later, paced delivery.
+  // Takes the FULL parts array (the scheduler skips bubble 0 itself).
+  schedule: (handle: string, bubbles: string[]) => Promise<void>
+}
+
+// stageSendPaced: the pacing-ON send stage. Bubble 0 goes out INLINE via
+// reply.sendText (responsiveness preserved); bubbles 1..N-1 are handed to the
+// durable scheduler and delivered later by the drainer (which survives restarts
+// and is cancelled by a fresh inbound). NO in-process loop-sleep here — the
+// pacing gap lives entirely in the scheduler's persisted send_at timestamps.
+// Skipped entirely if the turn was superseded (aborted), matching stageSend.
+export async function stageSendPaced(
+  toSend: string,
+  reply: ReplyHandle,
+  handle: string,
+  ac: AbortController,
+  deps: StageSendPacedDeps,
+): Promise<void> {
+  if (ac.signal.aborted) return
+  const parts = splitIntoMessages(toSend)
+  if (parts.length === 0) return
+  // Bubble 0 inline — keeps George's first-line responsiveness identical to the
+  // OFF path. NEVER persisted (the scheduler also drops index 0 defensively).
+  await reply.sendText(parts[0])
+  // Defer the tail. schedule() takes the FULL array and persists only [1..N-1].
+  if (parts.length > 1) await deps.schedule(handle, parts)
 }

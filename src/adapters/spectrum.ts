@@ -8,7 +8,12 @@
 // (renderDelayContext) — injected as a per-turn system note, NOT as response
 // delay. Default-off behind GEORGE_ACTIVITY_STATE_ENABLED ('' when unset).
 //
-// Header last reviewed: 2026-06-18
+// Pacing & Delivery v1 (default-OFF, GEORGE_PACING_ENABLED): when on, bubble 0 is
+// sent inline and bubbles 1..N-1 are persisted to a durable outgoing scheduler,
+// drained out-of-band by a restart-surviving drainer started once here; a fresh
+// inbound cancels a sender's pending bubbles. OFF: byte-for-byte today's path.
+//
+// Header last reviewed: 2026-06-24
 
 import path from 'node:path'
 import type { SpectrumClient, ReplyHandle } from './spectrum-client.js'
@@ -22,7 +27,14 @@ import {
 } from './spectrum-stats.js'
 import { startSpectrumWatchdog, stopSpectrumWatchdog } from './spectrum-watchdog.js'
 import { parseControlTokens, isNoReplyEnabled, getReadReceiptDelayMs } from './split-response.js'
-import { stageReadReceiptDelay, stageGenerate, stageSend } from './spectrum-stages.js'
+import { stageReadReceiptDelay, stageGenerate, stageSend, stageSendPaced } from './spectrum-stages.js'
+import {
+  createOutgoingScheduler,
+  startDrainer,
+  startQueuePruner,
+  type OutgoingScheduler,
+} from './outgoing-scheduler.js'
+import { createSupabaseOutgoingSchedulerDB } from '../db/outgoing-bubbles.js'
 import { checkRateLimit } from './rate-limiter.js'
 import { log } from '../observability/logger.js'
 import { renderDelayContext } from '../agent/activity-state.js'
@@ -87,10 +99,28 @@ function readBurstConfig(): { enabled: boolean; perMin: number; strikes: number;
 // RATE_LIMIT_RESPONSE. Short, 学长 register, one emoji.
 const BURST_COOLDOWN_NOTICE = '学长这会儿有点接不过来了😮‍💨 你缓几分钟再来找我哈'
 
+// Pacing & Delivery config (default-OFF, GEORGE_PACING_ENABLED). Read at call
+// time from env — same precedent as readBurstConfig. OFF → no scheduler/drainer
+// is created and the send path is byte-for-byte today's behavior. The drain
+// interval is how often the drainer re-reads the durable queue for due bubbles.
+function readPacingConfig(): { enabled: boolean; drainIntervalMs: number } {
+  return {
+    enabled: process.env.GEORGE_PACING_ENABLED === 'true',
+    drainIntervalMs: Number(process.env.PACING_DRAIN_INTERVAL_MS) || 1000,
+  }
+}
+
 export interface LoopOptions {
   debounceMs?: number
   // Send a "still thinking" nudge if the turn exceeds this. Default 9s.
   interimDelayMs?: number
+  // Pacing & Delivery v1 (default-OFF). When pacingEnabled is true AND a
+  // scheduler is supplied, bubble 0 is sent inline and bubbles 1..N-1 are
+  // persisted to the durable scheduler (drained out-of-band). A fresh inbound
+  // cancels a sender's pending bubbles. Both optional → the default-OFF send
+  // path (stageSend) is unchanged and existing callers/tests still compile.
+  scheduler?: Pick<OutgoingScheduler, 'schedule' | 'cancelPending'>
+  pacingEnabled?: boolean
 }
 
 export async function runSpectrumLoop(
@@ -176,7 +206,14 @@ export async function runSpectrumLoop(
           // Record this reply's time so the next ping can measure the gap (P2).
           // Only on an actual send — a suppressed {{NO_REPLY}} is not a reply.
           lastReplyAt.set(senderId, Date.now())
-          await stageSend(toSend, buf.reply, ac)
+          // Pacing ON (flag + scheduler present): bubble 0 inline, bubbles 1..N-1
+          // persisted to the durable scheduler and drained out-of-band. OFF: the
+          // existing in-process stageSend, byte-for-byte unchanged.
+          if (opts.pacingEnabled && opts.scheduler) {
+            await stageSendPaced(toSend, buf.reply, senderId, ac, { schedule: opts.scheduler.schedule })
+          } else {
+            await stageSend(toSend, buf.reply, ac)
+          }
         }
       }
     } catch (err) {
@@ -198,6 +235,12 @@ export async function runSpectrumLoop(
         if (seen.size > DEDUP_CAP) for (const id of Array.from(seen).slice(0, DEDUP_CAP / 2)) seen.delete(id)
       }
       if (message.contentType !== 'text') continue
+
+      // Pacing ON: a fresh inbound supersedes any pending scheduled bubbles for
+      // this sender (cheap indexed delete; returns 0 when nothing pending →
+      // harmless on the first message of a burst). Fire-and-forget so a cancel
+      // failure never throws into the loop. OFF: no-op (no scheduler).
+      if (opts.pacingEnabled && opts.scheduler) void opts.scheduler.cancelPending(message.senderId).catch(() => {})
 
       // ── A layer: abuse cooldown (default-OFF) ──
       if (burst.enabled) {
@@ -499,6 +542,15 @@ export function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandle
 // And a dropped stream must reconnect, else george goes silently deaf.
 let spectrumStopping = false
 let activeSpectrumClient: SpectrumClient | null = null
+// Pacing drainer handle (default-OFF: null). Started ONCE at the top of
+// startSpectrumAdapter so it persists across reconnects, and stopped on loop
+// exit and in stopSpectrumAdapter. Module-level so the shutdown path can reach it.
+let activeDrainer: { stop(): void } | null = null
+// Pacing queue pruner handle (default-OFF: null). Started alongside the drainer
+// when pacing is on, and stopped on loop exit and in stopSpectrumAdapter so the
+// delivered-row prune never outlives the adapter. Module-level so the shutdown
+// path can reach it (mirrors activeDrainer).
+let activePruner: { stop(): void } | null = null
 
 // startSpectrumAdapter connects to Spectrum and drives the downstream pipeline.
 // Runs until stopSpectrumAdapter() is called: if the message stream ends or
@@ -518,30 +570,70 @@ export async function startSpectrumAdapter(
   // on, so the default path is byte-identical to before. See spectrum-watchdog.ts.
   startSpectrumWatchdog()
 
-  while (!spectrumStopping) {
-    try {
-      const client = await createSpectrumClient(creds)
-      activeSpectrumClient = client
-      backoffMs = 1_000 // reset after a successful connect
-      log('info', 'spectrum_connected', {})
-      recordSpectrumConnect()
-      await runSpectrumLoop(client, handlers)
-      // runSpectrumLoop returning means the stream ended (not an error).
-      log('warn', 'spectrum_stream_ended', {})
-    } catch (err) {
-      log('error', 'spectrum_stream_error', { error: (err as Error).message })
-      recordSpectrumError((err as Error).message)
-    } finally {
-      if (activeSpectrumClient) {
-        await activeSpectrumClient.close().catch(() => {})
-        activeSpectrumClient = null
-      }
+  // Pacing & Delivery v1 (default-OFF). When enabled, create the durable
+  // scheduler (service-role Supabase) ONCE and start the drainer ONCE, BEFORE the
+  // reconnect loop, so the drainer survives reconnects. Its send fn resolves the
+  // live client per-tick: if there's no connection it THROWS, leaving the row
+  // pending → retried next tick after reconnect (correct). When disabled, nothing
+  // is created and runSpectrumLoop runs exactly as before (byte-identical).
+  const pacing = readPacingConfig()
+  let scheduler: OutgoingScheduler | null = null
+  if (pacing.enabled) {
+    const db = createSupabaseOutgoingSchedulerDB()
+    scheduler = createOutgoingScheduler(db)
+    const sendFn = async (handle: string, content: string): Promise<void> => {
+      const c = getActiveSpectrumClient()
+      if (!c) throw new Error('no_spectrum_connection')
+      await c.sendProactive(handle, [content])
     }
-    if (spectrumStopping) break
-    await new Promise((r) => setTimeout(r, backoffMs))
-    backoffMs = Math.min(backoffMs * 2, 30_000)
-    log('warn', 'spectrum_reconnecting', { backoffMs })
-    recordSpectrumReconnecting()
+    activeDrainer = startDrainer(scheduler, sendFn, { intervalMs: pacing.drainIntervalMs })
+    // Keep the delivered-bubble table bounded: prune SENT rows > 24h old, hourly.
+    activePruner = startQueuePruner(db, {})
+    log('info', 'spectrum_pacing_enabled', { drainIntervalMs: pacing.drainIntervalMs })
+  }
+
+  try {
+    while (!spectrumStopping) {
+      try {
+        const client = await createSpectrumClient(creds)
+        activeSpectrumClient = client
+        backoffMs = 1_000 // reset after a successful connect
+        log('info', 'spectrum_connected', {})
+        recordSpectrumConnect()
+        if (scheduler) {
+          await runSpectrumLoop(client, handlers, { scheduler, pacingEnabled: true })
+        } else {
+          await runSpectrumLoop(client, handlers)
+        }
+        // runSpectrumLoop returning means the stream ended (not an error).
+        log('warn', 'spectrum_stream_ended', {})
+      } catch (err) {
+        log('error', 'spectrum_stream_error', { error: (err as Error).message })
+        recordSpectrumError((err as Error).message)
+      } finally {
+        if (activeSpectrumClient) {
+          await activeSpectrumClient.close().catch(() => {})
+          activeSpectrumClient = null
+        }
+      }
+      if (spectrumStopping) break
+      await new Promise((r) => setTimeout(r, backoffMs))
+      backoffMs = Math.min(backoffMs * 2, 30_000)
+      log('warn', 'spectrum_reconnecting', { backoffMs })
+      recordSpectrumReconnecting()
+    }
+  } finally {
+    // Stop the drainer when the reconnect loop exits (clean shutdown or otherwise)
+    // so it never outlives the adapter. No-op when pacing was off.
+    if (activeDrainer) {
+      activeDrainer.stop()
+      activeDrainer = null
+    }
+    // Same for the queue pruner — no-op when pacing was off.
+    if (activePruner) {
+      activePruner.stop()
+      activePruner = null
+    }
   }
   log('info', 'spectrum_adapter_stopped', {})
 }
@@ -554,6 +646,18 @@ export async function stopSpectrumAdapter(): Promise<void> {
   // Tear down the watchdog timer first so a clean shutdown never trips it (no-op
   // when the watchdog was never started, i.e. the default-OFF path).
   stopSpectrumWatchdog()
+  // Stop the pacing drainer so it doesn't keep firing after shutdown (no-op when
+  // pacing was off / never started). startSpectrumAdapter's finally also stops it
+  // on loop exit; stopping twice is safe (clearInterval on a cleared id no-ops).
+  if (activeDrainer) {
+    activeDrainer.stop()
+    activeDrainer = null
+  }
+  // Same for the queue pruner (no-op when pacing was off / never started).
+  if (activePruner) {
+    activePruner.stop()
+    activePruner = null
+  }
   const client = activeSpectrumClient
   activeSpectrumClient = null
   if (client) await client.close().catch(() => {})
