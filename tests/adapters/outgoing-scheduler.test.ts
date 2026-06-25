@@ -12,10 +12,11 @@
  *  - a per-row send failure is isolated: the row stays pending and re-sends.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   createInMemoryOutgoingSchedulerDB,
   createOutgoingScheduler,
+  startDrainer,
 } from '../../src/adapters/outgoing-scheduler.js'
 
 // Deterministic pacing: jitterRatio 0 removes randomness so send_at math is exact.
@@ -224,5 +225,44 @@ describe('per-row failure isolation', () => {
     expect(delivered).toContain('send-me')
     // the failed row is still pending
     expect(db._rows().filter((r) => r.content === 'fail-me' && r.sentAt === null)).toHaveLength(1)
+  })
+})
+
+describe('startDrainer re-entrancy guard', () => {
+  it('skips a tick while the previous drain is still running (no overlap → no double-send)', async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      let resolveFirst: ((value: void | PromiseLike<void>) => void) | undefined
+      // drainDue selects on sentAt===null, which stays true during the send→markSent
+      // gap. If a slow tick overlapped the next, the same rows would be re-selected
+      // and RE-SENT. This proves the guard prevents that: tick 1 blocks; tick 2 is
+      // skipped, not run concurrently.
+      const scheduler = {
+        drainDue: vi.fn(async (): Promise<number> => {
+          calls += 1
+          if (calls === 1) await new Promise<void>((res) => { resolveFirst = res })
+          return 0
+        }),
+      }
+      const send = async (): Promise<void> => {}
+      const drainer = startDrainer(scheduler, send, { intervalMs: 10, clock: () => 0 })
+
+      await vi.advanceTimersByTimeAsync(10)
+      expect(calls).toBe(1) // tick 1 entered drainDue and is now blocked
+
+      await vi.advanceTimersByTimeAsync(10)
+      expect(calls).toBe(1) // tick 2 fired but the guard skipped it (no re-entry)
+
+      resolveFirst?.(undefined) // let tick 1 complete → running flips back to false
+      await vi.advanceTimersByTimeAsync(0)
+
+      await vi.advanceTimersByTimeAsync(10)
+      expect(calls).toBe(2) // a fresh tick now runs
+
+      drainer.stop()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

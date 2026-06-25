@@ -224,6 +224,13 @@ export function createOutgoingScheduler(db: OutgoingSchedulerDB): OutgoingSchedu
  * single bad tick never kills the interval. `clock` defaults to Date.now (it is
  * overridable only so a test can prove the wiring without real wall-clock time).
  * The real logic lives in drainDue, not here — keep this dumb.
+ *
+ * RE-ENTRANCY GUARD (critical): a tick is SKIPPED while a previous tick is still
+ * draining. drainDue selects rows by `sentAt IS null`, which stays true during the
+ * send → markSent gap; a single send (sendProactive opens a fresh iMessage space)
+ * can outlast intervalMs, so without this guard a second overlapping tick would
+ * re-select and RE-SEND already-delivered bubbles (duplicate messages to a real
+ * user). With exactly one drainer + this guard, no row is ever in flight twice.
  */
 export function startDrainer(
   scheduler: Pick<OutgoingScheduler, 'drainDue'>,
@@ -232,11 +239,19 @@ export function startDrainer(
 ): { stop(): void } {
   const intervalMs = opts?.intervalMs ?? 1000
   const clock = opts?.clock ?? Date.now
+  let running = false
 
   const handle = setInterval(() => {
-    void scheduler.drainDue(clock(), send).catch((err) => {
-      console.error('[outgoing-scheduler] drain tick failed', err)
-    })
+    if (running) return // previous tick still draining — skip, never overlap
+    running = true
+    void scheduler
+      .drainDue(clock(), send)
+      .catch((err) => {
+        console.error('[outgoing-scheduler] drain tick failed', err)
+      })
+      .finally(() => {
+        running = false
+      })
   }, intervalMs)
   // Don't let the drainer keep the process alive on its own.
   if (typeof handle.unref === 'function') handle.unref()
