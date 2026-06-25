@@ -31,6 +31,7 @@ import { stageReadReceiptDelay, stageGenerate, stageSend, stageSendPaced } from 
 import {
   createOutgoingScheduler,
   startDrainer,
+  startQueuePruner,
   type OutgoingScheduler,
 } from './outgoing-scheduler.js'
 import { createSupabaseOutgoingSchedulerDB } from '../db/outgoing-bubbles.js'
@@ -545,6 +546,11 @@ let activeSpectrumClient: SpectrumClient | null = null
 // startSpectrumAdapter so it persists across reconnects, and stopped on loop
 // exit and in stopSpectrumAdapter. Module-level so the shutdown path can reach it.
 let activeDrainer: { stop(): void } | null = null
+// Pacing queue pruner handle (default-OFF: null). Started alongside the drainer
+// when pacing is on, and stopped on loop exit and in stopSpectrumAdapter so the
+// delivered-row prune never outlives the adapter. Module-level so the shutdown
+// path can reach it (mirrors activeDrainer).
+let activePruner: { stop(): void } | null = null
 
 // startSpectrumAdapter connects to Spectrum and drives the downstream pipeline.
 // Runs until stopSpectrumAdapter() is called: if the message stream ends or
@@ -573,13 +579,16 @@ export async function startSpectrumAdapter(
   const pacing = readPacingConfig()
   let scheduler: OutgoingScheduler | null = null
   if (pacing.enabled) {
-    scheduler = createOutgoingScheduler(createSupabaseOutgoingSchedulerDB())
+    const db = createSupabaseOutgoingSchedulerDB()
+    scheduler = createOutgoingScheduler(db)
     const sendFn = async (handle: string, content: string): Promise<void> => {
       const c = getActiveSpectrumClient()
       if (!c) throw new Error('no_spectrum_connection')
       await c.sendProactive(handle, [content])
     }
     activeDrainer = startDrainer(scheduler, sendFn, { intervalMs: pacing.drainIntervalMs })
+    // Keep the delivered-bubble table bounded: prune SENT rows > 24h old, hourly.
+    activePruner = startQueuePruner(db, {})
     log('info', 'spectrum_pacing_enabled', { drainIntervalMs: pacing.drainIntervalMs })
   }
 
@@ -620,6 +629,11 @@ export async function startSpectrumAdapter(
       activeDrainer.stop()
       activeDrainer = null
     }
+    // Same for the queue pruner — no-op when pacing was off.
+    if (activePruner) {
+      activePruner.stop()
+      activePruner = null
+    }
   }
   log('info', 'spectrum_adapter_stopped', {})
 }
@@ -638,6 +652,11 @@ export async function stopSpectrumAdapter(): Promise<void> {
   if (activeDrainer) {
     activeDrainer.stop()
     activeDrainer = null
+  }
+  // Same for the queue pruner (no-op when pacing was off / never started).
+  if (activePruner) {
+    activePruner.stop()
+    activePruner = null
   }
   const client = activeSpectrumClient
   activeSpectrumClient = null

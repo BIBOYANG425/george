@@ -103,5 +103,21 @@ export function createSupabaseOutgoingSchedulerDB(
       if (error) throw new Error(`cancelPending failed: ${error.message}`)
       return count ?? 0
     },
+
+    async pruneSentBefore(cutoffMs) {
+      // Drop delivered rows that have aged past the cutoff so the table stays
+      // bounded. Only SENT rows (sent_at not null) older than the cutoff are
+      // removed; pending rows are never pruned. `created_at` has an index for
+      // this prune, but the predicate is on sent_at to honour the "delivered N
+      // ago" semantics. `count: 'exact'` reports the deleted-row count.
+      const isoCutoff = new Date(cutoffMs).toISOString()
+      const { error, count } = await sb
+        .from('outgoing_bubbles')
+        .delete({ count: 'exact' })
+        .not('sent_at', 'is', null)
+        .lt('sent_at', isoCutoff)
+      if (error) throw new Error(`pruneSentBefore failed: ${error.message}`)
+      return count ?? 0
+    },
   }
 }

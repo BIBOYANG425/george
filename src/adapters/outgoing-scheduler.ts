@@ -62,6 +62,13 @@ export interface OutgoingSchedulerDB {
   markSent(id: string, sentAtMs: number): Promise<void>
   /** Delete still-pending rows for a handle; return the count deleted. */
   cancelPending(handle: string): Promise<number>
+  /**
+   * Delete rows that have been SENT (sentAt not null) AND sentAt < cutoffMs;
+   * return the count deleted. Pending rows (sentAt null) are NEVER pruned — they
+   * still need delivering. This bounds the table: delivered rows are dropped once
+   * they age past the cutoff.
+   */
+  pruneSentBefore(cutoffMs: number): Promise<number>
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +125,19 @@ export function createInMemoryOutgoingSchedulerDB(
       for (let i = rows.length - 1; i >= 0; i--) {
         const r = rows[i]!
         if (r.handle === handle && r.sentAt === null) {
+          rows.splice(i, 1)
+          deleted += 1
+        }
+      }
+      return deleted
+    },
+    async pruneSentBefore(cutoffMs) {
+      // Drop SENT rows older than the cutoff. Pending rows (sentAt === null) are
+      // skipped — they still need delivering.
+      let deleted = 0
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const r = rows[i]!
+        if (r.sentAt !== null && r.sentAt < cutoffMs) {
           rows.splice(i, 1)
           deleted += 1
         }
@@ -254,6 +274,45 @@ export function startDrainer(
       })
   }, intervalMs)
   // Don't let the drainer keep the process alive on its own.
+  if (typeof handle.unref === 'function') handle.unref()
+
+  return {
+    stop() {
+      clearInterval(handle)
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Queue pruner loop (thin setInterval wrapper — kept tiny on purpose)
+// ---------------------------------------------------------------------------
+
+/**
+ * Periodically delete delivered bubbles so `outgoing_bubbles` stays bounded.
+ * Bubbles are marked `sent_at` after delivery but never removed by the drainer,
+ * so without this the table grows forever. Each tick deletes SENT rows older
+ * than `olderThanMs`; pending rows are never touched.
+ *
+ * Defaults: tick hourly, prune anything delivered > 24h ago. Errors are
+ * swallowed/logged so a single bad tick never kills the interval (mirrors
+ * startDrainer). `clock` is overridable only so a test can prove the wiring
+ * without real wall-clock time. Keep this dumb — the real delete lives in
+ * pruneSentBefore.
+ */
+export function startQueuePruner(
+  db: Pick<OutgoingSchedulerDB, 'pruneSentBefore'>,
+  opts?: { intervalMs?: number; olderThanMs?: number; clock?: () => number },
+): { stop(): void } {
+  const intervalMs = opts?.intervalMs ?? 3_600_000 // 1h
+  const olderThanMs = opts?.olderThanMs ?? 86_400_000 // 24h
+  const clock = opts?.clock ?? Date.now
+
+  const handle = setInterval(() => {
+    void db.pruneSentBefore(clock() - olderThanMs).catch((err) => {
+      console.error('[outgoing-scheduler] prune tick failed', err)
+    })
+  }, intervalMs)
+  // Don't let the pruner keep the process alive on its own.
   if (typeof handle.unref === 'function') handle.unref()
 
   return {

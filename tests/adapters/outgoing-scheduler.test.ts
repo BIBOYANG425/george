@@ -17,6 +17,7 @@ import {
   createInMemoryOutgoingSchedulerDB,
   createOutgoingScheduler,
   startDrainer,
+  startQueuePruner,
 } from '../../src/adapters/outgoing-scheduler.js'
 
 // Deterministic pacing: jitterRatio 0 removes randomness so send_at math is exact.
@@ -261,6 +262,54 @@ describe('startDrainer re-entrancy guard', () => {
       expect(calls).toBe(2) // a fresh tick now runs
 
       drainer.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('pruneSentBefore', () => {
+  it('removes only SENT rows older than the cutoff; pending + recent-sent remain', async () => {
+    // Seed a mix directly: a pending row, an old sent row, a recent sent row.
+    const db = createInMemoryOutgoingSchedulerDB([
+      { id: 'pending', handle: '+1555', content: 'p', seq: 1, sendAt: 5000, sentAt: null },
+      { id: 'old-sent', handle: '+1555', content: 'o', seq: 2, sendAt: 1000, sentAt: 1000 },
+      { id: 'recent-sent', handle: '+1555', content: 'r', seq: 3, sendAt: 9000, sentAt: 9000 },
+    ])
+    // Cutoff sits between the two sent rows: old-sent (1000) < cutoff, recent (9000) ≥ cutoff.
+    const deleted = await db.pruneSentBefore(5000)
+    expect(deleted).toBe(1)
+
+    const remaining = db._rows()
+    expect(remaining.map((r) => r.id).sort()).toEqual(['pending', 'recent-sent'])
+    // The pending row (sentAt null) is never pruned, even though sendAt < cutoff.
+    expect(remaining.find((r) => r.id === 'pending')!.sentAt).toBeNull()
+    // The old SENT row is gone.
+    expect(remaining.find((r) => r.id === 'old-sent')).toBeUndefined()
+  })
+})
+
+describe('startQueuePruner', () => {
+  it('prunes with clock()-olderThanMs each tick; stop() halts further ticks', async () => {
+    vi.useFakeTimers()
+    try {
+      const db = { pruneSentBefore: vi.fn(async (): Promise<number> => 0) }
+      const pruner = startQueuePruner(db, {
+        intervalMs: 1000,
+        olderThanMs: 100,
+        clock: () => 5000,
+      })
+
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(db.pruneSentBefore).toHaveBeenCalledTimes(1)
+      expect(db.pruneSentBefore).toHaveBeenLastCalledWith(4900) // clock() - olderThanMs
+
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(db.pruneSentBefore).toHaveBeenCalledTimes(2)
+
+      pruner.stop()
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(db.pruneSentBefore).toHaveBeenCalledTimes(2) // no further ticks
     } finally {
       vi.useRealTimers()
     }
