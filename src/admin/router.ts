@@ -26,6 +26,7 @@ import {
 } from './analytics.js';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { getUserControls, setUserControls, getUsageSnapshot, getModelChoices } from './user-controls.js';
+import { logAdminAction, adminActor } from './actions.js';
 
 export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: string): express.Router {
   const router = express.Router();
@@ -79,8 +80,18 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
   api.get('/user/:id', wrap((req) => getUserDetail(sb, String(req.params.id))));
   api.get('/health', wrap(() => getSystemHealth(sb)));
 
-  api.post('/user/:id/pause', wrap((req) => setHeartbeatPaused(sb, String(req.params.id), true)));
-  api.post('/user/:id/resume', wrap((req) => setHeartbeatPaused(sb, String(req.params.id), false)));
+  api.post('/user/:id/pause', wrap(async (req) => {
+    const id = String(req.params.id);
+    const r = await setHeartbeatPaused(sb, id, true);
+    await logAdminAction(sb, { actor: adminActor(req), action: 'heartbeat_pause', entityId: id, payload: { ok: r.ok } });
+    return r;
+  }));
+  api.post('/user/:id/resume', wrap(async (req) => {
+    const id = String(req.params.id);
+    const r = await setHeartbeatPaused(sb, id, false);
+    await logAdminAction(sb, { actor: adminActor(req), action: 'heartbeat_resume', entityId: id, payload: { ok: r.ok } });
+    return r;
+  }));
 
   // Per-user admin controls: model override + daily message limit + hard block.
   // ?tier=main|emotional selects which tier's catalog to return (defaults to main
@@ -109,6 +120,17 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
       },
       'dashboard-admin',
     );
+    await logAdminAction(sb, {
+      actor: adminActor(req),
+      action: 'set_controls',
+      entityId: id,
+      payload: {
+        modelOverride: next.modelOverride,
+        emotionalModel: next.emotionalModel,
+        dailyMessageLimit: next.dailyMessageLimit,
+        blocked: next.blocked,
+      },
+    });
     return { ok: true, controls: next, usage: await getUsageSnapshot(id) };
   }));
 
