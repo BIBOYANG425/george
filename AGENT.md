@@ -37,10 +37,10 @@ every push to `main`**, so any merge re-triggers its build. (A teammate PR doing
 this 502'd `george.uscbia.com` on 2026-06-25 — it rebuilt the dashboard with the agent
 Dockerfile.)
 
-| Service | Serves | Builds | Config-as-code file | Env it needs |
+| Service | Serves | Builds | How the Dockerfile is selected | Env it needs |
 |---|---|---|---|---|
-| **`george`** (the agent) | `/chat` (web relay), iMessage (Spectrum pool), WeChat OA | `Dockerfile` → `node dist/index.js` | root **`railway.json`** | the full set: `ANTHROPIC_API_KEY`, `SUPABASE_*`, `DEEPSEEK/KIMI/DOUBAO` keys, `PROJECT_ID`/`PROJECT_SECRET` (Spectrum), WeChat, KV, `NODE_AUTH_TOKEN`, … |
-| **dashboard** (Railway auto-named **`overflowing-intuition`**) | `george.uscbia.com` admin dashboard (`/admin/dashboard`) | `Dockerfile.dashboard` → `npx tsx scripts/dashboard-server.ts` (admin router only, reads Supabase) | **`railway.dashboard.json`** (pinned as THIS service's config file in Railway settings) | ONLY `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `ADMIN_TOKEN` |
+| **`george`** (the agent) | `/chat` (web relay), iMessage (Spectrum pool), WeChat OA | `Dockerfile` → `node dist/index.js` | root **`railway.json`** sets `builder: DOCKERFILE` (no path) → defaults to `./Dockerfile` | the full set: `ANTHROPIC_API_KEY`, `SUPABASE_*`, `DEEPSEEK/KIMI/DOUBAO` keys, `PROJECT_ID`/`PROJECT_SECRET` (Spectrum), WeChat, KV, `NODE_AUTH_TOKEN`, … |
+| **dashboard** (Railway auto-named **`overflowing-intuition`**) | `george.uscbia.com` admin dashboard (`/admin/dashboard`) | `Dockerfile.dashboard` → `npx tsx scripts/dashboard-server.ts` (admin router only, reads Supabase) | this service's **Railway Build → "Dockerfile Path" = `Dockerfile.dashboard`** (a per-service dashboard setting, NOT in the repo) | ONLY `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `ADMIN_TOKEN` |
 
 **Routing — what reaches which service:**
 - `uscbia.com/george/chat` → bia-roommate relay (`/api/george/chat`) → **agent** `/chat`
@@ -49,13 +49,16 @@ Dockerfile.)
 - `george.uscbia.com` → Cloudflare (Access email allow-list) → **dashboard** `/admin/dashboard`
 
 **Do NOT change without understanding the blast radius:**
-1. **Root `railway.json` pins `dockerfilePath: Dockerfile` (the agent).** It is config-as-code
-   and applies to any service that does not override it. The dashboard service is pinned to
-   `railway.dashboard.json` (→ `Dockerfile.dashboard`) via its Railway *Config-as-code file
-   path* setting (NOT the "Dockerfile Path" build field — config-as-code overrides that). **Do
-   not edit root `railway.json`'s `dockerfilePath`, and do not delete `railway.dashboard.json`.**
-   Either makes the dashboard service build the AGENT → it crashes on the missing
-   `ANTHROPIC_API_KEY` → `george.uscbia.com` 502s.
+1. **Root `railway.json` MUST stay builder-only (`{ "build": { "builder": "DOCKERFILE" } }` — no
+   `dockerfilePath`).** Both services read this root config; if it pins a `dockerfilePath`, that
+   value (config-as-code) **overrides** each service's own "Dockerfile Path" build setting, so the
+   dashboard service is forced onto the agent `Dockerfile`, crashes on the missing
+   `ANTHROPIC_API_KEY`, and `george.uscbia.com` 502s. With no `dockerfilePath` in the root config,
+   the **dashboard service's Railway Build setting ("Dockerfile Path" = `Dockerfile.dashboard`)
+   applies**, and george falls back to the default `./Dockerfile`. **Do NOT add `dockerfilePath`
+   back to root `railway.json`** (that's exactly what #75 did and it 502'd the dashboard twice).
+   The per-service Dockerfile selection lives in each service's Railway *Build* settings, not the
+   repo.
 2. **Both Dockerfiles must authenticate the private `@biboyang425/bia-shared` install** —
    `COPY … .npmrc` + `ARG NODE_AUTH_TOKEN` before `npm ci`. Keep this in BOTH `Dockerfile`
    and `Dockerfile.dashboard` (the dep is in `package.json`, so every `npm ci` needs it).
