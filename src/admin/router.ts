@@ -27,6 +27,8 @@ import {
   getFabricationSuspects,
   getDistressQueue,
   getInjectionLog,
+  getOnboarding,
+  getRetention,
 } from './analytics.js';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { getUserControls, setUserControls, getUsageSnapshot, getModelChoices } from './user-controls.js';
@@ -80,6 +82,12 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
     getLiveFeed(sb, { limit: clampInt(req.query.limit, 60, 1, 200), onlyToday: req.query.today === '1' }),
   ));
   api.get('/distributions', wrap(() => getDistributions(sb)));
+  // Growth: onboarding funnel (counts + pending backlog) + retention (at-risk).
+  // Read-only, fail-soft. Rendered in the overview tab (no auto-refresh).
+  api.get('/growth', wrap(async () => {
+    const [onboarding, retention] = await Promise.all([getOnboarding(sb), getRetention(sb)]);
+    return { onboarding, retention };
+  }));
   api.get('/users', wrap((req) => getUsers(sb, clampInt(req.query.limit, 100, 1, 500))));
   api.get('/user/:id', wrap((req) => getUserDetail(sb, String(req.params.id))));
   api.get('/health', wrap(() => getSystemHealth(sb)));
