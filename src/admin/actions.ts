@@ -16,6 +16,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Request } from 'express';
 import { log } from '../observability/logger.js';
+import { resolveProfileKey } from './resolve.js';
+import { BLOCK_NAMES, type BlockName, type ProfileStore } from '../memory/profile.js';
+import type { ObservationDB } from '../memory/observations.js';
 
 // The acting admin's identity. In prod the dashboard sits behind Cloudflare
 // Access, which injects the authenticated email as a request header — that is
@@ -143,6 +146,75 @@ export async function flagMessage(
       payload: { kind: input.kind, reason: input.reason ?? null },
     });
     return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+// ── DESTRUCTIVE (memory delete / correct) — full guards ────────────────────
+
+// Clear one profile block for the student behind a channel handle. Guards:
+//   1. resolve the handle → the SAME uuid the memory path keys by (never clear the
+//      wrong user's block);
+//   2. validate the block name;
+//   3. go through ProfileStore.saveBlock(uuid, block, '') so the KV cache is busted
+//      (a raw DB write would leave a stale block in the 5-min edge cache);
+//   4. snapshot the ORIGINAL value into the audit payload, so a mistaken clear is
+//      recoverable from the audit trail.
+export async function clearProfileBlock(
+  sb: SupabaseClient,
+  store: ProfileStore,
+  handle: string,
+  block: string,
+  actor: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    if (!BLOCK_NAMES.includes(block as BlockName)) return { ok: false, error: `invalid block: ${block}` };
+    const uuid = await resolveProfileKey(sb, handle);
+    if (!uuid) return { ok: false, error: 'no profile for this handle' };
+
+    // Snapshot the original before clearing (for recovery via the audit trail).
+    const before = await store.loadProfile(uuid);
+    const original = (before as unknown as Record<string, unknown>)[block];
+    const originalStr = typeof original === 'string' ? original : '';
+
+    await store.saveBlock(uuid, block as BlockName, ''); // overwrite + bust KV cache
+    await logAdminAction(sb, {
+      actor,
+      action: 'clear_profile_block',
+      entityType: 'profile',
+      entityId: uuid,
+      payload: { block, original: originalStr.slice(0, 2000), originalLen: originalStr.length },
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+// Delete a single observation for the student behind a channel handle. Owner-scoped
+// (deleteById matches user_id AND id), so an admin can't delete another student's
+// row by id-guessing. Audited; a missing/not-owned id is a no-op (removed: 0).
+export async function deleteObservation(
+  sb: SupabaseClient,
+  obsDb: ObservationDB,
+  handle: string,
+  observationId: number,
+  actor: string,
+): Promise<{ ok: boolean; removed?: number; error?: string }> {
+  try {
+    if (!Number.isFinite(observationId)) return { ok: false, error: 'invalid observation id' };
+    const uuid = await resolveProfileKey(sb, handle);
+    if (!uuid) return { ok: false, error: 'no profile for this handle' };
+    const removed = await obsDb.deleteById(uuid, observationId);
+    await logAdminAction(sb, {
+      actor,
+      action: 'delete_observation',
+      entityType: 'observation',
+      entityId: uuid,
+      payload: { observationId, removed },
+    });
+    return { ok: true, removed };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
