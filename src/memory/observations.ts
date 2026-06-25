@@ -50,6 +50,10 @@ export interface ObservationDB {
   // created_at < now() - pruneDays. Returns the deleted count.
   prune(userId: string, pruneDays: number): Promise<number>;
   deleteForUser(userId: string): Promise<void>;
+  // Owner-scoped single delete: removes the row only when BOTH the id AND the
+  // user_id match, so an admin can't delete another student's observation by
+  // guessing an id. Returns the number of rows removed (0 = not found / not owned).
+  deleteById(userId: string, id: number): Promise<number>;
 }
 
 // Minimal structural type for the slice of the Supabase client we touch. Lets
@@ -127,6 +131,18 @@ export function createObservationDB(supabase: SupabaseLike): ObservationDB {
         .delete()
         .eq('user_id', userId);
       if (error) throw new Error(`deleteForUser observations failed: ${error.message}`);
+    },
+
+    async deleteById(userId, id) {
+      // Scope on BOTH user_id and id — the admin can only delete an observation
+      // that belongs to the resolved user (no cross-user delete by id-guessing).
+      const { count, error } = await supabase
+        .from('user_observations')
+        .delete({ count: 'exact' })
+        .eq('user_id', userId)
+        .eq('id', id);
+      if (error) throw new Error(`deleteById observation failed: ${error.message}`);
+      return count ?? 0;
     },
   };
 }

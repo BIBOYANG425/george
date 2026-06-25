@@ -27,15 +27,22 @@ import {
   getFabricationSuspects,
   getDistressQueue,
   getInjectionLog,
-  getOnboarding,
-  getRetention,
 } from './analytics.js';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { getUserControls, setUserControls, getUsageSnapshot, getModelChoices } from './user-controls.js';
-import { logAdminAction, adminActor, flagMessage } from './actions.js';
+import { logAdminAction, adminActor, flagMessage, clearProfileBlock, deleteObservation } from './actions.js';
+import { ProfileStore, createSupabaseProfileDB } from '../memory/profile.js';
+import { getKVCache } from '../memory/kv-cache.js';
+import { createSupabaseObservationDB } from '../memory/observations.js';
 
 export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: string): express.Router {
   const router = express.Router();
+
+  // Memory stores for the destructive endpoints. ProfileStore is built with the
+  // SAME KV cache the agent uses (getKVCache) so a clear-block busts the shared
+  // edge cache, not a private copy. Built lazily/once per router.
+  const profileStore = new ProfileStore(createSupabaseProfileDB(), getKVCache());
+  const observationDB = createSupabaseObservationDB();
 
   // The dashboard page itself is harmless static HTML (it carries no data); the
   // data endpoints are what's gated. Serve it openly so the browser can load it,
@@ -82,12 +89,6 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
     getLiveFeed(sb, { limit: clampInt(req.query.limit, 60, 1, 200), onlyToday: req.query.today === '1' }),
   ));
   api.get('/distributions', wrap(() => getDistributions(sb)));
-  // Growth: onboarding funnel (counts + pending backlog) + retention (at-risk).
-  // Read-only, fail-soft. Rendered in the overview tab (no auto-refresh).
-  api.get('/growth', wrap(async () => {
-    const [onboarding, retention] = await Promise.all([getOnboarding(sb), getRetention(sb)]);
-    return { onboarding, retention };
-  }));
   api.get('/users', wrap((req) => getUsers(sb, clampInt(req.query.limit, 100, 1, 500))));
   api.get('/user/:id', wrap((req) => getUserDetail(sb, String(req.params.id))));
   api.get('/health', wrap(() => getSystemHealth(sb)));
@@ -117,6 +118,25 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
     // non-2xx so the client throws — otherwise wrap() 200s the {ok:false} body and
     // the UI shows a false "✓ 已标记" while nothing persisted.
     if (!r.ok) throw new Error(r.error || 'flag failed');
+    return r;
+  }));
+
+  // ── DESTRUCTIVE memory ops (PR-N) — handle → resolved uuid, audited, fail-loud ──
+  // Clear one profile block. Goes through ProfileStore (busts KV); audit snapshots
+  // the original value for recovery. :id is the channel handle from the drawer.
+  api.post('/user/:id/memory/clear-block', wrap(async (req) => {
+    const handle = String(req.params.id);
+    const block = String((req.body ?? {}).block ?? '');
+    const r = await clearProfileBlock(sb, profileStore, handle, block, adminActor(req));
+    if (!r.ok) throw new Error(r.error || 'clear failed'); // surface as non-2xx (no false success)
+    return r;
+  }));
+  // Delete one observation (owner-scoped by the resolved uuid). :oid is a bigint id.
+  api.post('/user/:id/observation/:oid/delete', wrap(async (req) => {
+    const handle = String(req.params.id);
+    const oid = parseInt(String(req.params.oid), 10);
+    const r = await deleteObservation(sb, observationDB, handle, oid, adminActor(req));
+    if (!r.ok) throw new Error(r.error || 'delete failed');
     return r;
   }));
 

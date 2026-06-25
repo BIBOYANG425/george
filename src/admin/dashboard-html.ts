@@ -151,6 +151,18 @@ export function renderDashboardHtml(): string {
   .panel.crisis.off{border-left-color:var(--faint)}
   .r.crisisrow{border-color:rgba(248,113,113,.35)}
   .tabbadge{display:inline-grid;place-items:center;min-width:17px;height:17px;padding:0 4px;margin-left:6px;border-radius:999px;background:var(--bad);color:#fff;font-size:11px;font-weight:700;vertical-align:middle}
+  /* destructive delete + confirm modal */
+  .del{margin-left:8px;background:transparent;border:1px solid transparent;color:var(--faint);font-size:11px;border-radius:6px;padding:1px 6px;cursor:pointer}
+  .del:hover{color:var(--bad);border-color:rgba(248,113,113,.4)}
+  .block .bk{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .cdscrim{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:80;display:grid;place-items:center}
+  .cd{background:var(--panel);border:1px solid var(--bad);border-radius:14px;padding:20px;width:min(440px,92vw);box-shadow:0 12px 40px rgba(0,0,0,.5)}
+  .cd .cdh{font-weight:700;font-size:15px;color:var(--bad);margin-bottom:8px}
+  .cd .cdb{color:var(--muted);font-size:13px;line-height:1.6}
+  .cd .cdf{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
+  .btn.danger{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:600}
+  .btn.danger:hover{filter:brightness(1.1)}
+  .btn:focus-visible,.del:focus-visible{outline:2px solid var(--accent2);outline-offset:2px}
 </style>
 </head>
 <body>
@@ -271,7 +283,7 @@ function barList(items,max){ if(!items||!items.length) return '<div class="empty
 async function loadOverview(){
   const sec=document.getElementById('overview');
   try{
-    const [o,ts,dist,growth]=await Promise.all([api('/overview'),api('/timeseries?days=14'),api('/distributions'),api('/growth').catch(()=>null)]);
+    const [o,ts,dist]=await Promise.all([api('/overview'),api('/timeseries?days=14'),api('/distributions')]);
     const cov=o.telemetry.coveragePct;
     sec.innerHTML=
       '<div class="grid cards">'
@@ -285,7 +297,6 @@ async function loadOverview(){
       +card('活动 Events',fmt(o.totals.activeEvents)+' / '+fmt(o.totals.events),'active / 总')
       +card('Heartbeat 日志',fmt(o.totals.heartbeats),'proactive '+fmt(o.totals.proactiveSent))
       +'</div>'
-      +renderGrowth(growth)
       +'<div class="panel"><h3>消息量趋势 <span class="tag">近 14 天 · 用户 vs George</span></h3>'+lineChart(ts)+'</div>'
       +'<div class="row2">'
         +'<div class="panel"><h3>工具使用分布 <span class="tag">每轮调用的 george 工具 · single-agent 也适用</span></h3>'+((dist.tools&&dist.tools.length)?barList(dist.tools):'<div class="empty">工具数据从新对话开始采集（telemetry）</div>')+'</div>'
@@ -294,35 +305,6 @@ async function loadOverview(){
       +(cov<100?'<div class="note">📊 Telemetry 覆盖率 '+cov+'%（'+fmt(o.telemetry.messagesWithTokens)+'/'+fmt(o.totals.messages)+' 条带 token）。历史消息无 token/cost（reactive 路径此前丢弃了 SDK usage）；新对话开始已逐条采集。</div>':'');
     stamp();
   }catch(e){ sec.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
-}
-// Growth: onboarding funnel (counts + stuck-pending backlog) + retention (at-risk).
-// Downgraded — no time-to-complete funnel (pending_users has no completed_at).
-function renderGrowth(g){
-  if(!g) return '';
-  const ob=g.onboarding||{counts:{},backlog:[],tableMissing:false};
-  const rt=g.retention||{atRisk:[],totalUsers:0,activeUsers7d:0};
-  const c=ob.counts||{pending:0,completed:0,abandoned:0,total:0};
-  let html='<div class="grid cards" style="margin-top:14px">'
-    +card('Onboarding 待完成',fmt(c.pending||0),(ob.tableMissing?'表未迁移':'pending'),'warn')
-    +card('已完成',fmt(c.completed||0),'completed','good')
-    +card('已放弃',fmt(c.abandoned||0),'abandoned')
-    +card('沉默有风险',fmt((rt.atRisk||[]).length),'7-45 天未活跃且曾活跃','accent')
-    +'</div>';
-  html+='<div class="row2">';
-  html+='<div class="panel"><h3>Onboarding 积压 <span class="tag">pending 卡了多久 · 最久在前</span></h3>'
-    +(ob.tableMissing?'<div class="empty">pending_users 未迁移</div>'
-      :ob.error?'<div class="empty" style="color:var(--bad)">加载失败</div>'
-      :(ob.backlog&&ob.backlog.length)?'<div style="overflow-x:auto"><table><thead><tr><th>code</th><th>handle</th><th class="num">卡了(天)</th></tr></thead><tbody>'
-        +ob.backlog.map(b=>'<tr><td>'+esc(b.code)+'</td><td>'+esc(b.handleShort)+'</td><td class="num">'+fmt(b.ageDays)+'</td></tr>').join('')+'</tbody></table></div>'
-      :'<div class="empty">没有卡住的 pending 🎉</div>')
-    +'</div>';
-  html+='<div class="panel"><h3>沉默有风险用户 <span class="tag">曾活跃 · 已静默 7-45 天 · 可挽回</span></h3>'
-    +((rt.atRisk&&rt.atRisk.length)?'<div style="overflow-x:auto"><table><thead><tr><th>用户</th><th>身份</th><th class="num">静默(天)</th><th class="num">消息</th></tr></thead><tbody>'
-      +rt.atRisk.map(r=>'<tr><td>'+esc(r.handleShort)+'</td><td>'+(r.name?esc(r.name):'<span class="skel">—</span>')+'</td><td class="num">'+fmt(r.daysSince)+'</td><td class="num">'+fmt(r.messages)+'</td></tr>').join('')+'</tbody></table></div>'
-      :'<div class="empty">没有流失风险用户 👍</div>')
-    +'</div>';
-  html+='</div>';
-  return html;
 }
 function card(k,v,s,cls){ return '<div class="card"><div class="k">'+esc(k)+'</div><div class="v '+(cls||'')+'">'+v+'</div>'+(s?'<div class="s">'+esc(s)+'</div>':'')+'</div>'; }
 
@@ -456,7 +438,9 @@ async function openUser(id){
       +(d.heartbeat?'<div class="note">Heartbeat：cadence='+esc(d.heartbeat.cadence||'—')+' · 活跃 '+esc((d.heartbeat.active_hours_start||'')+'-'+(d.heartbeat.active_hours_end||''))+' · '+(d.heartbeat.paused?'已暂停':'运行中')+' · proactive 同意='+(d.heartbeat.consent_proactive_messages?'是':'否')+'</div>':'')
       +controlsPanel(d)
       +'<div class="panel"><h3>记忆档案 <span class="tag">user_profiles 6 blocks</span></h3><div class="blocks">'
-        + blocks.map(b=>'<div class="block"><div class="bk">'+b.replace('_',' ')+'</div><div class="bv">'+(p[b]?esc(p[b]):'<span class="skel">空</span>')+'</div></div>').join('')
+        + blocks.map(b=>'<div class="block"><div class="bk">'+b.replace('_',' ')
+            +(p[b]?'<button class="del" title="清空此 block（不可撤销）" onclick="clearBlock('+JSON.stringify(b).replace(/"/g,'&quot;')+')">🗑 清空</button>':'')
+          +'</div><div class="bv">'+(p[b]?esc(p[b]):'<span class="skel">空</span>')+'</div></div>').join('')
       +'</div></div>'
       +renderObsPanel(d)
       +'<div class="panel"><h3>对话记录 <span class="tag">'+d.conversation.length+' 条</span></h3><div class="convo">'
@@ -481,7 +465,52 @@ function renderObs(o){
     +'<div style="flex:1"><div class="otext">'+esc(o.content)+'</div>'
     +'<div class="ometa">'+(o.kind?'<span>'+esc(o.kind)+'</span>':'')
       +(o.consolidated?'<span>已固化</span>':'')
-      +'<span>'+ago(o.createdAt)+'前</span></div></div></div>';
+      +'<span>'+ago(o.createdAt)+'前</span>'
+      +'<button class="del" title="删除这条观察（不可撤销）" onclick="delObs('+JSON.stringify(o.id).replace(/"/g,'&quot;')+')">🗑 删除</button>'
+    +'</div></div></div>';
+}
+// Two-step destructive confirm: an accessible modal (focus-trapped, Esc cancels,
+// Tab cycles within the dialog) with an explicit warning ICON + TEXT (not red
+// alone). onConfirm runs only on the danger button. Focus returns to the trigger.
+function confirmDanger(opts){
+  const trigger=document.activeElement;
+  const scrim=document.createElement('div'); scrim.className='cdscrim';
+  scrim.innerHTML='<div class="cd" role="alertdialog" aria-modal="true" aria-labelledby="cdh">'
+    +'<div class="cdh" id="cdh">⚠️ '+esc(opts.title)+'</div>'
+    +'<div class="cdb">'+esc(opts.body)+'</div>'
+    +'<div class="cdf"><button class="btn" id="cdCancel">取消</button>'
+    +'<button class="btn danger" id="cdOk">🗑 '+esc(opts.confirmLabel||'确认删除')+'</button></div></div>';
+  document.body.appendChild(scrim);
+  const cancel=scrim.querySelector('#cdCancel'), ok=scrim.querySelector('#cdOk');
+  const focusables=[cancel,ok];
+  function close(){ scrim.remove(); document.removeEventListener('keydown',onKey,true); if(trigger&&trigger.focus) trigger.focus(); }
+  function onKey(e){
+    if(e.key==='Escape'){ e.preventDefault(); close(); }
+    else if(e.key==='Tab'){ // trap focus between the two buttons
+      e.preventDefault();
+      const i=focusables.indexOf(document.activeElement);
+      const n=e.shiftKey?(i<=0?focusables.length-1:i-1):((i+1)%focusables.length);
+      focusables[n].focus();
+    }
+  }
+  document.addEventListener('keydown',onKey,true);
+  cancel.onclick=close;
+  ok.onclick=async()=>{ ok.disabled=true; ok.textContent='处理中…'; try{ await opts.onConfirm(); close(); }catch(e){ ok.disabled=false; ok.textContent='🗑 '+esc(opts.confirmLabel||'确认删除'); alert('操作失败：'+e.message); } };
+  cancel.focus(); // default focus on the SAFE action
+}
+async function clearBlock(block){
+  if(!curUser) return;
+  confirmDanger({title:'清空 '+block.replace('_',' '),body:'将永久清空该用户的「'+block+'」记忆块，并立即失效缓存。此操作不可撤销（原值仅留在审计日志里）。',confirmLabel:'清空',onConfirm:async()=>{
+    await api('/user/'+encodeURIComponent(curUser)+'/memory/clear-block',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({block})});
+    openUser(curUser);
+  }});
+}
+async function delObs(oid){
+  if(!curUser) return;
+  confirmDanger({title:'删除观察 #'+oid,body:'将永久删除这条观察记忆。此操作不可撤销。',confirmLabel:'删除',onConfirm:async()=>{
+    await api('/user/'+encodeURIComponent(curUser)+'/observation/'+encodeURIComponent(oid)+'/delete',{method:'POST'});
+    openUser(curUser);
+  }});
 }
 function renderConvoMsg(m){
   const isUser=m.role==='user';
