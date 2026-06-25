@@ -271,7 +271,7 @@ function barList(items,max){ if(!items||!items.length) return '<div class="empty
 async function loadOverview(){
   const sec=document.getElementById('overview');
   try{
-    const [o,ts,dist]=await Promise.all([api('/overview'),api('/timeseries?days=14'),api('/distributions')]);
+    const [o,ts,dist,growth]=await Promise.all([api('/overview'),api('/timeseries?days=14'),api('/distributions'),api('/growth').catch(()=>null)]);
     const cov=o.telemetry.coveragePct;
     sec.innerHTML=
       '<div class="grid cards">'
@@ -285,6 +285,7 @@ async function loadOverview(){
       +card('活动 Events',fmt(o.totals.activeEvents)+' / '+fmt(o.totals.events),'active / 总')
       +card('Heartbeat 日志',fmt(o.totals.heartbeats),'proactive '+fmt(o.totals.proactiveSent))
       +'</div>'
+      +renderGrowth(growth)
       +'<div class="panel"><h3>消息量趋势 <span class="tag">近 14 天 · 用户 vs George</span></h3>'+lineChart(ts)+'</div>'
       +'<div class="row2">'
         +'<div class="panel"><h3>工具使用分布 <span class="tag">每轮调用的 george 工具 · single-agent 也适用</span></h3>'+((dist.tools&&dist.tools.length)?barList(dist.tools):'<div class="empty">工具数据从新对话开始采集（telemetry）</div>')+'</div>'
@@ -293,6 +294,35 @@ async function loadOverview(){
       +(cov<100?'<div class="note">📊 Telemetry 覆盖率 '+cov+'%（'+fmt(o.telemetry.messagesWithTokens)+'/'+fmt(o.totals.messages)+' 条带 token）。历史消息无 token/cost（reactive 路径此前丢弃了 SDK usage）；新对话开始已逐条采集。</div>':'');
     stamp();
   }catch(e){ sec.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
+}
+// Growth: onboarding funnel (counts + stuck-pending backlog) + retention (at-risk).
+// Downgraded — no time-to-complete funnel (pending_users has no completed_at).
+function renderGrowth(g){
+  if(!g) return '';
+  const ob=g.onboarding||{counts:{},backlog:[],tableMissing:false};
+  const rt=g.retention||{atRisk:[],totalUsers:0,activeUsers7d:0};
+  const c=ob.counts||{pending:0,completed:0,abandoned:0,total:0};
+  let html='<div class="grid cards" style="margin-top:14px">'
+    +card('Onboarding 待完成',fmt(c.pending||0),(ob.tableMissing?'表未迁移':'pending'),'warn')
+    +card('已完成',fmt(c.completed||0),'completed','good')
+    +card('已放弃',fmt(c.abandoned||0),'abandoned')
+    +card('沉默有风险',fmt((rt.atRisk||[]).length),'7-45 天未活跃且曾活跃','accent')
+    +'</div>';
+  html+='<div class="row2">';
+  html+='<div class="panel"><h3>Onboarding 积压 <span class="tag">pending 卡了多久 · 最久在前</span></h3>'
+    +(ob.tableMissing?'<div class="empty">pending_users 未迁移</div>'
+      :ob.error?'<div class="empty" style="color:var(--bad)">加载失败</div>'
+      :(ob.backlog&&ob.backlog.length)?'<div style="overflow-x:auto"><table><thead><tr><th>code</th><th>handle</th><th class="num">卡了(天)</th></tr></thead><tbody>'
+        +ob.backlog.map(b=>'<tr><td>'+esc(b.code)+'</td><td>'+esc(b.handleShort)+'</td><td class="num">'+fmt(b.ageDays)+'</td></tr>').join('')+'</tbody></table></div>'
+      :'<div class="empty">没有卡住的 pending 🎉</div>')
+    +'</div>';
+  html+='<div class="panel"><h3>沉默有风险用户 <span class="tag">曾活跃 · 已静默 7-45 天 · 可挽回</span></h3>'
+    +((rt.atRisk&&rt.atRisk.length)?'<div style="overflow-x:auto"><table><thead><tr><th>用户</th><th>身份</th><th class="num">静默(天)</th><th class="num">消息</th></tr></thead><tbody>'
+      +rt.atRisk.map(r=>'<tr><td>'+esc(r.handleShort)+'</td><td>'+(r.name?esc(r.name):'<span class="skel">—</span>')+'</td><td class="num">'+fmt(r.daysSince)+'</td><td class="num">'+fmt(r.messages)+'</td></tr>').join('')+'</tbody></table></div>'
+      :'<div class="empty">没有流失风险用户 👍</div>')
+    +'</div>';
+  html+='</div>';
+  return html;
 }
 function card(k,v,s,cls){ return '<div class="card"><div class="k">'+esc(k)+'</div><div class="v '+(cls||'')+'">'+v+'</div>'+(s?'<div class="s">'+esc(s)+'</div>':'')+'</div>'; }
 

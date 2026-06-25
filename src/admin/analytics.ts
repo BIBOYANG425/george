@@ -712,6 +712,95 @@ export async function getInjectionLog(sb: SupabaseClient, limit = 50) {
   return { entries, error: false, tableMissing: false };
 }
 
+// ── GROWTH (onboarding funnel + retention) ─────────────────────────────────
+
+// Pure: days between two ISO timestamps (floored, never negative). Exported for
+// unit tests so the retention math isn't only exercised live.
+export function daysBetween(fromISO: string, nowMs: number): number {
+  const t = Date.parse(fromISO);
+  if (!Number.isFinite(t)) return 0;
+  return Math.max(0, Math.floor((nowMs - t) / DAY_MS));
+}
+
+// Pure: a handle is "at risk" if it was a real user (>= minMessages) but has gone
+// quiet for [silentMin, silentMax] days. The upper bound keeps long-churned users
+// out of the actionable list — at-risk means "reachable if we nudge now", not "gone".
+export function classifyAtRisk(
+  lastActiveISO: string,
+  messages: number,
+  nowMs: number,
+  opts: { minMessages?: number; silentMin?: number; silentMax?: number } = {},
+): { daysSince: number; atRisk: boolean } {
+  const minMessages = opts.minMessages ?? 3;
+  const silentMin = opts.silentMin ?? 7;
+  const silentMax = opts.silentMax ?? 45;
+  const daysSince = daysBetween(lastActiveISO, nowMs);
+  return { daysSince, atRisk: messages >= minMessages && daysSince >= silentMin && daysSince <= silentMax };
+}
+
+// Onboarding funnel — DOWNGRADED to status counts + a pending-backlog list. There
+// is no completed_at on pending_users (015), so a time-to-complete funnel isn't
+// possible; we report counts and how long pending rows have been stuck instead.
+// §4A fail-soft if pending_users isn't present.
+export async function getOnboarding(sb: SupabaseClient) {
+  const { data, error } = await sb
+    .from('pending_users')
+    .select('code, imessage_handle, status, created_at')
+    .order('created_at', { ascending: true })
+    .limit(5000);
+  if (error) return { counts: { pending: 0, completed: 0, abandoned: 0, total: 0 }, backlog: [], tableMissing: isMissingTableError(error.message), error: !isMissingTableError(error.message) };
+  const now = Date.now();
+  const counts = { pending: 0, completed: 0, abandoned: 0, total: 0 };
+  const backlog: Array<{ code: string; handleShort: string; ageDays: number }> = [];
+  for (const r of (data ?? []) as Array<{ code: string; imessage_handle: string | null; status: string; created_at: string }>) {
+    counts.total++;
+    if (r.status === 'pending') counts.pending++;
+    else if (r.status === 'completed') counts.completed++;
+    else if (r.status === 'abandoned') counts.abandoned++;
+    if (r.status === 'pending') {
+      backlog.push({ code: r.code, handleShort: r.imessage_handle ? maskHandle(String(r.imessage_handle)) : '—', ageDays: daysBetween(r.created_at, now) });
+    }
+  }
+  // Oldest-pending first — those are the most stuck / most at risk of abandoning.
+  backlog.sort((a, b) => b.ageDays - a.ageDays);
+  return { counts, backlog: backlog.slice(0, 50), tableMissing: false, error: false };
+}
+
+// Retention — per-handle last-active + message count from messages, classified
+// into an at-risk list (was active, now quiet but still reachable). Reuses the
+// same .limit(10000) JS-aggregation pattern as getUsers.
+export async function getRetention(sb: SupabaseClient) {
+  const { data } = await sb
+    .from('messages')
+    .select('user_id, created_at')
+    .order('created_at', { ascending: false })
+    .limit(10000);
+  const now = Date.now();
+  const agg = new Map<string, { messages: number; lastActive: string }>();
+  for (const m of (data ?? []) as Array<{ user_id: string | null; created_at: string }>) {
+    if (!m.user_id) continue;
+    const k = String(m.user_id);
+    const a = agg.get(k);
+    if (!a) agg.set(k, { messages: 1, lastActive: m.created_at });
+    else { a.messages++; if (m.created_at > a.lastActive) a.lastActive = m.created_at; }
+  }
+  const students = await loadStudents(sb);
+  const ix = indexStudents(students);
+  const atRisk: Array<{ handleShort: string; name: string | null; daysSince: number; messages: number }> = [];
+  let activeUsers = 0;
+  for (const [k, a] of agg) {
+    const { daysSince, atRisk: risk } = classifyAtRisk(a.lastActive, a.messages, now);
+    if (daysSince <= 7) activeUsers++;
+    if (risk) {
+      const s = ix.get(k);
+      atRisk.push({ handleShort: maskHandle(k), name: s?.name ?? null, daysSince, messages: a.messages });
+    }
+  }
+  // Most-recently-gone-quiet first (the freshest, most-recoverable lapses).
+  atRisk.sort((a, b) => a.daysSince - b.daysSince);
+  return { totalUsers: agg.size, activeUsers7d: activeUsers, atRisk: atRisk.slice(0, 50) };
+}
+
 // ── ADMIN ACTIONS (the only writes) ────────────────────────────────────────
 export async function setHeartbeatPaused(sb: SupabaseClient, userId: string, paused: boolean) {
   // Resolve the heartbeat config key (handle, the student's uuid, or students.id)
