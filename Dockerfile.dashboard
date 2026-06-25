@@ -13,7 +13,12 @@
 FROM node:20-slim
 WORKDIR /app
 
-COPY package*.json tsconfig.json ./
+# .npmrc scopes @biboyang425 to GitHub Packages with ${NODE_AUTH_TOKEN}; Railway
+# passes the NODE_AUTH_TOKEN service var as this build ARG so npm ci can install
+# the private @biboyang425/bia-shared dep (declared in package.json). The
+# dashboard doesn't use it, but npm ci installs the whole tree, so it must auth.
+COPY package*.json tsconfig.json .npmrc ./
+ARG NODE_AUTH_TOKEN
 # Skip lifecycle scripts → no native compilation. tsx (devDep) is kept for the
 # runtime entrypoint, so we do NOT --omit=dev.
 RUN npm ci --ignore-scripts
