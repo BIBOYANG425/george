@@ -507,6 +507,114 @@ export async function getSystemHealth(sb: SupabaseClient) {
   };
 }
 
+// ── AI QUALITY (flags + fabrication sentinel) ──────────────────────────────
+
+// Pure: which "specific claim" signals does this assistant text carry? George's
+// domain playbook says course numbers, prices, and RMP-style ratings must come
+// from a tool, never invention — so a turn that STATES one without having called a
+// tool is a fabrication suspect. Heuristic by design (the dashboard labels these
+// as "needs human judgment"); exported pure so it's unit-testable without the DB.
+export function fabricationSignals(content: string): string[] {
+  if (!content) return [];
+  const s: string[] = [];
+  if (/[A-Za-z]{2,4}\s?\d{3}\b/.test(content)) s.push('course'); // WRIT 150, BUAD 280
+  if (/[$¥]\s?\d|\d+\s?(刀|块|美金|usd|dollars?|\/\s?(月|mo|month))|每月\s?\d/i.test(content)) s.push('price');
+  if (/\b[0-5]\.\d\b/.test(content)) s.push('rating'); // RMP 4.5 / 5.0
+  return s;
+}
+
+// Pure: did this turn invoke NO tools? tool_calls.tools is the per-turn tool list
+// (see getDistributions). Empty/absent/malformed → no tools → can't have verified
+// a specific claim against data.
+export function turnUsedNoTools(toolCalls: any): boolean {
+  return !(
+    toolCalls &&
+    typeof toolCalls === 'object' &&
+    Array.isArray(toolCalls.tools) &&
+    toolCalls.tools.length > 0
+  );
+}
+
+// Flagged turns (message_flags). §4A fail-soft: a not-yet-migrated table returns
+// { flags: [], tableMissing: true } so the Review page shows "未迁移", never 500s.
+export async function getFlaggedTurns(sb: SupabaseClient, limit = 100) {
+  const { data, error } = await sb
+    .from('message_flags')
+    .select('id, message_id, user_id, kind, reason, model, agent, context_snapshot, actor, created_at')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) {
+    const missing = isMissingTableError(error.message);
+    return { flags: [], tableMissing: missing, error: !missing };
+  }
+  const flags = (data ?? []).map((f: any) => ({
+    id: f.id,
+    messageId: f.message_id,
+    handleShort: f.user_id ? maskHandle(String(f.user_id)) : '—',
+    kind: f.kind,
+    reason: f.reason,
+    model: f.model,
+    agent: f.agent,
+    content: (f.context_snapshot && typeof f.context_snapshot === 'object' ? f.context_snapshot.content : null) ?? null,
+    actor: f.actor,
+    createdAt: f.created_at,
+  }));
+  return { flags, tableMissing: false, error: false };
+}
+
+// Fabrication sentinel: recent assistant turns that STATE a specific claim
+// (course/price/rating) but invoked NO tool. Scans the recent window in JS (same
+// .limit(N) pattern as the other reads). Heuristic surfacing for human review —
+// NOT an auto-block.
+export async function getFabricationSuspects(sb: SupabaseClient, opts: { scan?: number; limit?: number } = {}) {
+  const scan = Math.min(opts.scan ?? 3000, 10000);
+  const cap = opts.limit ?? 100;
+  const { data, error } = await sb
+    .from('messages')
+    .select('id, user_id, content, agent, tool_calls, created_at')
+    .eq('role', 'assistant')
+    .order('created_at', { ascending: false })
+    .limit(scan);
+
+  // A read failure must NOT read as "no suspects" (silent wrong-result). Surface it
+  // so the Review page shows an error state instead of a falsely-clean panel.
+  if (error) return { suspects: [], scanned: 0, error: true };
+
+  type ScanRow = { id: string; user_id: string | null; content: string | null; agent: string | null; tool_calls: any; created_at: string };
+  const suspects: Array<{
+    id: string;
+    handleShort: string;
+    content: string;
+    signals: string[];
+    agent: string | null;
+    createdAt: string;
+  }> = [];
+  let judgeable = 0; // turns we could actually judge (have tool telemetry)
+  for (const m of (data ?? []) as ScanRow[]) {
+    if (!m.content) continue;
+    // Only judge turns whose tool telemetry is PRESENT. A null/absent tool_calls
+    // means "we don't know what tools ran" (e.g. pre-enrichment historical rows),
+    // NOT "no tools" — flagging those would conflate unknown with verified-no-tool.
+    if (!m.tool_calls || typeof m.tool_calls !== 'object') continue;
+    judgeable++;
+    if (!turnUsedNoTools(m.tool_calls)) continue;
+    const signals = fabricationSignals(m.content);
+    if (signals.length === 0) continue;
+    suspects.push({
+      id: m.id,
+      handleShort: m.user_id ? maskHandle(String(m.user_id)) : '—',
+      content: m.content.length > 280 ? m.content.slice(0, 280) + '…' : m.content,
+      signals,
+      agent: m.agent,
+      createdAt: m.created_at,
+    });
+    if (suspects.length >= cap) break;
+  }
+  // `scanned` reports the JUDGEABLE window (telemetry-bearing turns), not the raw
+  // row count — so the UI's "scanned N" reflects what the heuristic could assess.
+  return { suspects, scanned: judgeable, error: false };
+}
+
 // ── ADMIN ACTIONS (the only writes) ────────────────────────────────────────
 export async function setHeartbeatPaused(sb: SupabaseClient, userId: string, paused: boolean) {
   // Resolve the heartbeat config key (handle, the student's uuid, or students.id)

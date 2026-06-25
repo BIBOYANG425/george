@@ -23,10 +23,12 @@ import {
   getUserDetail,
   getSystemHealth,
   setHeartbeatPaused,
+  getFlaggedTurns,
+  getFabricationSuspects,
 } from './analytics.js';
 import { renderDashboardHtml } from './dashboard-html.js';
 import { getUserControls, setUserControls, getUsageSnapshot, getModelChoices } from './user-controls.js';
-import { logAdminAction, adminActor } from './actions.js';
+import { logAdminAction, adminActor, flagMessage } from './actions.js';
 
 export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: string): express.Router {
   const router = express.Router();
@@ -79,6 +81,28 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
   api.get('/users', wrap((req) => getUsers(sb, clampInt(req.query.limit, 100, 1, 500))));
   api.get('/user/:id', wrap((req) => getUserDetail(sb, String(req.params.id))));
   api.get('/health', wrap(() => getSystemHealth(sb)));
+
+  // AI-quality review: flagged turns + fabrication suspects (both read-only,
+  // fail-soft if message_flags isn't migrated). PR-3 prepends the crisis queue here.
+  api.get('/review', wrap(async () => {
+    const [flagged, fab] = await Promise.all([getFlaggedTurns(sb, 100), getFabricationSuspects(sb, {})]);
+    return { flagged, fabrication: fab };
+  }));
+
+  // Flag a George turn as a bad reply. Snapshot is built server-side from the
+  // messages row; actor is the Cf-Access admin (or the shared token locally).
+  api.post('/message/:id/flag', wrap(async (req) => {
+    const id = String(req.params.id);
+    const b = (req.body ?? {}) as { kind?: string; reason?: string };
+    const kind = typeof b.kind === 'string' && b.kind.trim() ? b.kind.trim() : 'bad_turn';
+    const reason = typeof b.reason === 'string' ? b.reason.trim() : undefined;
+    const r = await flagMessage(sb, { messageId: id, kind, reason, actor: adminActor(req) });
+    // A failed flag (table not migrated, FK violation, DB error) must surface as a
+    // non-2xx so the client throws — otherwise wrap() 200s the {ok:false} body and
+    // the UI shows a false "✓ 已标记" while nothing persisted.
+    if (!r.ok) throw new Error(r.error || 'flag failed');
+    return r;
+  }));
 
   api.post('/user/:id/pause', wrap(async (req) => {
     const id = String(req.params.id);

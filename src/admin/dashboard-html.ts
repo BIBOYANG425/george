@@ -134,6 +134,15 @@ export function renderDashboardHtml(): string {
   .badge.block{color:var(--bad);border-color:rgba(248,113,113,.35)}
   .badge.model{color:var(--george);border-color:rgba(167,139,250,.35)}
   .badge.lim{color:var(--warn);border-color:rgba(251,191,36,.3)}
+  /* flag button + review */
+  .btn.sm.flag{padding:2px 7px;border-color:transparent;opacity:.55}
+  .btn.sm.flag:hover{opacity:1;border-color:var(--bad)}
+  .btn.sm.flag.flagged{opacity:1;color:var(--bad);border-color:rgba(248,113,113,.4)}
+  .rev{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+  .rev .r{border:1px solid var(--border);border-radius:10px;padding:10px 12px;background:var(--panel2)}
+  .rev .r .rtop{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-bottom:4px}
+  .rev .r .rtext{font-size:13px;color:var(--txt);white-space:pre-wrap}
+  .sig{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid rgba(251,191,36,.35);color:var(--warn)}
 </style>
 </head>
 <body>
@@ -167,6 +176,7 @@ export function renderDashboardHtml(): string {
         <div class="tab active" data-tab="overview" onclick="setTab('overview')">概览</div>
         <div class="tab" data-tab="live" onclick="setTab('live')">实时</div>
         <div class="tab" data-tab="users" onclick="setTab('users')">用户</div>
+        <div class="tab" data-tab="review" onclick="setTab('review')">复盘</div>
         <div class="tab" data-tab="system" onclick="setTab('system')">系统</div>
       </div>
     </div>
@@ -175,6 +185,7 @@ export function renderDashboardHtml(): string {
     <section id="overview"></section>
     <section id="live" class="hide"></section>
     <section id="users" class="hide"></section>
+    <section id="review" class="hide"></section>
     <section id="system" class="hide"></section>
   </div></main>
 </div>
@@ -227,13 +238,14 @@ function stamp(){ document.getElementById('updated').textContent='更新于 '+ne
 function setTab(t){
   TAB=t;
   for(const el of document.querySelectorAll('.tab')) el.classList.toggle('active',el.dataset.tab===t);
-  for(const id of ['overview','live','users','system']) document.getElementById(id).classList.toggle('hide',id!==t);
+  for(const id of ['overview','live','users','review','system']) document.getElementById(id).classList.toggle('hide',id!==t);
   refresh(); scheduleLive();
 }
 function refresh(silent){
   if(TAB==='overview') loadOverview();
   else if(TAB==='live') loadLive();
   else if(TAB==='users') loadUsers();
+  else if(TAB==='review') loadReview();
   else if(TAB==='system') loadSystem();
   if(!silent) stamp(); else stamp();
 }
@@ -330,7 +342,21 @@ function renderMsg(m){
       +(m.tokens?'<span class="badge">'+fmt(m.tokens)+' tok</span>':'')
       +(m.costUsd?'<span class="badge cost">'+money(m.costUsd)+'</span>':'')
       +'<div class="spacer" style="flex:1"></div><span class="time">'+ago(m.createdAt)+'前 · '+hm(m.createdAt)+'</span>'
+      +(!isUser&&m.id?'<button class="btn sm flag" title="标记为坏回合（off-voice/编造/错误）" onclick="flagTurn(this,'+JSON.stringify(m.id).replace(/"/g,'&quot;')+')">👎</button>':'')
     +'</div><div class="content">'+esc(m.content)+'</div></div></div>';
+}
+
+// Flag a George turn as a bad reply. Optional reason via prompt(); POSTs the flag
+// and gives quick inline feedback on the button itself (no full reload).
+async function flagTurn(btn,id){
+  const reason=prompt('标记这条 George 回复为坏回合。可选：写一句原因（off-voice / 编造价格 / 教授名错了…）','');
+  if(reason===null) return; // cancelled
+  btn.disabled=true; const old=btn.textContent; btn.textContent='标记中…';
+  try{
+    await api('/message/'+encodeURIComponent(id)+'/flag',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'bad_turn',reason})});
+    btn.textContent='✓ 已标记'; btn.classList.add('flagged');
+    if(TAB==='review') loadReview();
+  }catch(e){ btn.disabled=false; btn.textContent=old; alert('标记失败：'+e.message); }
 }
 
 // ── USERS ──
@@ -424,7 +450,9 @@ function renderConvoMsg(m){
     +'<div class="top"><span class="id">'+(isUser?'用户':'George')+'</span>'
     +(m.agent?'<span class="badge agent">'+esc(m.agent)+'</span>':'')
     +(m.tokens?'<span class="badge">'+fmt(m.tokens)+' tok</span>':'')
-    +'<div class="spacer" style="flex:1"></div><span class="time">'+hm(m.createdAt)+'</span></div>'
+    +'<div class="spacer" style="flex:1"></div><span class="time">'+hm(m.createdAt)+'</span>'
+    +(!isUser&&m.id?'<button class="btn sm flag" title="标记为坏回合" onclick="flagTurn(this,'+JSON.stringify(m.id).replace(/"/g,'&quot;')+')">👎</button>':'')
+    +'</div>'
     +'<div class="content">'+esc(m.content)+'</div></div></div>';
 }
 // Model options are fetched from /admin/api/models per TIER (main / emotional),
@@ -501,6 +529,48 @@ async function toggleHb(){
   catch(e){ alert('操作失败：'+e.message); }
 }
 function closeDrawer(){ document.getElementById('scrim').classList.remove('open'); document.getElementById('drawer').classList.remove('open'); curUser=null; }
+
+// ── REVIEW (AI quality: flagged turns + fabrication suspects) ──
+async function loadReview(){
+  const sec=document.getElementById('review');
+  try{
+    const d=await api('/review');
+    const fl=d.flagged||{flags:[],tableMissing:false,error:false};
+    const fab=d.fabrication||{suspects:[],scanned:0};
+    sec.innerHTML=
+      // PR-3 will prepend the crisis queue here.
+      '<div class="panel"><h3>已标记的坏回合 <span class="tag">message_flags · 人工标记</span></h3>'
+        +(fl.tableMissing?'<div class="empty">该表未迁移（message_flags 不在此环境）— 应用 migration 后开始记录</div>'
+          :fl.error?'<div class="empty" style="color:var(--bad)">加载失败（非「无标记」）</div>'
+          :(fl.flags.length?'<div class="rev">'+fl.flags.map(renderFlag).join('')+'</div>':'<div class="empty">还没有标记 — 在「实时」或用户抽屉里点 👎 标记坏回合</div>'))
+      +'</div>'
+      +'<div class="panel"><h3>编造哨兵 <span class="tag">有具体声明(课号/价格/评分)却没调用工具 · 启发式，需人工判断 · 仅判定有 telemetry 的近 '+fmt(fab.scanned||0)+' 条</span></h3>'
+        +(fab.error?'<div class="empty" style="color:var(--bad)">加载失败（非「无可疑」）— 查询出错</div>'
+          :fab.suspects.length?'<div class="rev">'+fab.suspects.map(renderSuspect).join('')+'</div>':'<div class="empty">近期没有可疑回合 👍</div>')
+      +'</div>';
+    stamp();
+  }catch(e){ sec.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
+}
+function renderFlag(f){
+  return '<div class="r"><div class="rtop">'
+    +'<span class="badge block">'+esc(f.kind||'bad_turn')+'</span>'
+    +'<span>'+esc(f.handleShort||'—')+'</span>'
+    +(f.agent?'<span class="badge agent">'+esc(f.agent)+'</span>':'')
+    +(f.model?'<span class="badge model">'+esc(shortModel(f.model))+'</span>':'')
+    +'<div class="spacer" style="flex:1"></div><span>'+esc(f.actor||'')+' · '+ago(f.createdAt)+'前</span></div>'
+    +(f.reason?'<div class="rtext" style="color:var(--warn)">“'+esc(f.reason)+'”</div>':'')
+    +'<div class="rtext">'+(f.content?esc(f.content):'<span class="skel">（原消息已删除，仅存标记）</span>')+'</div></div>';
+}
+function renderSuspect(s){
+  return '<div class="r"><div class="rtop">'
+    +'<span>'+esc(s.handleShort||'—')+'</span>'
+    +(s.agent?'<span class="badge agent">'+esc(s.agent)+'</span>':'')
+    +(s.signals||[]).map(x=>'<span class="sig">'+esc(x)+'</span>').join('')
+    +'<div class="spacer" style="flex:1"></div>'
+    +'<button class="btn sm flag" title="确认为坏回合" onclick="flagTurn(this,'+JSON.stringify(s.id).replace(/"/g,'&quot;')+')">👎</button>'
+    +'<span style="margin-left:8px">'+ago(s.createdAt)+'前</span></div>'
+    +'<div class="rtext">'+esc(s.content)+'</div></div>';
+}
 
 // ── SYSTEM ──
 async function loadSystem(){
