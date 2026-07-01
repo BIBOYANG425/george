@@ -27,11 +27,14 @@ CREATE TABLE IF NOT EXISTS proposed_matches (
 CREATE INDEX IF NOT EXISTS idx_proposed_matches_status_created
   ON proposed_matches (status, created_at);
 
--- One LIVE proposal per (student, post): re-running proposeMatches must not duplicate a
--- pending/sent intro. Rejected/expired rows do not block a fresh proposal later (partial predicate).
+-- One LIVE proposal per (student, post): re-running proposeMatches must not duplicate a live intro.
+-- Must include 'approved' — claimProposal moves the row pending->approved BEFORE delivery, so
+-- omitting it would drop the guard during the delivery window (and permanently if a row got stuck
+-- 'approved'), allowing a duplicate proposal + double intro. Rejected/expired rows do not block a
+-- fresh proposal later (partial predicate).
 CREATE UNIQUE INDEX IF NOT EXISTS uq_proposed_matches_live
   ON proposed_matches (student_id, post_id)
-  WHERE status IN ('pending','sent');
+  WHERE status IN ('pending','approved','sent');
 
 ALTER TABLE proposed_matches ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "service_role_full_access" ON proposed_matches;

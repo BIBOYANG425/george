@@ -13,24 +13,31 @@ import { normalizeHandle } from '../services/phone-handle.js'
 import { buildProposalDeps } from '../services/match-proposal-deps.js'
 import { sendApprovedMatch, rejectMatch } from '../services/match-proposal-engine.js'
 
-// Leading slash optional: the officer-notify text says "ok <id>" / "no <id>" (no slash), and an
-// officer typing either "ok 1a2b" or "/ok 1a2b" must work.
-const OFFICER_RX = /^\/?(ok|no)\s+(\S+)\s*$/i
+// Leading slash REQUIRED. The officer is a normal George user, so a bare "ok ..." / "no ..." message
+// (e.g. "ok thanks", "no 今晚不去了") must NOT be hijacked as a command and swallowed. The notify text
+// tells the officer to reply "/ok <id>" / "/no <id>".
+const OFFICER_RX = /^\/(ok|no)\s+(\S+)\s*$/i
 
 // Find the single pending proposal whose id starts with the given short prefix. Done in JS (uuid
 // columns don't support LIKE) over a bounded recent-pending window. Returns null on 0 or >1 matches.
 async function resolvePendingByPrefix(prefix: string): Promise<{ id: string; post_id: string } | null> {
-  const p = prefix.toLowerCase()
+  // The notify gives id.slice(0,8) — the first uuid group. Resolve via a server-side uuid RANGE on
+  // the PK, so there is no fixed row-window that could hide older-but-valid pending rows once the
+  // backlog grows. Returns null on 0 or >1 (ambiguous) matches.
+  const p = prefix.toLowerCase().replace(/[^0-9a-f]/g, '')
+  if (p.length === 0 || p.length > 8) return null
+  const lo = `${p.padEnd(8, '0')}-0000-0000-0000-000000000000`
+  const hi = `${p.padEnd(8, 'f')}-ffff-ffff-ffff-ffffffffffff`
   const { data, error } = await supabase
     .from('proposed_matches')
     .select('id, post_id')
     .eq('status', 'pending')
-    .order('created_at', { ascending: false })
-    .limit(200)
+    .gte('id', lo)
+    .lte('id', hi)
+    .limit(2)
   if (error || !data) return null
   const rows = data as { id: string; post_id: string }[]
-  const hits = rows.filter((r) => r.id.toLowerCase().startsWith(p))
-  return hits.length === 1 ? hits[0] : null
+  return rows.length === 1 ? rows[0] : null
 }
 
 /**

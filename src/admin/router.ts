@@ -237,7 +237,13 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
       const a = await loadMatchAndAuth(req);
       if (!a.ok) { res.status(a.status).send(matchHtml('<p>' + a.msg + '</p>')); return; }
       if (a.status !== 'pending') { res.send(matchHtml('<p>这个匹配已经处理过了 (' + a.status + ')。</p>')); return; }
-      const kq = typeof req.query.k === 'string' ? '?k=' + encodeURIComponent(req.query.k) : '';
+      // Carry whichever credential authed the GET onto the POST (officer link uses ?k=, an admin
+      // may use ?token=), so the confirm button doesn't 401.
+      const cred =
+        typeof req.query.k === 'string' ? 'k=' + encodeURIComponent(req.query.k)
+        : typeof req.query.token === 'string' ? 'token=' + encodeURIComponent(req.query.token)
+        : '';
+      const kq = cred ? '?' + cred : '';
       const label = action === 'approve' ? '确认发送' : '确认拒绝';
       res.send(matchHtml(
         '<p>' + (action === 'approve' ? '发送这个搭子匹配给对方?' : '拒绝这个匹配?') + '</p>' +

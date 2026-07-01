@@ -98,18 +98,23 @@ export async function proposeMatches(postId: string, deps: ProposalDeps): Promis
 
   const summaries: ProposalSummary[] = []
   for (const c of candidates) {
-    const approve_token = deps.newToken()
-    const reason = c.matched_tags?.[0] ?? c.best_facet ?? '类似的'
-    const id = await deps.insertProposal({
-      student_id: c.student_id,
-      post_id: postId,
-      fit_score: c.rrf_score,
-      reason,
-      approve_token,
-    })
-    if (!id) continue // a live proposal for (student, post) already exists — idempotent skip
-    await deps.logFunnel(c.student_id, 'match_proposed', postId, { fit_score: c.rrf_score })
-    summaries.push({ id, student_id: c.student_id, fit_score: c.rrf_score, approve_token, candidate: c })
+    try {
+      const approve_token = deps.newToken()
+      const reason = c.matched_tags?.[0] ?? c.best_facet ?? '类似的'
+      const id = await deps.insertProposal({
+        student_id: c.student_id,
+        post_id: postId,
+        fit_score: c.rrf_score,
+        reason,
+        approve_token,
+      })
+      if (!id) continue // a live proposal for (student, post) already exists — idempotent skip
+      await deps.logFunnel(c.student_id, 'match_proposed', postId, { fit_score: c.rrf_score })
+      summaries.push({ id, student_id: c.student_id, fit_score: c.rrf_score, approve_token, candidate: c })
+    } catch {
+      // One candidate's insert/log throwing (a non-23505 DB error) must NOT abort the fan-out and
+      // drop the officer notify for the other candidates. Skip this one and continue.
+    }
   }
   return summaries
 }
@@ -127,7 +132,10 @@ export async function sendApprovedMatch(
   const p = await deps.claimProposal(proposalId, officerId) // pending→approved, or null if not pending
   if (!p) return { outcome: 'noop', reason: 'not_pending' }
 
-  await deps.logFunnel(p.student_id, 'match_approved', p.post_id, { approved: true })
+  // The proposal is now claimed to 'approved'. From here a throw would strand it in 'approved'
+  // permanently (claimProposal only re-claims 'pending', so /ok + the link would both become no-ops).
+  // So the status log and every finalize below are best-effort — a DB blip must not strand the row.
+  try { await deps.logFunnel(p.student_id, 'match_approved', p.post_id, { approved: true }) } catch { /* best-effort */ }
 
   const prefs = await deps.loadPrefs(p.student_id)
   const record = (status: PingRow['status']) =>
@@ -149,7 +157,7 @@ export async function sendApprovedMatch(
     if (recordStatus) {
       try { await record(recordStatus) } catch { /* accounting best-effort — never block the expire */ }
     }
-    await deps.finalizeProposal(p.id, 'expired')
+    try { await deps.finalizeProposal(p.id, 'expired') } catch { /* best-effort — don't strand as 'approved' */ }
     return { outcome: 'expired', reason }
   }
 

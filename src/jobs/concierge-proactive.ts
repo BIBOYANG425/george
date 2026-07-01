@@ -36,22 +36,20 @@ export interface RankedPost {
 }
 
 /**
- * Pure: choose the highest-scoring post above the fit floor, or null. Own/joined exclusion is NOT
- * here (the RPC row carries no creator/membership) — the caller does it via isStudentEligibleForPost.
- * Exported for tests.
+ * Pure: rank the candidate posts above the fit floor, highest first. Own/joined exclusion is NOT here
+ * (the RPC row carries no creator/membership) — the caller applies isStudentEligibleForPost and falls
+ * through to the next candidate, since a student's OWN post often ranks #1. Exported for tests.
  */
-export function selectSquadProposal(
+export function selectSquadCandidates(
   posts: RankedPost[],
   minScore = MIN_FIT_SCORE,
-): { postId: string; fitScore: number; reason: string | null } | null {
-  const scored = posts
+): Array<{ postId: string; fitScore: number; reason: string | null }> {
+  return posts
     .filter((p) => p && p.post_id)
     .map((p) => ({ p, s: p.rrf_score ?? 0 }))
+    .filter((x) => x.s >= minScore)
     .sort((a, b) => b.s - a.s)
-  const top = scored[0]
-  if (!top || top.s < minScore) return null
-  const reason = top.p.matched_tags?.[0] ?? top.p.best_facet ?? null
-  return { postId: top.p.post_id, fitScore: top.s, reason }
+    .map((x) => ({ postId: x.p.post_id, fitScore: x.s, reason: x.p.matched_tags?.[0] ?? x.p.best_facet ?? null }))
 }
 
 function inQuietHoursLA(): boolean {
@@ -94,11 +92,12 @@ export async function surfaceSquadForStudents(): Promise<{ proposed: number; sca
         p_match_count: 10,
       })
       if (rpcErr || !data) continue
-      const pick = selectSquadProposal(data as RankedPost[])
-      if (!pick) continue
-      if (!(await isStudentEligibleForPost(studentId, pick.postId))) continue // skip own / already-joined
-      const proposal = await proposeStudentForPost(studentId, pick.postId, pick.fitScore, pick.reason)
-      if (proposal) collected.push(proposal)
+      // Walk candidates best-first; skip own/already-joined posts and fall through to the next.
+      for (const cand of selectSquadCandidates(data as RankedPost[])) {
+        if (!(await isStudentEligibleForPost(studentId, cand.postId))) continue
+        const proposal = await proposeStudentForPost(studentId, cand.postId, cand.fitScore, cand.reason)
+        if (proposal) { collected.push(proposal); break } // proposed; null = already-live, try next
+      }
     } catch (e) {
       log('error', 'concierge_proactive_student_error', { studentId, err: (e as Error).message })
     }
