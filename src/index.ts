@@ -28,6 +28,7 @@ import { runOrchestrator } from './agent/orchestrator.js'
 import { createSupabaseSessionStore } from './agent/session-store.js'
 import { getStats, log } from './observability/logger.js'
 import { matchStudentsToEvents } from './jobs/proactive.js'
+import { surfaceSquadForStudents } from './jobs/concierge-proactive.js'
 import { sendPendingReminders } from './jobs/reminder-sender.js'
 import { sendPendingShippingNotifications } from './jobs/shipping-notifier.js'
 import { scrapeInstagram } from './scrapers/instagram.js'
@@ -728,6 +729,29 @@ if (process.env.SQUAD_REREACH_EVAL_ENABLED === 'true') {
     }
   })
   console.log(`[rereach-eval] enabled (${interval})`)
+}
+
+// Concierge proactive surfacer (T7 squad branch): proposes an open squad post to a passive
+// opted-in student, routed through the officer glance. Off by default; own interval + running
+// flag. When CONCIERGE_PROACTIVE_ENABLED is unset this block never registers — zero new cron,
+// zero new queries, zero proposals. (The EVENT branch is the existing matchStudentsToEvents cron.)
+if (process.env.CONCIERGE_PROACTIVE_ENABLED === 'true') {
+  const interval = process.env.CONCIERGE_PROACTIVE_INTERVAL_CRON || '0 */2 * * *'
+  let running = false
+  cron.schedule(interval, async () => {
+    if (running) { console.log('[concierge-proactive] previous tick still running, skipping'); return }
+    running = true
+    const t0 = Date.now()
+    try {
+      const r = await surfaceSquadForStudents()
+      console.log(`[concierge-proactive] tick complete in ${Date.now() - t0}ms (proposed ${r.proposed}/${r.scanned})`)
+    } catch (err) {
+      console.error('[concierge-proactive] tick failed:', err)
+    } finally {
+      running = false
+    }
+  })
+  console.log(`[concierge-proactive] enabled (${interval})`)
 }
 
 // ==========================================
