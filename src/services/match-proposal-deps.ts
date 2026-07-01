@@ -250,7 +250,7 @@ async function notifyOfficer(postId: string, summaries: ProposalSummary[]): Prom
     const link = base
       ? `${base}/admin/api/match/${s.id}/approve?k=${s.approve_token}`
       : '(set CONCIERGE_PUBLIC_BASE_URL)'
-    return `· 学生 ${who} · ${reason} (fit ${s.fit_score.toFixed(2)})\n  同意: ${link}\n  或回复  ok ${short}  /  no ${short}`
+    return `· 学生 ${who} · ${reason} (fit ${s.fit_score.toFixed(2)})\n  同意: ${link}\n  或回复  /ok ${short}   拒绝  /no ${short}`
   })
   const bubbles = [`新${cat}局有 ${summaries.length} 个匹配等你过目 👀`, lines.join('\n')]
   try {
@@ -269,32 +269,67 @@ export async function proposeMatchesForPost(postId: string): Promise<number> {
   return summaries.length
 }
 
-// T7 proactive squad branch: propose ONE passive student for an EXISTING open post (the inverse of
-// proposeMatchesForPost, which proposes many candidates for a freshly-created post). Same
-// proposed_matches row + funnel + officer glance. Idempotent via the partial-unique index.
+export interface ProactiveProposal {
+  id: string
+  student_id: string
+  post_id: string
+  fit_score: number
+  reason: string | null
+  approve_token: string
+}
+
+// A student is eligible to be PROPOSED an existing post only if they neither created it nor already
+// joined it. hybrid_search_posts_for_user returns neither fact (post_id/rrf_score only), so we check
+// here — the guard squad-coordinator-deps pairs with the same open-post derivation.
+export async function isStudentEligibleForPost(studentId: string, postId: string): Promise<boolean> {
+  const [{ data: post }, { data: member }] = await Promise.all([
+    supabase.from('squad_posts').select('created_by_student_id').eq('id', postId).single(),
+    supabase.from('squad_members').select('student_id').eq('post_id', postId).eq('student_id', studentId).maybeSingle(),
+  ])
+  if (!post) return false // unknown post → fail closed
+  if ((post as { created_by_student_id: string | null }).created_by_student_id === studentId) return false // own post
+  if (member) return false // already joined
+  return true
+}
+
+// T7 proactive squad branch: propose ONE passive student for an EXISTING open post (inverse of
+// proposeMatchesForPost). Inserts + logs funnel; does NOT notify — the caller BATCHES notifications
+// (via notifyOfficerDigest) so a run of N students is one officer message, not N. Returns the
+// proposal, or null if a live one already exists / on error. Idempotent via the partial-unique index.
 export async function proposeStudentForPost(
   studentId: string,
   postId: string,
   fitScore: number,
   reason: string | null,
-): Promise<'proposed' | 'exists' | 'error'> {
+): Promise<ProactiveProposal | null> {
   try {
     const approve_token = randomUUID()
     const id = await insertProposal({ student_id: studentId, post_id: postId, fit_score: fitScore, reason, approve_token })
-    if (!id) return 'exists' // a live proposal for (student, post) already exists — no re-notify
+    if (!id) return null // a live proposal for (student, post) already exists — skip
     await logFunnelEvent(studentId, 'match_proposed', { refId: postId, meta: { fit_score: fitScore, proactive: true } })
-    const candidate: MatchCandidate = {
-      student_id: studentId,
-      rrf_score: fitScore,
-      semantic_sim: null,
-      tag_overlap: 0,
-      matched_tags: reason ? [reason] : [],
-      best_facet: reason,
-    }
-    await notifyOfficer(postId, [{ id, student_id: studentId, fit_score: fitScore, approve_token, candidate }])
-    return 'proposed'
+    return { id, student_id: studentId, post_id: postId, fit_score: fitScore, reason, approve_token }
   } catch (e) {
     console.error('proposeStudentForPost failed', { studentId, postId, err: (e as Error).message })
-    return 'error'
+    return null
+  }
+}
+
+// ONE officer digest for a whole proactive run (fixes per-student notify spam).
+export async function notifyOfficerDigest(items: ProactiveProposal[]): Promise<void> {
+  const officer = config.concierge.officerImessage
+  if (!officer || items.length === 0) return
+  const base = config.concierge.publicBaseUrl.replace(/\/+$/, '')
+  const lines = items.map((it) => {
+    const short = it.id.slice(0, 8)
+    const who = it.student_id.slice(0, 8)
+    const reason = it.reason ?? '类似的'
+    const link = base ? `${base}/admin/api/match/${it.id}/approve?k=${it.approve_token}` : '(set CONCIERGE_PUBLIC_BASE_URL)'
+    return `· 学生 ${who} · ${reason} (fit ${it.fit_score.toFixed(2)})\n  同意: ${link}\n  或回复  /ok ${short}   拒绝  /no ${short}`
+  })
+  const bubbles = [`有 ${items.length} 个新搭子匹配等你过目 👀`, lines.join('\n\n')]
+  try {
+    await deliver(normalizeHandle(officer), bubbles)
+  } catch (e) {
+    console.error('concierge officer digest failed', { err: (e as Error).message })
   }
 }

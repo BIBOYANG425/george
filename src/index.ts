@@ -731,6 +731,12 @@ if (process.env.SQUAD_REREACH_EVAL_ENABLED === 'true') {
   console.log(`[rereach-eval] enabled (${interval})`)
 }
 
+// Guardrail: the reactive glance queues matches whose ONLY approval surface is the officer notify.
+// If it's on with no officer handle, proposals reach nobody — warn loudly at boot.
+if (process.env.CONCIERGE_MATCH_ENABLED === 'true' && !process.env.CONCIERGE_OFFICER_IMESSAGE) {
+  console.warn('[concierge] CONCIERGE_MATCH_ENABLED=true but CONCIERGE_OFFICER_IMESSAGE is empty — matches will be queued but the approve link reaches NOBODY. Set the officer handle.')
+}
+
 // Concierge proactive surfacer (T7 squad branch): proposes an open squad post to a passive
 // opted-in student, routed through the officer glance. Off by default; own interval + running
 // flag. When CONCIERGE_PROACTIVE_ENABLED is unset this block never registers — zero new cron,

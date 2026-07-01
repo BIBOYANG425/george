@@ -13,7 +13,9 @@ import { normalizeHandle } from '../services/phone-handle.js'
 import { buildProposalDeps } from '../services/match-proposal-deps.js'
 import { sendApprovedMatch, rejectMatch } from '../services/match-proposal-engine.js'
 
-const OFFICER_RX = /^\/(ok|no)\s+(\S+)\s*$/i
+// Leading slash optional: the officer-notify text says "ok <id>" / "no <id>" (no slash), and an
+// officer typing either "ok 1a2b" or "/ok 1a2b" must work.
+const OFFICER_RX = /^\/?(ok|no)\s+(\S+)\s*$/i
 
 // Find the single pending proposal whose id starts with the given short prefix. Done in JS (uuid
 // columns don't support LIKE) over a bounded recent-pending window. Returns null on 0 or >1 matches.

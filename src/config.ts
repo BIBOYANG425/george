@@ -100,7 +100,9 @@ export const config = {
   concierge: {
     matchEnabled: process.env.CONCIERGE_MATCH_ENABLED === 'true',
     // Officer iMessage handle (E.164 phone or email) allowed to approve/reject via /ok /no. Compared
-    // AFTER normalizeHandle. Empty = the iMessage approve command is disabled (link still works).
+    // AFTER normalizeHandle. REQUIRED when matchEnabled: the officer notify is the ONLY surface that
+    // delivers the approve link (there is no dashboard queue), so if this is empty, proposals are
+    // queued but reach nobody. index.ts warns at boot when matchEnabled && this is empty.
     officerImessage: process.env.CONCIERGE_OFFICER_IMESSAGE || '',
     // Public base URL of the AGENT service (the one with a Spectrum connection) for the approve link.
     // NOT the dashboard — george.uscbia.com has no Spectrum. e.g. https://george-api.uscbia.com

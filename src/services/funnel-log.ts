@@ -26,17 +26,20 @@ export async function logFunnelEvent(
   opts: { refId?: string | null; meta?: Record<string, unknown> } = {},
 ): Promise<void> {
   try {
-    const { error } = await supabase.from('funnel_events').upsert(
-      {
-        student_id: studentId,
-        stage,
-        ref_id: opts.refId ?? null,
-        meta: opts.meta ?? {},
-      },
-      { onConflict: 'student_id,stage,ref_id', ignoreDuplicates: true },
-    )
-    // Fail-soft: a funnel-log miss must never break the concierge flow it is observing.
-    if (error) console.error('funnel_events log failed', { stage, error: error.message })
+    // Plain insert + treat 23505 as an idempotent no-op. This relies ONLY on the once-only unique
+    // index (uq_funnel_events_once) raising a unique_violation — no dependence on PostgREST resolving
+    // an onConflict target against a NULLS-NOT-DISTINCT index, which is version-dependent.
+    const { error } = await supabase.from('funnel_events').insert({
+      student_id: studentId,
+      stage,
+      ref_id: opts.refId ?? null,
+      meta: opts.meta ?? {},
+    })
+    // 23505 = the (student, stage, ref) once-only guard already logged this stage → not an error.
+    // Any other error is fail-soft: a funnel-log miss must never break the flow it observes.
+    if (error && (error as { code?: string }).code !== '23505') {
+      console.error('funnel_events log failed', { stage, error: error.message })
+    }
   } catch (e) {
     console.error('funnel_events log threw', { stage, err: (e as Error).message })
   }

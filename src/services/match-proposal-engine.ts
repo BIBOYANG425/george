@@ -200,8 +200,11 @@ export async function sendApprovedMatch(
   } catch {
     // Delivered, but the squad_pings write failed: keep the send, never relabel it.
   }
-  await deps.finalizeProposal(p.id, 'sent')
-  await deps.logFunnel(p.student_id, 'intro_sent', p.post_id)
+  // The intro is already delivered. A blip finalizing the status or logging the funnel must NOT
+  // surface a delivered intro as an error, nor abort. Best-effort: the row may stay 'approved', but
+  // claimProposal's status='pending' guard means it can never re-send.
+  try { await deps.finalizeProposal(p.id, 'sent') } catch { /* delivered — status is best-effort */ }
+  try { await deps.logFunnel(p.student_id, 'intro_sent', p.post_id) } catch { /* delivered — log is best-effort */ }
   return { outcome: 'sent' }
 }
 

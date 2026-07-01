@@ -13,40 +13,45 @@
 import { supabase } from '../db/client.js'
 import { config } from '../config.js'
 import { log } from '../observability/logger.js'
-import { proposeStudentForPost } from '../services/match-proposal-deps.js'
+import {
+  proposeStudentForPost,
+  isStudentEligibleForPost,
+  notifyOfficerDigest,
+  type ProactiveProposal,
+} from '../services/match-proposal-deps.js'
 
 const MIN_FIT_SCORE = 0.02 // hybrid RRF floor; below this a match isn't worth an officer glance
-const MAX_STUDENTS_PER_RUN = 20 // cap how many proposals a single run can add to the officer's queue
+const MAX_STUDENTS_PER_RUN = 20 // how many opted-in students a single run ATTEMPTS (after shuffle)
+const MAX_OPTED_IN_SCAN = 500 // pool fetched before shuffling — bounds the query, not the attempts
 const QUIET_START_LA = 22
 const QUIET_END_LA = 8
 
+// Shape of a hybrid_search_posts_for_user row (verified against the live RPC: post_id, rrf_score,
+// matched_tags, best_facet — NOT `id`, and NO creator column, so own/joined exclusion is a DB step).
 export interface RankedPost {
-  id: string
-  created_by_student_id?: string | null
+  post_id: string
   rrf_score?: number
-  score?: number
-  category?: string | null
   matched_tags?: string[] | null
   best_facet?: string | null
 }
 
 /**
- * Pure: choose the best open post to propose for a student, or null. Excludes the student's own
- * posts and anything below the fit floor. Exported for tests.
+ * Pure: choose the highest-scoring post above the fit floor, or null. Own/joined exclusion is NOT
+ * here (the RPC row carries no creator/membership) — the caller does it via isStudentEligibleForPost.
+ * Exported for tests.
  */
 export function selectSquadProposal(
   posts: RankedPost[],
-  studentId: string,
   minScore = MIN_FIT_SCORE,
 ): { postId: string; fitScore: number; reason: string | null } | null {
   const scored = posts
-    .filter((p) => p && p.id && p.created_by_student_id !== studentId)
-    .map((p) => ({ p, s: p.rrf_score ?? p.score ?? 0 }))
+    .filter((p) => p && p.post_id)
+    .map((p) => ({ p, s: p.rrf_score ?? 0 }))
     .sort((a, b) => b.s - a.s)
   const top = scored[0]
   if (!top || top.s < minScore) return null
   const reason = top.p.matched_tags?.[0] ?? top.p.best_facet ?? null
-  return { postId: top.p.id, fitScore: top.s, reason }
+  return { postId: top.p.post_id, fitScore: top.s, reason }
 }
 
 function inQuietHoursLA(): boolean {
@@ -66,30 +71,39 @@ export async function surfaceSquadForStudents(): Promise<{ proposed: number; sca
     return { proposed: 0, scanned: 0 }
   }
 
+  // Fetch opted-in students (bounded) and SHUFFLE so a fixed leading window is never starved when
+  // there are more than MAX_STUDENTS_PER_RUN of them — each run samples a random subset.
   const { data: prefs, error } = await supabase
     .from('user_match_prefs')
     .select('student_id')
     .eq('pings_enabled', true)
-    .limit(MAX_STUDENTS_PER_RUN)
+    .limit(MAX_OPTED_IN_SCAN)
   if (error || !prefs || prefs.length === 0) return { proposed: 0, scanned: 0 }
+  const ids = (prefs as { student_id: string }[]).map((r) => r.student_id)
+  for (let i = ids.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[ids[i], ids[j]] = [ids[j], ids[i]]
+  }
+  const batch = ids.slice(0, MAX_STUDENTS_PER_RUN)
 
-  let proposed = 0
-  for (const row of prefs as { student_id: string }[]) {
-    const studentId = row.student_id
+  const collected: ProactiveProposal[] = []
+  for (const studentId of batch) {
     try {
       const { data, error: rpcErr } = await supabase.rpc('hybrid_search_posts_for_user', {
         p_student_id: studentId,
         p_match_count: 10,
       })
       if (rpcErr || !data) continue
-      const pick = selectSquadProposal(data as RankedPost[], studentId)
+      const pick = selectSquadProposal(data as RankedPost[])
       if (!pick) continue
-      const r = await proposeStudentForPost(studentId, pick.postId, pick.fitScore, pick.reason)
-      if (r === 'proposed') proposed++
+      if (!(await isStudentEligibleForPost(studentId, pick.postId))) continue // skip own / already-joined
+      const proposal = await proposeStudentForPost(studentId, pick.postId, pick.fitScore, pick.reason)
+      if (proposal) collected.push(proposal)
     } catch (e) {
       log('error', 'concierge_proactive_student_error', { studentId, err: (e as Error).message })
     }
   }
-  log('info', 'concierge_proactive_run', { proposed, scanned: prefs.length })
-  return { proposed, scanned: prefs.length }
+  if (collected.length > 0) await notifyOfficerDigest(collected) // ONE officer message per run, not N
+  log('info', 'concierge_proactive_run', { proposed: collected.length, scanned: batch.length })
+  return { proposed: collected.length, scanned: batch.length }
 }
