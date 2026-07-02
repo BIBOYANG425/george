@@ -9,6 +9,8 @@ import { z } from 'zod'
 import { supabase } from '../db/client.js'
 import { resolveStudentId, getStudentById } from '../db/students.js'
 import { triggerPingFanout } from '../services/squad-ping-deps.js'
+import { proposeMatchesForPost } from '../services/match-proposal-deps.js'
+import { config } from '../config.js'
 import { wrapTool } from './_wrap.js'
 import { normalizeSquadCategory } from '../services/squad-categories.js'
 
@@ -112,13 +114,19 @@ export async function createSquadPostHandler(input: {
       return JSON.stringify({ error: insertErr?.message ?? 'insert failed' })
     }
 
-    // 6. Fire pings non-fatally
+    // 6. Fan out to candidates, non-fatally. Two lanes, flag-selected:
+    //    - CONCIERGE_MATCH_ENABLED=true → queue matches for the officer glance (proposed_matches);
+    //      reach = number of proposals queued for review (NOT yet delivered).
+    //    - default (OFF)                → today's auto ping fan-out; reach = pings sent.
+    //    Both are awaited blocking calls; a failure never blocks post creation (post already exists),
+    //    and reach stays an aggregate count — never a recipient identity.
     let reach: number | null = null
     try {
-      const r = await triggerPingFanout(post.id)
-      reach = r.sent
+      reach = config.concierge.matchEnabled
+        ? await proposeMatchesForPost(post.id)
+        : (await triggerPingFanout(post.id)).sent
     } catch {
-      // pings delayed — post still created
+      // fan-out delayed — post still created
     }
 
     // 7. Return aggregate only — NO recipient identity fields

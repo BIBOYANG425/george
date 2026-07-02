@@ -88,7 +88,7 @@ interface DriveResult {
   telemetry?: TurnTelemetry;
 }
 
-async function driveOrchestrator(args: {
+export async function driveOrchestrator(args: {
   userId: string;
   text: string;
   sessionStore: SessionStore;

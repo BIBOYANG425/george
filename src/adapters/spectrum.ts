@@ -49,6 +49,7 @@ import { checkInjection, INJECTION_REJECTIONS } from '../security/injection-filt
 import { normalizeHandle } from '../services/phone-handle.js'
 import { tryHandleUserCommand } from '../agent/user-command-router.js'
 import { tryPingsCommand } from '../tools/pings-command.js'
+import { tryOfficerCommand } from '../tools/officer-command.js'
 import type { SessionStore } from '../agent/session-store.js'
 import type { ProfileStore } from '../memory/profile.js'
 
@@ -398,6 +399,9 @@ export function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandle
     },
 
     tryUserCommand: async (userId: string, text: string) => {
+      // Officer approve/reject first (pre-orchestrator, officer-gated, cloud-safe).
+      const officerReply = await tryOfficerCommand(userId, text)
+      if (officerReply !== null) return officerReply
       const pingsReply = await tryPingsCommand(userId, text)
       if (pingsReply !== null) return pingsReply
       return tryHandleUserCommand(userId, text)

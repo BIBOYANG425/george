@@ -28,11 +28,12 @@ import { runOrchestrator } from './agent/orchestrator.js'
 import { createSupabaseSessionStore } from './agent/session-store.js'
 import { getStats, log } from './observability/logger.js'
 import { matchStudentsToEvents } from './jobs/proactive.js'
+import { surfaceSquadForStudents } from './jobs/concierge-proactive.js'
 import { sendPendingReminders } from './jobs/reminder-sender.js'
 import { sendPendingShippingNotifications } from './jobs/shipping-notifier.js'
 import { scrapeInstagram } from './scrapers/instagram.js'
 import { scrapeUSCEvents } from './scrapers/usc-events.js'
-import { loadAllSkills, getRegistryStats } from './skills/index.js'
+import { ensureSkillsLoaded, getRegistryStats } from './skills/index.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
 import { supabase } from './db/client.js'
@@ -730,6 +731,43 @@ if (process.env.SQUAD_REREACH_EVAL_ENABLED === 'true') {
   console.log(`[rereach-eval] enabled (${interval})`)
 }
 
+// Guardrail: BOTH concierge lanes (reactive glance + proactive surfacer) queue matches whose only
+// approval surface is the officer notify. If either is on without an officer handle, proposals reach
+// nobody; without a public base URL the approve link renders as a placeholder. Warn loudly at boot.
+{
+  const anyConcierge =
+    process.env.CONCIERGE_MATCH_ENABLED === 'true' || process.env.CONCIERGE_PROACTIVE_ENABLED === 'true'
+  if (anyConcierge && !process.env.CONCIERGE_OFFICER_IMESSAGE) {
+    console.warn('[concierge] a concierge lane is enabled but CONCIERGE_OFFICER_IMESSAGE is empty — matches will be queued but the approve link reaches NOBODY. Set the officer handle.')
+  }
+  if (anyConcierge && !process.env.CONCIERGE_PUBLIC_BASE_URL) {
+    console.warn('[concierge] a concierge lane is enabled but CONCIERGE_PUBLIC_BASE_URL is empty — the approve link will render as a placeholder. Set the agent public URL.')
+  }
+}
+
+// Concierge proactive surfacer (T7 squad branch): proposes an open squad post to a passive
+// opted-in student, routed through the officer glance. Off by default; own interval + running
+// flag. When CONCIERGE_PROACTIVE_ENABLED is unset this block never registers — zero new cron,
+// zero new queries, zero proposals. (The EVENT branch is the existing matchStudentsToEvents cron.)
+if (process.env.CONCIERGE_PROACTIVE_ENABLED === 'true') {
+  const interval = process.env.CONCIERGE_PROACTIVE_INTERVAL_CRON || '0 */2 * * *'
+  let running = false
+  cron.schedule(interval, async () => {
+    if (running) { console.log('[concierge-proactive] previous tick still running, skipping'); return }
+    running = true
+    const t0 = Date.now()
+    try {
+      const r = await surfaceSquadForStudents()
+      console.log(`[concierge-proactive] tick complete in ${Date.now() - t0}ms (proposed ${r.proposed}/${r.scanned})`)
+    } catch (err) {
+      console.error('[concierge-proactive] tick failed:', err)
+    } finally {
+      running = false
+    }
+  })
+  console.log(`[concierge-proactive] enabled (${interval})`)
+}
+
 // ==========================================
 // HEARTBEAT SCHEDULER
 // ==========================================
@@ -883,8 +921,14 @@ process.on('SIGINT', () => {
 async function startServer() {
   try {
     const toolNames = new Set(Object.keys(ALL_TOOLS))
-    await loadAllSkills(toolNames)
-    log('info', 'skill_registry_loaded', getRegistryStats())
+    // Memoized: safe if a pre-boot orchestrator turn already loaded the registry.
+    await ensureSkillsLoaded(toolNames)
+    const stats = getRegistryStats()
+    // ensureSkillsLoaded is fail-soft (the orchestrator path must not die on a bad
+    // skill); the BOOT contract stays fail-fast — zero loaded skills means the walk
+    // or a parse failed, and we refuse to start with a blind catalog.
+    if (stats.totalCount === 0) throw new Error('skill registry loaded 0 skills')
+    log('info', 'skill_registry_loaded', stats)
   } catch (err) {
     log('error', 'skill_registry_load_failed', { error: (err as Error).message })
     throw err

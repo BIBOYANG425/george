@@ -13,8 +13,8 @@
 // to become a per-invocation factory that takes a profile argument.
 
 import { query, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
-import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS, ORCHESTRATOR_MODEL, UNIFIED_DOMAIN_PROMPT, KNOW_THINGS_PROMPT, TRUNK_TOOLS, TRUNK_MODEL } from './agents.config.js';
-import { getFullCatalog } from '../skills/index.js';
+import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS, ORCHESTRATOR_MODEL, UNIFIED_DOMAIN_PROMPT, KNOW_THINGS_PROMPT, TRUNK_TOOLS, TRUNK_MODEL, DOMAIN_CORE_PROMPT } from './agents.config.js';
+import { getFullCatalog, ensureSkillsLoaded } from '../skills/index.js';
 import { ALL_TOOLS } from '../tools/index.js';
 import { isRecallToolEnabled } from '../tools/recall-memory.js';
 import { isUpdateMemoryToolEnabled } from '../tools/update-memory.js';
@@ -148,6 +148,8 @@ const ONBOARDING_NUDGE = [
   'unlocks more: you actually remember them, tailor recs to their major/year/vibe,',
   'and match them with the right people. Point them at the setup link you sent in',
   'your welcome. One line, in voice — never a sales pitch, never a help-desk checklist.',
+  'Never promise future notifications or that you will "keep an eye out" for them',
+  '(no such capability is live). Phrase it fresh each time; never a stock sentence.',
 ].join('\n');
 
 // Inject the resolved student UUID so sub-agents can pass it to tools.
@@ -290,7 +292,17 @@ export function buildSingleAgentPrompt(
   recallBlock: string = '',
   handle?: string | null,
 ): string {
-  const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
+  // SLIM variant (SINGLE_AGENT_PROMPT=slim, read at call time so eval arms can flip it):
+  // voice + red-lines stay always-loaded, domain PROCEDURE moves to on-demand skills.
+  // Measured rationale: the merged prompt diluted master.md's mechanical voice rules
+  // (em-dash/length/markdown gate failures, personaSafety dip — 2026-07-01 A/B).
+  // Slim also drops ORCHESTRATOR_PROMPT: its "delegate to ONE of three sub-agents"
+  // dispatch talk contradicts a mode that has no sub-agents (same reasoning as
+  // TRUNK_ROUTING_PROMPT, must-fix 2).
+  const slim = process.env.SINGLE_AGENT_PROMPT === 'slim';
+  const parts = slim
+    ? [MASTER_PROMPT, DOMAIN_CORE_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE]
+    : [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
   parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
   const moodBlock = renderMoodBlock();
   if (moodBlock) parts.push(moodBlock);
@@ -465,6 +477,9 @@ function webSearchGuidance(): string {
     'or bulleted list, a "Sources:" section, a bibliography, or bare URLs. One link max,',
     'only if it genuinely helps. Never state a fact, name, address, or price that is not',
     'in the results.',
+    'NEVER treat a search-results PAGE (a yelp/google/timeout search query URL) as a',
+    'source for a specific claim. If the fact was not in the result text itself, you do',
+    'not have the fact — say so instead of dressing a guess in a link.',
   ].join('\n');
 }
 
@@ -672,8 +687,13 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.recallBlock,
         inputs.handle,
       ),
-      model: inputs.resolvedModel,
-      ...providerOptionsForModel(inputs.resolvedModel),
+      // SMART tier (via trunkModel = mainModelOverride ?? TRUNK_MODEL): the single
+      // agent owns know-things directly, so it runs on the same tier the trunk
+      // did, for the same reason (high-stakes domain reasoning). Under prod's
+      // split tiers (FAST=kimi-k2, SMART=sonnet) using resolvedModel here would
+      // silently downgrade all course/housing/immigration advice to the fast tier.
+      model: inputs.trunkModel,
+      ...providerOptionsForModel(inputs.trunkModel),
       // Disable extended thinking on the agent loop — it adds ~7s PER tool-call
       // turn (DeepSeek-v4 defaults it on). Tools provide the grounding; the
       // thinking was the dominant cost on tool queries (~35s → much less).
@@ -735,6 +755,12 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     yield { type: 'text', text: `[mock] received: ${args.text}` };
     return;
   }
+
+  // Skill registry, memoized: eval/test paths drive runOrchestrator without the
+  // src/index.ts boot, which used to leave the catalog EMPTY on the single-agent
+  // and trunk paths (load_skill answered "Unknown skill" for everything). No-op
+  // after the first call; fail-soft inside ensureSkillsLoaded.
+  await ensureSkillsLoaded(new Set(Object.keys(ALL_TOOLS)));
 
   // ── Shipping-notification opt-out / opt-in (compliance) ──
   // A student can always stop or resume shipping pushes by replying e.g. "TD" /

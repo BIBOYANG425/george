@@ -30,5 +30,12 @@ export function stripMarkdown(text: string): string {
   // Inline code: drop the backticks, keep the content.
   out = out.replace(/`([^`\n]+)`/g, '$1')
 
+  // Markdown links: keep the label, drop the URL — "[libcal](https://…)" -> "libcal".
+  // The 100-persona sim measured link dumps in 52% of slim-arm replies; the label
+  // alone stays actionable in chat ("check libcal") without the raw-URL violation.
+  // Images likewise keep their alt text.
+  out = out.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+  out = out.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+
   return out
 }

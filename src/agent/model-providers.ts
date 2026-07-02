@@ -21,6 +21,25 @@ interface Provider {
 
 const PROVIDERS: Provider[] = [
   {
+    // Kimi (Moonshot) via its Anthropic-compatible endpoint — required for
+    // GEORGE_MODEL_FAST=kimi-k2-* (prod Railway config, 2026-07-02). Without
+    // this entry a kimi id would hit the global Anthropic gateway and 404.
+    // NOTE: KIMI_BASE_URL is the OpenAI-format endpoint (/v1) used by
+    // callLightweightLLM; the Agent SDK needs the /anthropic endpoint, hence
+    // the separate KIMI_ANTHROPIC_BASE_URL override. The account's key is
+    // region-bound to the international .ai domain.
+    match: (m) => /^(kimi|moonshot)/i.test(m),
+    env: () => {
+      const key = process.env.KIMI_API_KEY
+      if (!key) return null
+      return {
+        ANTHROPIC_BASE_URL: process.env.KIMI_ANTHROPIC_BASE_URL || 'https://api.moonshot.ai/anthropic',
+        ANTHROPIC_AUTH_TOKEN: key,
+        ANTHROPIC_API_KEY: key,
+      }
+    },
+  },
+  {
     // Doubao via Ark's Anthropic-compatible endpoint.
     match: (m) => /^(doubao|ark-)/i.test(m),
     env: () => {

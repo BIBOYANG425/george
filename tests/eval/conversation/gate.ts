@@ -37,6 +37,12 @@ const DEFLECTION_PHRASES = [
   '就是个学长',
   '我这人挺虚的',
   '见不到我',
+  // 2026-07-01 voice pass: the canonical no-meet deflection is now 社恐-grounded
+  // (master.md); keep the old phrases too so pre-pass transcripts still gate-pass.
+  '我社恐',
+  '就不见面了',
+  '不咋出门',
+  '线上随时找我',
   '戳到知识盲区',
   "i'm just a senior",
   'im just a senior',

@@ -94,6 +94,25 @@ export const config = {
   // blast radius if the iPhone's Shortcuts get exfiltrated.
   adminTokenPhone: process.env.ADMIN_TOKEN_PHONE || '',
   port: parseInt(process.env.PORT || '3001'),
+  // Concierge match glance (squad lane). DEFAULT-OFF: when false, create_squad_post keeps today's
+  // auto ping fan-out (triggerPingFanout). When true, matches are queued to proposed_matches for an
+  // officer glance (admin link OR iMessage /ok) before George fires the intro. See docs / plan.
+  concierge: {
+    matchEnabled: process.env.CONCIERGE_MATCH_ENABLED === 'true',
+    // Officer iMessage handle (E.164 phone or email) allowed to approve/reject via /ok /no. Compared
+    // AFTER normalizeHandle. REQUIRED when matchEnabled: the officer notify is the ONLY surface that
+    // delivers the approve link (there is no dashboard queue), so if this is empty, proposals are
+    // queued but reach nobody. index.ts warns at boot when matchEnabled && this is empty.
+    officerImessage: process.env.CONCIERGE_OFFICER_IMESSAGE || '',
+    // Public base URL of the AGENT service (the one with a Spectrum connection) for the approve link.
+    // NOT the dashboard — george.uscbia.com has no Spectrum. e.g. https://george-api.uscbia.com
+    publicBaseUrl: process.env.CONCIERGE_PUBLIC_BASE_URL || '',
+    // T7 proactive surfacer (squad branch): George proactively proposes an open squad post to a
+    // passive opted-in student, routed through the SAME officer glance. Independent of matchEnabled
+    // so the reactive glance can ship first. DEFAULT-OFF. (The event branch is the existing
+    // matchStudentsToEvents cron, gated by PROACTIVE_ENABLED — it writes no proposed_matches.)
+    proactiveEnabled: process.env.CONCIERGE_PROACTIVE_ENABLED === 'true',
+  },
   // Code-level anti-fabrication gate on the fast path. When on (default), a
   // fast-path draft that asserts a specific unverified fact (a shop, a gathering,
   // an opening hour, a course number, a price) is dropped and the turn falls

@@ -9,7 +9,7 @@ export async function searchEvents(filters: {
 }) {
   let q = supabase
     .from('events')
-    .select('id, title, date, location, category, source')
+    .select('id, title, date, location, category, source, source_club')
     .eq('status', 'active')
     .order('date', { ascending: true })
     .limit(filters.limit || 10)

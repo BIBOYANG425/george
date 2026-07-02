@@ -34,6 +34,9 @@ import { logAdminAction, adminActor, flagMessage, clearProfileBlock, deleteObser
 import { ProfileStore, createSupabaseProfileDB } from '../memory/profile.js';
 import { getKVCache } from '../memory/kv-cache.js';
 import { createSupabaseObservationDB } from '../memory/observations.js';
+// Config-free pure engine (safe to import statically). buildProposalDeps (which pulls config, and
+// thus ANTHROPIC_API_KEY that the dashboard service lacks) is imported LAZILY in the POST handler.
+import { sendApprovedMatch, rejectMatch } from '../services/match-proposal-engine.js';
 
 export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: string): express.Router {
   const router = express.Router();
@@ -193,6 +196,88 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
     });
     return { ok: true, controls: next, usage: await getUsageSnapshot(id) };
   }));
+
+  // ── Concierge match glance: officer approve/reject ──────────────────────────
+  // On the OUTER router (NOT `api`, whose api.use(auth) demands the ADMIN token) and registered
+  // BEFORE the /admin/api mount, so an officer's approve LINK carrying only the per-row nonce (?k=)
+  // is authorized. Runs in the AGENT service (the one with Spectrum) — links point there; the
+  // dashboard also mounts this router but has no Spectrum, so links are never pointed at it.
+  const matchHtml = (body: string): string =>
+    '<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">' +
+    '<title>George</title><body style="font-family:-apple-system,system-ui;max-width:32rem;margin:3rem auto;' +
+    'padding:0 1.2rem;color:#71031F"><h2>George 找搭子</h2>' + body + '</body>';
+
+  const loadMatchAndAuth = async (
+    req: express.Request,
+  ): Promise<{ ok: true; id: string; post_id: string; status: string } | { ok: false; status: number; msg: string }> => {
+    const id = String(req.params.id);
+    const { data, error } = await sb
+      .from('proposed_matches')
+      .select('id, post_id, approve_token, status')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) return { ok: false, status: 500, msg: 'lookup failed' };
+    if (!data) return { ok: false, status: 404, msg: '匹配不存在' };
+    const row = data as { id: string; post_id: string; approve_token: string; status: string };
+    const bearer = req.headers.authorization?.replace('Bearer ', '');
+    const hdr = typeof req.headers['x-admin-token'] === 'string' ? (req.headers['x-admin-token'] as string) : undefined;
+    const qTok = typeof req.query.token === 'string' ? req.query.token : undefined;
+    const adminProvided = bearer || hdr || qTok || '';
+    const nonce = typeof req.query.k === 'string' ? req.query.k : '';
+    // Admin token (bearer / x-admin-token / ?token=) OR the per-row approve_token nonce (?k=).
+    const authed = (!!adminToken && safeEqual(adminProvided, adminToken)) || safeEqual(nonce, row.approve_token);
+    if (!authed) return { ok: false, status: 401, msg: 'unauthorized' };
+    return { ok: true, id: row.id, post_id: row.post_id, status: row.status };
+  };
+
+  for (const action of ['approve', 'reject'] as const) {
+    // GET → confirmation page only. A link-preview / scanner GET must NEVER act; only the POST does.
+    router.get('/admin/api/match/:id/' + action, async (req, res) => {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      const a = await loadMatchAndAuth(req);
+      if (!a.ok) { res.status(a.status).send(matchHtml('<p>' + a.msg + '</p>')); return; }
+      if (a.status !== 'pending') { res.send(matchHtml('<p>这个匹配已经处理过了 (' + a.status + ')。</p>')); return; }
+      // Carry whichever credential authed the GET onto the POST (officer link uses ?k=, an admin
+      // may use ?token=), so the confirm button doesn't 401.
+      const cred =
+        typeof req.query.k === 'string' ? 'k=' + encodeURIComponent(req.query.k)
+        : typeof req.query.token === 'string' ? 'token=' + encodeURIComponent(req.query.token)
+        : '';
+      const kq = cred ? '?' + cred : '';
+      const label = action === 'approve' ? '确认发送' : '确认拒绝';
+      res.send(matchHtml(
+        '<p>' + (action === 'approve' ? '发送这个搭子匹配给对方?' : '拒绝这个匹配?') + '</p>' +
+        '<form method="POST" action="/admin/api/match/' + a.id + '/' + action + kq + '">' +
+        '<button style="font-size:1.1rem;padding:.6rem 1.4rem;background:#71031F;color:#fff;border:0;border-radius:.5rem">' +
+        label + '</button></form>'));
+    });
+    // POST → perform the action. Agent service only (has Spectrum). deps imported lazily (config).
+    router.post('/admin/api/match/:id/' + action, async (req, res) => {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      const a = await loadMatchAndAuth(req);
+      if (!a.ok) { res.status(a.status).send(matchHtml('<p>' + a.msg + '</p>')); return; }
+      const officer = adminActor(req);
+      try {
+        const { buildProposalDeps } = await import('../services/match-proposal-deps.js');
+        const deps = await buildProposalDeps(a.post_id);
+        if (action === 'approve') {
+          const r = await sendApprovedMatch(a.id, officer, deps);
+          await logAdminAction(sb, { actor: officer, action: 'match_approve', entityId: a.id, payload: { outcome: r.outcome } });
+          const msg = r.outcome === 'sent' ? '已发送 ✅ 搭子已经收到啦'
+            : r.outcome === 'noop' ? '这个匹配已经处理过了'
+            : '没有发送 — 对方可能静音了 / 局满了 / 到时间了';
+          res.send(matchHtml('<p>' + msg + '</p>'));
+        } else {
+          const r = await rejectMatch(a.id, officer, deps);
+          await logAdminAction(sb, { actor: officer, action: 'match_reject', entityId: a.id, payload: { outcome: r.outcome } });
+          res.send(matchHtml('<p>' + (r.outcome === 'rejected' ? '已拒绝 🫡' : '这个匹配已经处理过了') + '</p>'));
+        }
+      } catch (err) {
+        console.error('[admin] match action error:', (err as Error).message);
+        res.status(500).send(matchHtml('<p>出错了: ' + (err as Error).message + '</p>'));
+      }
+    });
+  }
 
   router.use('/admin/api', api);
   return router;

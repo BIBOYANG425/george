@@ -28,6 +28,7 @@
 const MAX_PARTS = 4
 
 import { stripMarkdown } from './strip-markdown.js'
+import { sanitizeDashes, stripSourcesFooter } from '../agent/voice-guard.js'
 
 export function splitIntoMessages(response: string): string[] {
   if (!response) return []
@@ -76,7 +77,12 @@ export function parseControlTokens(response: string): ControlTokens {
   const noReply = NO_REPLY_TOKEN.test(response)
   // Reset lastIndex: the regex is /g, so .test() above advanced it.
   NO_REPLY_TOKEN.lastIndex = 0
-  const text = response.replace(NO_REPLY_TOKEN, '').trim()
+  // Voice enforcement in CODE, not just prompt (the model emits these tells
+  // despite explicit bans — measured on the 2026-07-02 100-persona sim:
+  // em-dashes ~35% of conversations, Sources footers 56% / markdown links 52%
+  // of slim-arm replies). Order: drop citation footers, then strip markdown
+  // (incl. [label](url) -> label), then rewrite dashes.
+  const text = sanitizeDashes(stripMarkdown(stripSourcesFooter(response.replace(NO_REPLY_TOKEN, '')))).trim()
   return { noReply, text }
 }
 
