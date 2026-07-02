@@ -111,3 +111,18 @@ export async function loadAllSkills(registeredTools: Set<string>): Promise<void>
   const skills = await walkSkillsDirectory(skillsRoot)
   buildRegistry(skills, registeredTools)
 }
+
+// Memoized variant, safe to call from multiple entry points (server boot AND the
+// orchestrator's first turn). Needed because eval/test paths drive runOrchestrator
+// directly without the src/index.ts boot, which used to leave the registry EMPTY:
+// the single-agent/trunk prompts appended a skill-less catalog and load_skill
+// answered "Unknown skill" for everything. Fail-soft: a load error logs and leaves
+// the registry as-is rather than killing the turn (boot keeps its fail-fast via
+// loadAllSkills directly if desired).
+let ensurePromise: Promise<void> | null = null
+export function ensureSkillsLoaded(registeredTools: Set<string>): Promise<void> {
+  ensurePromise ??= loadAllSkills(registeredTools).catch((err) => {
+    console.error('skill registry load failed', (err as Error).message)
+  })
+  return ensurePromise
+}

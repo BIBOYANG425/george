@@ -33,7 +33,7 @@ import { sendPendingReminders } from './jobs/reminder-sender.js'
 import { sendPendingShippingNotifications } from './jobs/shipping-notifier.js'
 import { scrapeInstagram } from './scrapers/instagram.js'
 import { scrapeUSCEvents } from './scrapers/usc-events.js'
-import { loadAllSkills, getRegistryStats } from './skills/index.js'
+import { ensureSkillsLoaded, getRegistryStats } from './skills/index.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
 import { supabase } from './db/client.js'
@@ -921,8 +921,14 @@ process.on('SIGINT', () => {
 async function startServer() {
   try {
     const toolNames = new Set(Object.keys(ALL_TOOLS))
-    await loadAllSkills(toolNames)
-    log('info', 'skill_registry_loaded', getRegistryStats())
+    // Memoized: safe if a pre-boot orchestrator turn already loaded the registry.
+    await ensureSkillsLoaded(toolNames)
+    const stats = getRegistryStats()
+    // ensureSkillsLoaded is fail-soft (the orchestrator path must not die on a bad
+    // skill); the BOOT contract stays fail-fast — zero loaded skills means the walk
+    // or a parse failed, and we refuse to start with a blind catalog.
+    if (stats.totalCount === 0) throw new Error('skill registry loaded 0 skills')
+    log('info', 'skill_registry_loaded', stats)
   } catch (err) {
     log('error', 'skill_registry_load_failed', { error: (err as Error).message })
     throw err

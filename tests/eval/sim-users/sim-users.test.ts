@@ -21,10 +21,10 @@
 // Header last reviewed: 2026-07-01
 
 import { describe, expect, it } from 'vitest';
-import { mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { runSimConversation, type SimTranscript } from './arena.js';
+import { runArmBatch, runSimConversation, type SimTranscript } from './arena.js';
 import { judgeTranscripts, type SimJudgment } from './judge-sim.js';
 import type { Persona } from './simulator.js';
 import type { FlagConfig } from '../conversation/types.js';
@@ -35,12 +35,39 @@ const OUT_DIR = path.join(__dirname, '.out');
 const REAL_ENABLED = process.env.GEORGE_EVAL_SIMUSERS_ENABLED === 'true';
 const JUDGE_ENABLED = process.env.GEORGE_EVAL_JUDGE_ENABLED === 'true';
 const PERSONA_N = Math.max(1, parseInt(process.env.GEORGE_EVAL_SIM_PERSONA_N || '6', 10));
+// Panel selection: 'curated' = the 10 hand-built diagnostic archetypes;
+// 'generated' = the N-ordinary-students statistical panel (generate-personas.ts).
+const PANEL = process.env.GEORGE_EVAL_SIM_PANEL === 'generated' ? 'generated' : 'curated';
+// Same-arm conversation concurrency (env is constant within an arm; arms run
+// sequentially). Judge calls use the same bound.
+const CONCURRENCY = Math.max(1, parseInt(process.env.GEORGE_EVAL_SIM_CONCURRENCY || '4', 10));
 
 function loadPersonas(): Persona[] {
+  if (PANEL === 'generated') {
+    const f = path.join(__dirname, 'fixtures/generated-personas.json');
+    if (!existsSync(f)) {
+      throw new Error('generated panel missing — run: npx tsx tests/eval/sim-users/generate-personas.ts');
+    }
+    return (JSON.parse(readFileSync(f, 'utf-8')) as { personas: Persona[] }).personas;
+  }
   const raw = JSON.parse(readFileSync(path.join(__dirname, 'fixtures/personas.json'), 'utf-8')) as {
     personas: Persona[];
   };
   return raw.personas;
+}
+
+// Bounded-concurrency map that preserves input order.
+async function pmap<T, R>(items: T[], limit: number, fn: (t: T, i: number) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 // The two arms of the architecture A/B. Fast path pinned OFF on BOTH arms so
@@ -81,26 +108,30 @@ describe.skipIf(!REAL_ENABLED)('sim-users: SINGLE_AGENT architecture A/B with si
     'runs the persona panel over both arms, judges transcripts, writes a report',
     async () => {
       const panel = loadPersonas().slice(0, PERSONA_N);
-      const results: PersonaResult[] = [];
 
-      for (const persona of panel) {
-        // Sequential by necessity (env mutation); OFF then ON per persona.
-        const off = await runSimConversation(persona, ARM_OFF);
-        const on = await runSimConversation(persona, ARM_ON);
-        const result: PersonaResult = { personaId: persona.id, off, on };
+      // Arms run sequentially (their env differs); conversations WITHIN an arm run
+      // with bounded concurrency (env identical), which is what makes the
+      // 100-persona statistical panel tractable.
+      const offs = await runArmBatch(panel, ARM_OFF, { concurrency: CONCURRENCY });
+      const ons = await runArmBatch(panel, ARM_ON, { concurrency: CONCURRENCY });
+      const results: PersonaResult[] = panel.map((p, i) => ({
+        personaId: p.id,
+        off: offs[i],
+        on: ons[i],
+      }));
 
-        if (JUDGE_ENABLED && off.turns.length > 0 && on.turns.length > 0) {
+      if (JUDGE_ENABLED) {
+        await pmap(results, Math.min(CONCURRENCY, 3), async (result, idx) => {
+          if (result.off.turns.length === 0 || result.on.turns.length === 0) return;
           // Deterministic counterbalance: even panel index shows OFF as A.
-          const idx = panel.indexOf(persona);
           const onWasA = idx % 2 === 1;
-          const [a, b] = onWasA ? [on, off] : [off, on];
+          const [a, b] = onWasA ? [result.on, result.off] : [result.off, result.on];
           try {
-            result.judgment = { ...(await judgeTranscripts(persona, a, b)), onWasA };
+            result.judgment = { ...(await judgeTranscripts(panel[idx], a, b)), onWasA };
           } catch {
             // judge failure recorded as missing judgment, never fails the suite
           }
-        }
-        results.push(result);
+        });
       }
 
       // ── Aggregate ──
@@ -109,6 +140,8 @@ describe.skipIf(!REAL_ENABLED)('sim-users: SINGLE_AGENT architecture A/B with si
       let ties = 0;
       let goalOnDone = 0;
       let goalOffDone = 0;
+      let fabOn = 0;
+      let fabOff = 0;
       let judged = 0;
       for (const r of results) {
         const j = r.judgment;
@@ -120,6 +153,8 @@ describe.skipIf(!REAL_ENABLED)('sim-users: SINGLE_AGENT architecture A/B with si
         else offWins++;
         if ((j.onWasA ? j.goalCompletedA : j.goalCompletedB) === true) goalOnDone++;
         if ((j.onWasA ? j.goalCompletedB : j.goalCompletedA) === true) goalOffDone++;
+        if ((j.onWasA ? j.fabricationA : j.fabricationB) === true) fabOn++;
+        if ((j.onWasA ? j.fabricationB : j.fabricationA) === true) fabOff++;
       }
       const mean = (xs: (number | undefined)[]): number | undefined => {
         const ys = xs.filter((x): x is number => typeof x === 'number');
@@ -148,10 +183,17 @@ describe.skipIf(!REAL_ENABLED)('sim-users: SINGLE_AGENT architecture A/B with si
             : 'unjudged',
           rationale: r.judgment?.rationale,
         })),
+        panel: PANEL,
         tally: { onWins, offWins, ties, judged, signTestP: signTestP(onWins, offWins) },
         handledRate: {
           off: judged ? goalOffDone / judged : null,
           on: judged ? goalOnDone / judged : null,
+        },
+        // Fabrication incidents per judged conversation (george's #1 law). The
+        // 2026-07-01 first run caught invented clubs/prices/actions on BOTH arms.
+        fabricationRate: {
+          off: judged ? fabOff / judged : null,
+          on: judged ? fabOn / judged : null,
         },
         gateLite: {
           offTotal: results.reduce((n, r) => n + r.off.gateLiteFailureCount, 0),
@@ -173,9 +215,10 @@ describe.skipIf(!REAL_ENABLED)('sim-users: SINGLE_AGENT architecture A/B with si
       const md = [
         `# sim-users report — SINGLE_AGENT A/B (${report.generatedAt})`,
         '',
-        `personas run: ${results.length}, judged: ${judged}`,
+        `panel: ${PANEL}, personas run: ${results.length}, judged: ${judged}`,
         `pairwise (transcript-level): ON wins ${onWins}, OFF wins ${offWins}, ties ${ties} (sign-test p=${report.tally.signTestP.toFixed(3)})`,
         `handled rate (goal completion): OFF ${report.handledRate.off ?? 'n/a'} -> ON ${report.handledRate.on ?? 'n/a'}`,
+        `fabrication rate: OFF ${report.fabricationRate.off ?? 'n/a'} -> ON ${report.fabricationRate.on ?? 'n/a'}`,
         `gate-lite failures: OFF ${report.gateLite.offTotal} -> ON ${report.gateLite.onTotal}`,
         `mean george latency: OFF ${report.latency.offMeanMs ?? '?'}ms -> ON ${report.latency.onMeanMs ?? '?'}ms`,
         '',

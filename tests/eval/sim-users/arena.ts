@@ -74,19 +74,23 @@ function buildProfileStore(userId: string, partial?: Record<string, string>): Pr
 export async function runSimConversation(
   persona: Persona,
   flagConfig: FlagConfig,
-  opts: { mockMode?: boolean } = {},
+  opts: { mockMode?: boolean; envPreset?: boolean } = {},
 ): Promise<SimTranscript> {
   const userId = `sim-${persona.id}-${flagConfig.name}`;
+  // envPreset: the caller (runArmBatch) already applied this arm's env for a whole
+  // batch of CONCURRENT conversations — per-conversation snapshot/restore would
+  // race (one conversation's finally can clobber another's still-active arm).
+  const manageEnv = !opts.envPreset;
   const touched = Object.keys(flagConfig.flags);
   const snapshot = new Map<string, string | undefined>();
-  for (const k of touched) snapshot.set(k, process.env[k]);
+  if (manageEnv) for (const k of touched) snapshot.set(k, process.env[k]);
 
   const turns: SimTurn[] = [];
   let stopped: SimTranscript['stopped'] = 'max_turns';
   let error: string | undefined;
 
   try {
-    for (const [k, v] of Object.entries(flagConfig.flags)) process.env[k] = v;
+    if (manageEnv) for (const [k, v] of Object.entries(flagConfig.flags)) process.env[k] = v;
 
     const sessionStore = createInMemorySessionStore();
     const profileStore = buildProfileStore(userId, persona.profile);
@@ -138,9 +142,11 @@ export async function runSimConversation(
     stopped = 'error';
     error = (err as Error).message;
   } finally {
-    for (const [k, v] of snapshot.entries()) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
+    if (manageEnv) {
+      for (const [k, v] of snapshot.entries()) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
     }
   }
 
@@ -154,4 +160,44 @@ export async function runSimConversation(
     meanGeorgeMs: timed.length ? Math.round(timed.reduce((a, b) => a + b, 0) / timed.length) : undefined,
     gateLiteFailureCount: turns.reduce((n, t) => n + t.gateLiteFailures.length, 0),
   };
+}
+
+/**
+ * Run ONE arm over a whole persona panel with bounded concurrency (the scale
+ * path for the 100-normal statistical panel). The arm's env is applied ONCE
+ * around the batch — conversations inside share identical env values, so
+ * concurrency is safe; cross-ARM concurrency is not (env differs), which is why
+ * the caller runs arms sequentially. Results return in panel order.
+ */
+export async function runArmBatch(
+  personas: Persona[],
+  flagConfig: FlagConfig,
+  opts: { concurrency?: number; mockMode?: boolean } = {},
+): Promise<SimTranscript[]> {
+  const concurrency = Math.max(1, opts.concurrency ?? 4);
+  const touched = Object.keys(flagConfig.flags);
+  const snapshot = new Map<string, string | undefined>();
+  for (const k of touched) snapshot.set(k, process.env[k]);
+
+  const results: SimTranscript[] = new Array(personas.length);
+  try {
+    for (const [k, v] of Object.entries(flagConfig.flags)) process.env[k] = v;
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < personas.length) {
+        const i = next++;
+        results[i] = await runSimConversation(personas[i], flagConfig, {
+          mockMode: opts.mockMode,
+          envPreset: true,
+        });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, personas.length) }, worker));
+  } finally {
+    for (const [k, v] of snapshot.entries()) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+  return results;
 }

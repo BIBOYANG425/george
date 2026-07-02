@@ -32,6 +32,10 @@ const WHATS_HAPPENING_PROMPT = readPrompt('whats-happening');
 // for UNIFIED_DOMAIN_PROMPT, just narrowed to one domain) so the trunk answers USC
 // knowledge directly. Still consumed by UNIFIED_DOMAIN_PROMPT below for the OFF path.
 export const KNOW_THINGS_PROMPT = readPrompt('know-things');
+// SLIM single-agent core (SINGLE_AGENT_PROMPT=slim): domain map + hard red-lines
+// only; all domain procedure lives in src/skills/** loaded on demand. See the
+// file header for the measured rationale (prompt dilution broke voice compliance).
+export const DOMAIN_CORE_PROMPT = readPrompt('domain-core');
 
 // Single-agent mode: all three specializations merged into one prompt so ONE
 // agent (no orchestrator→sub-agent dispatch) can handle every domain. The agent

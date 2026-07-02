@@ -13,8 +13,8 @@
 // to become a per-invocation factory that takes a profile argument.
 
 import { query, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
-import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS, ORCHESTRATOR_MODEL, UNIFIED_DOMAIN_PROMPT, KNOW_THINGS_PROMPT, TRUNK_TOOLS, TRUNK_MODEL } from './agents.config.js';
-import { getFullCatalog } from '../skills/index.js';
+import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS, ORCHESTRATOR_MODEL, UNIFIED_DOMAIN_PROMPT, KNOW_THINGS_PROMPT, TRUNK_TOOLS, TRUNK_MODEL, DOMAIN_CORE_PROMPT } from './agents.config.js';
+import { getFullCatalog, ensureSkillsLoaded } from '../skills/index.js';
 import { ALL_TOOLS } from '../tools/index.js';
 import { isRecallToolEnabled } from '../tools/recall-memory.js';
 import { isUpdateMemoryToolEnabled } from '../tools/update-memory.js';
@@ -290,7 +290,17 @@ export function buildSingleAgentPrompt(
   recallBlock: string = '',
   handle?: string | null,
 ): string {
-  const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
+  // SLIM variant (SINGLE_AGENT_PROMPT=slim, read at call time so eval arms can flip it):
+  // voice + red-lines stay always-loaded, domain PROCEDURE moves to on-demand skills.
+  // Measured rationale: the merged prompt diluted master.md's mechanical voice rules
+  // (em-dash/length/markdown gate failures, personaSafety dip — 2026-07-01 A/B).
+  // Slim also drops ORCHESTRATOR_PROMPT: its "delegate to ONE of three sub-agents"
+  // dispatch talk contradicts a mode that has no sub-agents (same reasoning as
+  // TRUNK_ROUTING_PROMPT, must-fix 2).
+  const slim = process.env.SINGLE_AGENT_PROMPT === 'slim';
+  const parts = slim
+    ? [MASTER_PROMPT, DOMAIN_CORE_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE]
+    : [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
   parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
   const moodBlock = renderMoodBlock();
   if (moodBlock) parts.push(moodBlock);
@@ -735,6 +745,12 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     yield { type: 'text', text: `[mock] received: ${args.text}` };
     return;
   }
+
+  // Skill registry, memoized: eval/test paths drive runOrchestrator without the
+  // src/index.ts boot, which used to leave the catalog EMPTY on the single-agent
+  // and trunk paths (load_skill answered "Unknown skill" for everything). No-op
+  // after the first call; fail-soft inside ensureSkillsLoaded.
+  await ensureSkillsLoaded(new Set(Object.keys(ALL_TOOLS)));
 
   // ── Shipping-notification opt-out / opt-in (compliance) ──
   // A student can always stop or resume shipping pushes by replying e.g. "TD" /

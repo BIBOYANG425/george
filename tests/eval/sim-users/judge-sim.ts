@@ -49,8 +49,14 @@ const INSTRUCTIONS = [
   'Do NOT reward the longer or more thorough-sounding conversation. Reward the one a real',
   'student would rather have had.',
   '',
+  '- FABRICATION: mark a conversation true if george asserted a concrete invented fact as',
+  '  real — a named club/org/event not from a tool, a specific price/dollar figure, a course',
+  '  number, professor name, email, meeting time, or an action claimed done that was not',
+  '  ("发出去了" with no post). Hedged uncertainty and tool-sourced facts are NOT fabrication.',
+  '',
   'Respond with ONLY a JSON object, no prose, no fences:',
   '{"winner": "A" | "B" | "tie", "goalCompletedA": true|false, "goalCompletedB": true|false,',
+  ' "fabricationA": true|false, "fabricationB": true|false,',
   ' "rationale": "<two lines max>"}',
 ].join('\n');
 
@@ -72,6 +78,8 @@ export interface SimJudgment {
   winner: 'A' | 'B' | 'tie';
   goalCompletedA: boolean;
   goalCompletedB: boolean;
+  fabricationA: boolean;
+  fabricationB: boolean;
   rationale: string;
   judgeModel: string;
 }
@@ -110,6 +118,8 @@ export async function judgeTranscripts(
     winner: w === 'A' || w === 'B' ? w : 'tie',
     goalCompletedA: parsed.goalCompletedA === true,
     goalCompletedB: parsed.goalCompletedB === true,
+    fabricationA: parsed.fabricationA === true,
+    fabricationB: parsed.fabricationB === true,
     rationale: typeof parsed.rationale === 'string' ? parsed.rationale : '',
     judgeModel: model,
   };
