@@ -24,12 +24,31 @@ function nowHourLA(): number {
   return parseInt(fmt.format(new Date()), 10)
 }
 
-interface PostData {
+export interface PostData {
   category: string | null
   content: string | null
   location: string | null
   max_people: number | null
   current_people: number | null
+}
+
+// Ping copy, extracted pure + exported so the voice lint (tests/eval/voice-backtranslate.test.ts)
+// checks the REAL outgoing strings. 想去 carries the opt-out on its own; an explicit
+// "不想去忽略我就行" tail is service-speak (founder ruling 2026-07-01).
+export function composePingBubbles(post: PostData | null, candidate: MatchCandidate): string[] {
+  const cat = post?.category ?? '活动'
+  // Speech, never UI notation: "在K-town组了个自习局 还缺2个人", NOT "自习局K-town 2缺1"
+  // (founder ruling 2026-07-01: notation compression reads as a screen, not a person).
+  const locPhrase = post?.location ? `在${post.location}` : ''
+  const current = post?.current_people ?? 1
+  const max = post?.max_people ?? 2
+  // Clamp at 1 so a full / over-filled post never prints "缺0" or "缺-1" (a full post
+  // shouldn't be pinged at all; send-time gates own that).
+  const need = Math.max(1, max - current)
+  const bubble1 = `诶 有人${locPhrase}组了个${cat}局 还缺${need}个人`
+  const reason = candidate.matched_tags?.[0] ?? candidate.best_facet ?? '类似的'
+  const bubble2 = `你之前提到${reason} 想去我帮你报名哈哈`
+  return [bubble1, bubble2]
 }
 
 // Build a PingDeps bound to a specific postId.
@@ -47,20 +66,8 @@ async function loadPostData(postId: string): Promise<PostData | null> {
 export async function buildPingDeps(postId: string): Promise<PingDeps> {
   const post = await loadPostData(postId)
 
-  const composePing = (candidate: MatchCandidate, _postId: string): string[] => {
-    const cat = post?.category ?? '活动'
-    const loc = post?.location ? ` ${post.location}` : ''
-    const current = post?.current_people ?? 1
-    const max = post?.max_people ?? 2
-    // Clamp so a full / over-filled post never prints "缺0" or "缺-1".
-    const need = Math.max(0, max - current)
-    const bubble1 = `诶 有人组了${cat}局${loc} ${current}缺${need}`
-    const reason = candidate.matched_tags?.[0] ?? candidate.best_facet ?? '类似的'
-    // 想去 carries the opt-out on its own. an explicit "不想去忽略我就行" tail is service-speak
-    // (「feel free to ignore」in chinese) — nobody talks like that. founder ruling 2026-07-01.
-    const bubble2 = `你之前提到${reason} 想去我帮你报名哈哈`
-    return [bubble1, bubble2]
-  }
+  const composePing = (candidate: MatchCandidate, _postId: string): string[] =>
+    composePingBubbles(post, candidate)
 
   return {
     matchUsers: async (pid: string): Promise<MatchCandidate[]> => {

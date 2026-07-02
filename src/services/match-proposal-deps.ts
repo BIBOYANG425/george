@@ -26,7 +26,7 @@ function nowHourLA(): number {
   return parseInt(fmt.format(new Date()), 10)
 }
 
-interface PostCopy {
+export interface PostCopy {
   category: string | null
   location: string | null
   current_people: number | null
@@ -194,13 +194,15 @@ async function isPostOpen(postId: string): Promise<boolean> {
 
 // Recipient intro bubbles — same 局 copy as squad-ping-deps.composePing, but built at SEND time from
 // the stored reason (matched_tag captured at propose) since the candidate object is long gone.
-function composeIntroFor(copy: PostCopy | null, reason: string | null): string[] {
+// Exported for the voice lint (tests/eval/voice-backtranslate.test.ts).
+export function composeIntroFor(copy: PostCopy | null, reason: string | null): string[] {
   const cat = copy?.category ?? '活动'
-  const loc = copy?.location ? ` ${copy.location}` : ''
+  // Speech, never UI notation (mirrors composePingBubbles — same founder ruling 2026-07-01).
+  const locPhrase = copy?.location ? `在${copy.location}` : ''
   const current = copy?.current_people ?? 1
   const max = copy?.max_people ?? 2
-  const need = Math.max(0, max - current)
-  const bubble1 = `诶 有人组了${cat}局${loc} ${current}缺${need}`
+  const need = Math.max(1, max - current)
+  const bubble1 = `诶 有人${locPhrase}组了个${cat}局 还缺${need}个人`
   const r = reason ?? '类似的'
   // 想去 carries the opt-out on its own (see squad-ping-deps composePing — same founder ruling).
   const bubble2 = `你之前提到${r} 想去我帮你报名哈哈`
