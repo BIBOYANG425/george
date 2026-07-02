@@ -687,8 +687,13 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.recallBlock,
         inputs.handle,
       ),
-      model: inputs.resolvedModel,
-      ...providerOptionsForModel(inputs.resolvedModel),
+      // SMART tier (via trunkModel = mainModelOverride ?? TRUNK_MODEL): the single
+      // agent owns know-things directly, so it runs on the same tier the trunk
+      // did, for the same reason (high-stakes domain reasoning). Under prod's
+      // split tiers (FAST=kimi-k2, SMART=sonnet) using resolvedModel here would
+      // silently downgrade all course/housing/immigration advice to the fast tier.
+      model: inputs.trunkModel,
+      ...providerOptionsForModel(inputs.trunkModel),
       // Disable extended thinking on the agent loop — it adds ~7s PER tool-call
       // turn (DeepSeek-v4 defaults it on). Tools provide the grounding; the
       // thinking was the dominant cost on tool queries (~35s → much less).

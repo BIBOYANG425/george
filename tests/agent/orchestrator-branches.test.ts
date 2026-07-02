@@ -169,6 +169,18 @@ describe('buildQueryOptions — SINGLE_AGENT branch', () => {
     // Sandbox invariant still held on this path.
     expect(opts.settingSources).toEqual([]);
   });
+
+  it('runs on the SMART tier (trunkModel), not the fast/orchestrator tier', () => {
+    process.env.SINGLE_AGENT = 'true';
+    delete process.env.GEORGE_TRUNK_HYBRID;
+    // The single agent owns know-things directly — same tier rationale as the
+    // trunk. Under split tiers (FAST=kimi-k2, SMART=sonnet) the fast tier here
+    // would downgrade the high-stakes domain.
+    const opts = buildQueryOptions(
+      mkInputs({ singleAgent: true, trunkHybrid: false, trunkModel: 'smart-sentinel', resolvedModel: 'fast-sentinel' }),
+    );
+    expect(opts.model).toBe('smart-sentinel');
+  });
 });
 
 describe('buildQueryOptions — GEORGE_TRUNK_HYBRID branch', () => {

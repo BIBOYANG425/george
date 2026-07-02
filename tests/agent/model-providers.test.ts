@@ -39,6 +39,26 @@ describe('providerEnvForModel — per-model provider routing', () => {
     expect(providerEnvForModel(undefined)).toBeNull()
   })
 
+  it('routes kimi/moonshot models to the Moonshot Anthropic endpoint when KIMI_API_KEY is set', () => {
+    const orig = { k: process.env.KIMI_API_KEY, u: process.env.KIMI_ANTHROPIC_BASE_URL }
+    try {
+      process.env.KIMI_API_KEY = 'sk-kimi-test'
+      delete process.env.KIMI_ANTHROPIC_BASE_URL
+      const env = providerEnvForModel('kimi-k2-turbo-preview')
+      expect(env).not.toBeNull()
+      expect(env!.ANTHROPIC_BASE_URL).toBe('https://api.moonshot.ai/anthropic')
+      expect(env!.ANTHROPIC_AUTH_TOKEN).toBe('sk-kimi-test')
+      expect(providerEnvForModel('moonshot-v1-8k')).not.toBeNull()
+      process.env.KIMI_ANTHROPIC_BASE_URL = 'https://custom.moonshot.example/anthropic'
+      expect(providerEnvForModel('kimi-k2-turbo-preview')!.ANTHROPIC_BASE_URL).toBe('https://custom.moonshot.example/anthropic')
+      delete process.env.KIMI_API_KEY
+      expect(providerEnvForModel('kimi-k2-turbo-preview')).toBeNull()
+    } finally {
+      if (orig.k === undefined) delete process.env.KIMI_API_KEY; else process.env.KIMI_API_KEY = orig.k
+      if (orig.u === undefined) delete process.env.KIMI_ANTHROPIC_BASE_URL; else process.env.KIMI_ANTHROPIC_BASE_URL = orig.u
+    }
+  })
+
   it('providerOptionsForModel: {} for default models (keeps query options byte-identical), {env} for doubao', () => {
     process.env[KEY] = 'sk-ark-test'
     expect(providerOptionsForModel('claude-sonnet-4-6')).toEqual({})
