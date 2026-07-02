@@ -86,7 +86,12 @@ describe('cross-provider MAIN-model collapse (plan §8.1 regression)', () => {
   });
 
   it('single-agent path is structurally immune (no agents map to mis-route)', () => {
-    const opts: any = buildQueryOptions(baseInputs({ singleAgent: true, resolvedModel: DOUBAO, mainModelOverride: DOUBAO }));
+    // Single-agent runs on trunkModel (SMART tier — it owns know-things directly).
+    // At the call site a main-model override collapses trunkModel too
+    // (trunkModel = mainModelOverride ?? TRUNK_MODEL), so mirror that here.
+    const opts: any = buildQueryOptions(
+      baseInputs({ singleAgent: true, resolvedModel: DOUBAO, trunkModel: DOUBAO, mainModelOverride: DOUBAO }),
+    );
     expect('agents' in opts).toBe(false);
     expect(opts.model).toBe(DOUBAO);
   });
