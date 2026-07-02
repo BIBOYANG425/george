@@ -148,6 +148,8 @@ const ONBOARDING_NUDGE = [
   'unlocks more: you actually remember them, tailor recs to their major/year/vibe,',
   'and match them with the right people. Point them at the setup link you sent in',
   'your welcome. One line, in voice — never a sales pitch, never a help-desk checklist.',
+  'Never promise future notifications or that you will "keep an eye out" for them',
+  '(no such capability is live). Phrase it fresh each time; never a stock sentence.',
 ].join('\n');
 
 // Inject the resolved student UUID so sub-agents can pass it to tools.
@@ -475,6 +477,9 @@ function webSearchGuidance(): string {
     'or bulleted list, a "Sources:" section, a bibliography, or bare URLs. One link max,',
     'only if it genuinely helps. Never state a fact, name, address, or price that is not',
     'in the results.',
+    'NEVER treat a search-results PAGE (a yelp/google/timeout search query URL) as a',
+    'source for a specific claim. If the fact was not in the result text itself, you do',
+    'not have the fact — say so instead of dressing a guess in a link.',
   ].join('\n');
 }
 
