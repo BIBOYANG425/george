@@ -10,5 +10,3 @@ data/user-controls.json
 
 # Scored-conversation eval harness output (report-<timestamp>.json + .md)
 tests/eval/conversation/.out/
-# SimAB simulated-user harness output
-tests/eval/sim-users/.out/
