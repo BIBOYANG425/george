@@ -28,6 +28,7 @@
 const MAX_PARTS = 4
 
 import { stripMarkdown } from './strip-markdown.js'
+import { sanitizeDashes } from '../agent/voice-guard.js'
 
 export function splitIntoMessages(response: string): string[] {
   if (!response) return []
@@ -76,7 +77,10 @@ export function parseControlTokens(response: string): ControlTokens {
   const noReply = NO_REPLY_TOKEN.test(response)
   // Reset lastIndex: the regex is /g, so .test() above advanced it.
   NO_REPLY_TOKEN.lastIndex = 0
-  const text = response.replace(NO_REPLY_TOKEN, '').trim()
+  // sanitizeDashes: the em/en-dash ban is enforced here in CODE, not just in the
+  // prompt — same rationale as stripMarkdown in splitIntoMessages (the model
+  // emits the tell despite the prompt; measured at ~35% of sim conversations).
+  const text = sanitizeDashes(response.replace(NO_REPLY_TOKEN, '')).trim()
   return { noReply, text }
 }
 

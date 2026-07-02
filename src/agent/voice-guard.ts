@@ -27,3 +27,32 @@ const BANS: Array<{ id: string; rx: RegExp }> = [
 export function bannedVoiceHits(text: string): string[] {
   return BANS.filter((b) => b.rx.test(text)).map((b) => b.id)
 }
+
+// Deterministic em/en-dash REWRITE for outgoing reactive replies. The prompt ban
+// alone loses to the model's dash habit ~35% of conversations (measured on the
+// 2026-07-02 100-persona sim, identical rate on both architectures), and
+// bannedVoiceHits only ever guarded proactive sends. Applied at the
+// parseControlTokens choke point so every reactive surface is covered.
+//
+// Context-aware replacements, most-specific first:
+//   digit–digit ranges        -> hyphen        (9–5 stays a range)
+//   CJK on either side        -> ，            (texting register)
+//   latin, spaced " — "       -> ", "          (clause link survives)
+//   latin, unspaced word—word -> ", "
+//   anything left             -> ", " fallback, then tidy doubled separators
+//
+// Negation-contrast stays detect-only (rewriting it needs a writer, not a regex).
+export function sanitizeDashes(text: string): string {
+  if (!/[—–]/.test(text)) return text
+  const CJK = '一-鿿　-〿＀-￯'
+  let out = text
+  out = out.replace(/(\d)\s*[—–]\s*(\d)/g, '$1-$2')
+  out = out.replace(new RegExp(`([${CJK}])\\s*[—–]+\\s*`, 'g'), '$1，')
+  out = out.replace(new RegExp(`\\s*[—–]+\\s*([${CJK}])`, 'g'), '，$1')
+  out = out.replace(/\s+[—–]+\s+/g, ', ')
+  out = out.replace(/[—–]+/g, ', ')
+  // Tidy artifacts: doubled commas/spaces, comma before punctuation, 中英 doubles.
+  out = out.replace(/，\s*，/g, '，').replace(/,\s*,/g, ',').replace(/，\s*([。！？])/g, '$1')
+  out = out.replace(/,\s*([.!?])/g, '$1').replace(/ {2,}/g, ' ')
+  return out
+}
