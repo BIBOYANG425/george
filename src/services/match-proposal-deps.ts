@@ -202,7 +202,8 @@ function composeIntroFor(copy: PostCopy | null, reason: string | null): string[]
   const need = Math.max(0, max - current)
   const bubble1 = `诶 有人组了${cat}局${loc} ${current}缺${need}`
   const r = reason ?? '类似的'
-  const bubble2 = `你之前提到${r} 想去我帮你报名 不想去忽略我就行哈哈哈`
+  // 想去 carries the opt-out on its own (see squad-ping-deps composePing — same founder ruling).
+  const bubble2 = `你之前提到${r} 想去我帮你报名哈哈`
   return [bubble1, bubble2]
 }
 

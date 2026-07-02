@@ -56,7 +56,9 @@ export async function buildPingDeps(postId: string): Promise<PingDeps> {
     const need = Math.max(0, max - current)
     const bubble1 = `诶 有人组了${cat}局${loc} ${current}缺${need}`
     const reason = candidate.matched_tags?.[0] ?? candidate.best_facet ?? '类似的'
-    const bubble2 = `你之前提到${reason} 想去我帮你报名 不想去忽略我就行哈哈哈`
+    // 想去 carries the opt-out on its own. an explicit "不想去忽略我就行" tail is service-speak
+    // (「feel free to ignore」in chinese) — nobody talks like that. founder ruling 2026-07-01.
+    const bubble2 = `你之前提到${reason} 想去我帮你报名哈哈`
     return [bubble1, bubble2]
   }
 

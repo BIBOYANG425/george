@@ -24,7 +24,7 @@ step for a 社恐 or brand-new student. Don't only push big activities.
 Two bubbles max. State the REAL reason. Zero pressure. Opt-out honored instantly.
 
 「诶 周五晚有人组了韩烤局 K-town 3缺2」
-「你之前说想吃韩烤 想去我帮你报名 不想去忽略我就行哈哈哈」
+「你之前说想吃韩烤 想去我帮你报名哈哈」
 
 Decline or no reply: silence. No follow-up nag. "别再发了" → run /pings off for them, reply 「收到 不打扰」.
 
