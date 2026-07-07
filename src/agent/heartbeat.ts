@@ -299,7 +299,10 @@ async function realReflect(
   return parseReflect(raw);
 }
 
-export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise<void> {
+// `signal` is threaded from the scheduler's per-run timeout (dispatchHeartbeats)
+// down into deps.callLLM so a timed-out tick actually aborts the underlying
+// DeepSeek fetch. Optional so existing callers/tests that omit it are unaffected.
+export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?: AbortSignal): Promise<void> {
   const startedAt = Date.now();
   const firedAt = new Date().toISOString();
   const actions: Record<string, unknown>[] = [];
@@ -430,6 +433,7 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps): Promise
       userPrompt,
       tools: tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
       maxTokens: MAX_TOKENS,
+      signal,
     });
 
     for (const call of response.toolCalls) {

@@ -38,10 +38,17 @@
 // Default-OFF: nothing here runs unless SPECTRUM_WATCHDOG_ENABLED is set. With it
 // unset, startSpectrumWatchdog() is never called and behavior is byte-identical.
 //
+// FRESH-BOOT GUARD (isFreshNeverConnected): a process that has NEVER connected
+// this boot cannot be helped by a restart — a fresh container hits the same
+// failure AND its /tmp marker resets, which would bypass the crash-loop cap. So
+// within the first minUptime window a never-connected wedge returns 'hold' (stay
+// in-process, let the reconnect loop keep backing off) instead of exiting. The
+// /tmp history logic still owns the connected-then-wedged case (connectedAt set).
+//
 // Pure core (shouldRestart / history math) takes an injected clock + exit + fs so
 // tests assert decisions without real timers, a real process.exit, or real disk.
 //
-// Header last reviewed: 2026-06-22
+// Header last reviewed: 2026-07-07
 
 import fs from 'node:fs'
 import os from 'node:os'
@@ -68,6 +75,9 @@ export interface WatchdogConfig {
   windowSeconds: number
   // How often the watchdog timer evaluates health.
   intervalSeconds: number
+  // Fresh-boot guard: within this many seconds of process start, a stream that has
+  // NEVER connected this boot must NOT process.exit (see isFreshNeverConnected).
+  minUptimeSeconds: number
   // Where the crash-loop marker is persisted (survives a process restart).
   markerPath: string
 }
@@ -78,6 +88,7 @@ const DEFAULTS = {
   maxRestarts: 3,
   windowSeconds: 1800, // 30 min
   intervalSeconds: 60,
+  minUptimeSeconds: 120, // 2 min — a never-connected fresh boot holds this long
   markerPath: path.join(os.tmpdir(), 'spectrum-watchdog-restarts.json'),
 }
 
@@ -105,6 +116,7 @@ export function loadWatchdogConfig(env: NodeJS.ProcessEnv = process.env): Watchd
     maxRestarts: intFromEnv(env, 'SPECTRUM_WATCHDOG_MAX_RESTARTS', DEFAULTS.maxRestarts),
     windowSeconds: intFromEnv(env, 'SPECTRUM_WATCHDOG_WINDOW_SECONDS', DEFAULTS.windowSeconds),
     intervalSeconds: intFromEnv(env, 'SPECTRUM_WATCHDOG_INTERVAL_SECONDS', DEFAULTS.intervalSeconds),
+    minUptimeSeconds: intFromEnv(env, 'SPECTRUM_WATCHDOG_MIN_UPTIME_SECONDS', DEFAULTS.minUptimeSeconds),
     markerPath: env.SPECTRUM_WATCHDOG_MARKER_PATH || DEFAULTS.markerPath,
   }
 }
@@ -125,7 +137,13 @@ export function pruneHistory(history: RestartHistory, nowMs: number, windowSecon
 }
 
 // ── Pure decision core ─────────────────────────────────────────────────
-export type WatchdogDecision = 'ok' | 'restart' | 'backoff'
+//   'ok'      → healthy / not-yet-wedged.
+//   'restart' → wedged, within budget: caller persists a marker + process.exit.
+//   'backoff' → wedged but the restart budget is spent: log + stay up (degraded).
+//   'hold'    → wedged, but a fresh boot that NEVER connected: exiting would just
+//               crash-loop (and reset the /tmp budget), so stay in-process and let
+//               the reconnect loop keep backing off. No exit, no marker.
+export type WatchdogDecision = 'ok' | 'restart' | 'backoff' | 'hold'
 
 export interface WedgeThresholds {
   failSeconds: number
@@ -140,6 +158,26 @@ export interface ShouldRestartOpts {
   maxRestarts: number
   windowSeconds: number
   history: RestartHistory
+  // Fresh-boot guard inputs. Optional so existing callers/tests default to the
+  // pre-guard behavior (no hold) — the guard only engages when BOTH are supplied.
+  uptimeMs?: number
+  minUptimeSeconds?: number
+}
+
+// A process that has NEVER connected this boot cannot be helped by a restart: a
+// fresh container hits the same upstream failure AND its /tmp restart marker resets,
+// which would bypass the crash-loop cap entirely. Within the first minUptime window
+// we hold in-process (the reconnect loop keeps backing off) instead of exiting. Once
+// the stream has connected AT LEAST once this boot (health.connectedAt set — it is
+// retained across later errors), a restart is proven able to re-establish, so the
+// connected-then-wedged path exits normally. Pure: caller injects uptime.
+export function isFreshNeverConnected(
+  health: SpectrumHealth,
+  uptimeMs: number,
+  minUptimeSeconds: number,
+): boolean {
+  const everConnectedThisBoot = Boolean(health.connectedAt)
+  return !everConnectedThisBoot && uptimeMs < minUptimeSeconds * 1000
 }
 
 // Is the stream WEDGED right now? Two independent, honest signals — either one
@@ -204,6 +242,15 @@ export function shouldRestart(health: SpectrumHealth, opts: ShouldRestartOpts): 
   if (!isWedged(health, opts.nowMs, { failSeconds: opts.failSeconds, silentSeconds: opts.silentSeconds })) {
     return 'ok'
   }
+  // Fresh-container crash-loop guard (only when uptime inputs are supplied): a
+  // never-connected fresh boot must not exit — hold in-process instead.
+  if (
+    opts.uptimeMs !== undefined &&
+    opts.minUptimeSeconds !== undefined &&
+    isFreshNeverConnected(health, opts.uptimeMs, opts.minUptimeSeconds)
+  ) {
+    return 'hold'
+  }
   const pruned = pruneHistory(opts.history, opts.nowMs, opts.windowSeconds)
   if (pruned.restarts.length >= opts.maxRestarts) return 'backoff'
   return 'restart'
@@ -212,6 +259,9 @@ export function shouldRestart(health: SpectrumHealth, opts: ShouldRestartOpts): 
 // ── Side-effecting shell (injectable for tests) ────────────────────────
 export interface WatchdogDeps {
   now: () => number
+  // Milliseconds since this process booted (process.uptime()*1000 in prod).
+  // Injected so the fresh-boot guard is testable without real timers.
+  uptimeMs: () => number
   readHealth: () => SpectrumHealth
   readHistory: () => RestartHistory
   writeHistory: (h: RestartHistory) => void
@@ -271,6 +321,7 @@ export function watchdogTick(cfg: WatchdogConfig, deps: WatchdogDeps): WatchdogD
   }
 
   const history = deps.readHistory()
+  const uptimeMs = deps.uptimeMs()
   const decision = shouldRestart(health, {
     nowMs,
     failSeconds: cfg.failSeconds,
@@ -278,7 +329,24 @@ export function watchdogTick(cfg: WatchdogConfig, deps: WatchdogDeps): WatchdogD
     maxRestarts: cfg.maxRestarts,
     windowSeconds: cfg.windowSeconds,
     history,
+    uptimeMs,
+    minUptimeSeconds: cfg.minUptimeSeconds,
   })
+
+  // Fresh-boot hold: wedged but never connected this boot and still inside the
+  // minUptime window. A restart would only crash-loop a fresh container (and reset
+  // the /tmp budget), so stay up and let the in-process reconnect loop keep trying.
+  // No exit, no marker write.
+  if (decision === 'hold') {
+    deps.logFn('warn', 'spectrum_watchdog_fresh_boot_hold', {
+      reason: 'stream never connected this boot and uptime < minUptime; holding in-process (a restart would crash-loop a fresh container)',
+      state: health.state,
+      lastError: health.lastError,
+      uptimeMs,
+      minUptimeSeconds: cfg.minUptimeSeconds,
+    })
+    return 'hold'
+  }
 
   if (decision === 'restart') {
     const pruned = pruneHistory(history, nowMs, cfg.windowSeconds)
@@ -333,6 +401,7 @@ export function startSpectrumWatchdog(cfg: WatchdogConfig = loadWatchdogConfig()
 
   const deps: WatchdogDeps = {
     now: () => Date.now(),
+    uptimeMs: () => process.uptime() * 1000,
     readHealth: getSpectrumHealth,
     readHistory: () => readHistoryFromFile(cfg.markerPath),
     writeHistory: (h) => writeHistoryToFile(cfg.markerPath, h),

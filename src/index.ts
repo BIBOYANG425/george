@@ -6,13 +6,17 @@
 // both /chat and /imessage/incoming via tryHandleUserCommand. The Path B
 // /imessage/incoming route also intercepts onboarding handshake codes
 // (legacy "<code>-START" or natural "george (<code>)"); a natural-format
-// code that misses pending_users falls through to the orchestrator. All
-// other message flow lives in agent/orchestrator.ts.
+// code that misses pending_users falls through to the orchestrator, and a
+// short-TTL in-memory dedup (InboundDedup) 200s a re-POSTed message so a flaky
+// Shortcut retry never double-runs the orchestrator. All other message flow
+// lives in agent/orchestrator.ts.
 //
 // The memory-layer singletons (KV cache, ProfileStore, service-role client) and
 // the user-command runtime are wired UNCONDITIONALLY, decoupled from
 // HEARTBEAT_ENABLED, so `/delete me` and friends work with heartbeats off; the
-// heartbeat block reuses those same instances.
+// heartbeat block reuses those same instances. Heartbeat proactive sends route
+// through the live Spectrum client under TRANSPORT=spectrum (makeProactiveSender),
+// falling back to the legacy queue on the legacy transport or while reconnecting.
 //
 // Transport selection: startServer() branches on loadTransportConfig().transport.
 // TRANSPORT=spectrum → dynamic-imports and starts startSpectrumAdapter (never
@@ -52,7 +56,8 @@ import { extractCodeFromStartMessage, runHandshake } from './onboarding/handshak
 import { toPublicAssetUrls } from './onboarding/showcase.js'
 import { lookupByCode, linkImessageHandle } from './onboarding/pending-users.js'
 import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filter.js'
-import { startHeartbeatScheduler } from './jobs/heartbeat-scheduler.js'
+import { startHeartbeatScheduler, makeProactiveSender } from './jobs/heartbeat-scheduler.js'
+import { InboundDedup } from './adapters/inbound-dedup.js'
 import { startPendingUsersCleanupCron } from './jobs/pending-users-cleanup-cron.js'
 import { runHeartbeat } from './agent/heartbeat.js'
 import { createSupabaseRaisedThreadDB } from './agent/grounded-proactive.js'
@@ -76,6 +81,7 @@ import { buildReachEvalDeps } from './services/reach-eval-deps.js'
 import type { EvalContext } from './agent/evaluators/types.js'
 import { inflightTurns } from './agent/inflight-registry.js'
 import type { Server } from 'node:http'
+import type { SpectrumClient } from './adapters/spectrum-client.js'
 
 // ALL_TOOLS (imported above) registers all 23 tools as a side effect.
 
@@ -88,6 +94,18 @@ const sessionStore = createSupabaseSessionStore()
 // orchestrator. The user-command runtime (cache + supabase + sender) is
 // injected into ./agent/user-command-router via setUserCommandRuntime() there.
 let _profileStore: ProfileStore | null = null
+
+// Reader for the LIVE Spectrum client, populated ONLY when startServer takes the
+// spectrum-transport branch (it dynamic-imports the adapter and grabs its
+// getActiveSpectrumClient). Stays null on the legacy path, so the heartbeat
+// proactive sender falls back to the legacy queue byte-for-byte as before. Read
+// lazily per-send so a reconnect is picked up. Declared here (before the heartbeat
+// block that closes over it) though only assigned later in startServer.
+let spectrumClientGetter: (() => SpectrumClient | null) | null = null
+
+// Path B inbound dedup (Apple Shortcuts can re-POST the same message). Shared
+// module-level so every /imessage/incoming request checks the same seen-set.
+const inboundDedup = new InboundDedup()
 
 // Resolve a raw orchestrator reply into what the user should actually receive,
 // honoring the {{NO_REPLY}} output-format control token. Returns null to mean
@@ -422,6 +440,16 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
   const body = req.body as { sender?: string; text?: string; timestamp?: number }
   if (!body?.sender || !body.text) {
     return res.status(400).json({ error: 'sender and text required' })
+  }
+  // Inbound dedup: the iPhone Shortcut can re-POST the same message (flaky
+  // automation / retry), and we process fire-and-forget, so a re-POST would
+  // double-run the orchestrator. Reject a duplicate seen within the TTL with a 200
+  // {deduped:true} so the Shortcut's retry succeeds silently — a retry must never
+  // see an error — and we do zero work. Checked before injection/enqueue so a
+  // re-POST of any message (normal or blocked) is short-circuited.
+  if (inboundDedup.isDuplicate(body.sender, body.text)) {
+    log('info', 'phone_incoming_deduped', { sender: body.sender })
+    return res.status(200).json({ deduped: true })
   }
   // Run the injection filter at the HTTP boundary, before the 202 ack and
   // before any agent-loop cost. processMessage runs the same check internally,
@@ -819,18 +847,17 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
       if (error) throw error;
       return data ?? [];
     },
-    // Path B proactive sends go through the shared queue helper. A raw insert
-    // here previously wrote columns that don't exist on imessage_outgoing
-    // (body/created_at) and a status outside the CHECK constraint ('queued'),
-    // so every heartbeat proactive message failed at the DB.
-    //
-    // NOTE: proactive sends still use the legacy queue (enqueueOutgoing) regardless
-    // of the TRANSPORT setting. Spectrum proactive-send requires creating a
-    // conversation space to an arbitrary handle — out of scope here. Wiring
-    // heartbeat proactive sends through Spectrum is pending the live-cutover phase.
-    async sendImessage(msg: { to: string; text: string }) {
-      await enqueueOutgoing(msg.to, msg.text);
-    },
+    // Proactive heartbeat sends route through the active transport. Under
+    // TRANSPORT=spectrum the legacy imessage_outgoing queue has NO drainer, so a
+    // proactive enqueued there would rot forever; makeProactiveSender routes it
+    // through the LIVE Spectrum client (sendProactive) when connected and falls back
+    // to the durable legacy queue otherwise (legacy transport → byte-for-byte the
+    // old enqueueOutgoing path; Spectrum reconnecting → queue a retry, never a
+    // silent drop). See makeProactiveSender for the full rationale.
+    sendImessage: makeProactiveSender({
+      getSpectrumClient: () => spectrumClientGetter?.() ?? null,
+      enqueueLegacy: (to: string, text: string) => enqueueOutgoing(to, text),
+    }),
     async insertFollowup(row: { userId: string; content: string; scheduledFor: string }) {
       const { error } = await supabase.from('student_followups').insert({
         user_id: row.userId,
@@ -858,8 +885,10 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
       if (error) throw error;
       return data ?? [];
     },
-    async runHeartbeat(userId: string) {
-      await runHeartbeat(userId, heartbeatDeps);
+    async runHeartbeat(userId: string, signal?: AbortSignal) {
+      // Forward the scheduler's per-run abort signal down to callLLM → the
+      // DeepSeek fetch so a timed-out tick actually cancels its in-flight call.
+      await runHeartbeat(userId, heartbeatDeps, signal);
     },
   });
   console.log('[heartbeat] scheduler started, ticks every 10 minutes');
@@ -977,8 +1006,11 @@ async function startServer() {
       : `[transport] TRANSPORT=legacy (or unset) → NO Spectrum connection. Legacy iMessage adapter: ${config.imessage.enabled ? 'enabled' : 'disabled'}. Set TRANSPORT=spectrum for cloud iMessage.`,
   )
   if (transportCfg.transport === 'spectrum') {
-    const { startSpectrumAdapter, stopSpectrumAdapter } = await import('./adapters/spectrum.js')
+    const { startSpectrumAdapter, stopSpectrumAdapter, getActiveSpectrumClient } = await import('./adapters/spectrum.js')
     stopSpectrum = stopSpectrumAdapter // let shutdown() close the connection cleanly
+    // Expose the live client to the heartbeat proactive sender so proactive nudges
+    // go out over Spectrum (the legacy queue has no drainer under this transport).
+    spectrumClientGetter = getActiveSpectrumClient
     // Pass the session + profile stores so the orchestrator loads conversation
     // history (same memory wiring as POST /chat); without these george would
     // treat every message in isolation.

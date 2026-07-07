@@ -710,14 +710,38 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
  * to query(). Instead, we load the recent conversation history before calling
  * query() and prepend it to the user's message as context so the orchestrator
  * has continuity.
+ *
+ * De-dupe the just-saved live turn: the default paths (/chat, /chat/stream, Path
+ * B, spectrum non-burst) persist the user turn BEFORE running the orchestrator,
+ * so it reloads here as the LAST history row while `${historyPrefix}${args.text}`
+ * ALSO appends the same text as the live prompt — the model saw the current
+ * message twice. When `liveText` is supplied and the LAST loaded row is a user
+ * turn whose content equals it, drop that row (mirrors how the Spectrum
+ * burst-guard path avoids the dup by deferring its save). Only the LAST row is
+ * considered: an OLDER identical message is real history and is kept.
+ *
+ * Exported for a focused unit test of that de-dupe.
  */
-async function buildHistoryPrefix(sessionStore: SessionStore | undefined, userId: string): Promise<string> {
+export async function buildHistoryPrefix(
+  sessionStore: SessionStore | undefined,
+  userId: string,
+  liveText?: string,
+): Promise<string> {
   if (!sessionStore) return '';
 
   const session = await sessionStore.load(userId);
   if (!session || session.messages.length === 0) return '';
 
-  const historyLines = session.messages
+  let messages = session.messages;
+  if (liveText !== undefined) {
+    const last = messages[messages.length - 1];
+    if (last && last.role === 'user' && last.content === liveText) {
+      messages = messages.slice(0, -1);
+    }
+  }
+  if (messages.length === 0) return '';
+
+  const historyLines = messages
     .slice(-10) // last 10 messages to stay within context budget
     .map((m) => `[${m.role}]: ${m.content}`)
     .join('\n');
@@ -813,7 +837,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // neither consumes the other), so they run concurrently to shave one round-trip.
   const [recallBlock, historyPrefix] = await Promise.all([
     recallForTurn(args.userId, args.text),
-    buildHistoryPrefix(args.sessionStore, args.userId),
+    buildHistoryPrefix(args.sessionStore, args.userId, args.text),
   ]);
 
   // World Info timed-state (P5) — OBSERVE every user turn, BEFORE the fast-path
