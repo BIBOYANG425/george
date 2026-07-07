@@ -108,6 +108,15 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
     return { crisis, flagged, fabrication: fab, injection };
   }));
 
+  // Lightweight crisis count for the boot badge — ONLY the distress queue, no flagged/
+  // fabrication/injection fan-out. The dashboard boot probe calls this instead of the
+  // full /review so the badge can surface without the heavy payload. When the radar is
+  // gated OFF, getDistressQueue short-circuits (no DB reads) and this returns { count: 0 }.
+  api.get('/review/crisis-count', wrap(async () => {
+    const cr = await getDistressQueue(sb, {});
+    return { count: cr.enabled ? cr.queue.length : 0 };
+  }));
+
   // Flag a George turn as a bad reply. Snapshot is built server-side from the
   // messages row; actor is the Cf-Access admin (or the shared token locally).
   api.post('/message/:id/flag', wrap(async (req) => {
