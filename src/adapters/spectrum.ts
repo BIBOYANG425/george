@@ -39,6 +39,7 @@ import { checkRateLimit } from './rate-limiter.js'
 import { log } from '../observability/logger.js'
 import { renderDelayContext } from '../agent/activity-state.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
+import { inflightTurns } from '../agent/inflight-registry.js'
 import { captureFactsFromTurn } from '../memory/capture.js'
 import { TURN_EVALUATORS, dispatchEvaluators } from '../agent/evaluators/registry.js'
 import type { EvalContext } from '../agent/evaluators/types.js'
@@ -182,6 +183,11 @@ export async function runSpectrumLoop(
     // Optional, default-OFF "reading" pause BEFORE generation (no-op when off).
     // Pre-generation only: this never delays an already-composed reply.
     await stageReadReceiptDelay({ readReceiptDelayMs: getReadReceiptDelayMs() })
+    // Track this flush-driven orchestrator turn so a graceful shutdown drains it
+    // before exit (see inflight-registry.ts) rather than dropping a reply
+    // mid-generation on deploy. begin() sits adjacent to the try so nothing
+    // between them can throw; end() in the finally covers send/abort/throw alike.
+    inflightTurns.begin()
     try {
       // stageGenerate owns startTyping + the long-turn "still thinking" nudge +
       // the handleText await + clearTimeout on success/throw. delayContext rides
@@ -223,6 +229,7 @@ export async function runSpectrumLoop(
     } finally {
       if (inflight.get(senderId)?.ac === ac) inflight.delete(senderId)
       await buf.reply.stopTyping().catch(() => {})
+      inflightTurns.end()
     }
   }
 

@@ -9,12 +9,22 @@
 // code that misses pending_users falls through to the orchestrator. All
 // other message flow lives in agent/orchestrator.ts.
 //
+// The memory-layer singletons (KV cache, ProfileStore, service-role client) and
+// the user-command runtime are wired UNCONDITIONALLY, decoupled from
+// HEARTBEAT_ENABLED, so `/delete me` and friends work with heartbeats off; the
+// heartbeat block reuses those same instances.
+//
 // Transport selection: startServer() branches on loadTransportConfig().transport.
 // TRANSPORT=spectrum → dynamic-imports and starts startSpectrumAdapter (never
 // loads spectrum-ts on the legacy path). Unset/legacy → original
 // startIMessageAdapter() call, unchanged.
 //
-// Header last reviewed: 2026-06-15
+// Graceful shutdown (SIGTERM/SIGINT) closes the captured http.Server, stops the
+// inbound adapters, then drains in-flight fire-and-forget orchestrator turns
+// (Path B replies + Spectrum flushes) via inflight-registry with a bounded
+// SHUTDOWN_DRAIN_MS timeout before process.exit — no more dropped replies on deploy.
+//
+// Header last reviewed: 2026-07-07
 
 import express from 'express'
 import cors from 'cors'
@@ -64,6 +74,8 @@ import { CRON_EVALUATORS, dispatchEvaluators } from './agent/evaluators/registry
 import { setReachEvalDeps } from './agent/evaluators/reach.js'
 import { buildReachEvalDeps } from './services/reach-eval-deps.js'
 import type { EvalContext } from './agent/evaluators/types.js'
+import { inflightTurns } from './agent/inflight-registry.js'
+import type { Server } from 'node:http'
 
 // ALL_TOOLS (imported above) registers all 23 tools as a side effect.
 
@@ -442,6 +454,11 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
   // the orchestrator async and write the response to the outgoing queue when
   // it lands. Polling Shortcut picks it up on the next tick.
   res.status(202).json({ accepted: true })
+  // Track this fire-and-forget orchestrator turn so a graceful shutdown drains it
+  // before exit (see inflight-registry.ts) rather than dropping the reply
+  // mid-generation on a deploy. begin() before the async turn; end() in the
+  // finally so every exit path (handshake, command, empty reply, error) balances.
+  inflightTurns.begin()
   void (async () => {
     const userId = body.sender!
     const text = body.text!
@@ -557,6 +574,8 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
       if (_profileStore) void captureFactsFromTurn(_profileStore, userId, text, reply)
     } catch (err) {
       log('error', 'phone_incoming_error', { error: (err as Error).message })
+    } finally {
+      inflightTurns.end()
     }
   })()
 })
@@ -734,11 +753,35 @@ if (process.env.SQUAD_REREACH_EVAL_ENABLED === 'true') {
 // HEARTBEAT SCHEDULER
 // ==========================================
 
+// ── Shared memory singletons (user-command routing + heartbeat) ──────────
+// User control commands (/profile, /correct, /pause, /resume, /delete me) route
+// through the memory-layer singletons and must work whether or not the heartbeat
+// scheduler is running. Build them + inject the command runtime OUTSIDE the
+// HEARTBEAT_ENABLED gate so `/delete me` keeps working with heartbeats off; the
+// heartbeat block below reuses the SAME instances (no second Supabase client /
+// ProfileStore). Safe to build unconditionally: db/client.ts already constructs a
+// service-role client at import, so any env that boots this module already holds
+// valid SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.
+const cache = getKVCache();
+const profileStore = new ProfileStore(createSupabaseProfileDB(), cache);
+const memorySupabase = createServiceRoleClient();
+
+// Promote the profile store to module scope so /chat and /imessage/incoming can
+// pass it to the orchestrator, and inject the user-command runtime so
+// tryHandleUserCommand can act on commands regardless of the heartbeat flag.
+_profileStore = profileStore;
+setUserCommandRuntime({
+  cache,
+  profileStore,
+  supabase: memorySupabase,
+  sendImessage: async (msg: { to: string; text: string }) => {
+    await enqueueOutgoing(msg.to, msg.text);
+  },
+});
+
 if (process.env.HEARTBEAT_ENABLED !== 'false') {
-  const cache = getKVCache();
-  const profileStore = new ProfileStore(createSupabaseProfileDB(), cache);
   const instructionsStore = new InstructionsStore(createSupabaseInstructionsDB(), cache);
-  const supabase = createServiceRoleClient();
+  const supabase = memorySupabase;
   const llm = createDeepSeekClient();
   const heartbeatDeps = {
     profileStore,
@@ -820,23 +863,13 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
     },
   });
   console.log('[heartbeat] scheduler started, ticks every 10 minutes');
-
-  // Promote the profile store to module scope so /chat and /imessage/incoming
-  // can pass it to the orchestrator, and inject the user-command runtime into
-  // the router so tryHandleUserCommand can act on commands.
-  _profileStore = profileStore;
-  setUserCommandRuntime({
-    cache,
-    profileStore,
-    supabase,
-    sendImessage: heartbeatDeps.sendImessage.bind(heartbeatDeps),
-  });
 }
 
 // User-command routing (/profile, /correct, /pause, /resume, /delete me) now
 // lives in ./agent/user-command-router. tryHandleUserCommand is imported above;
-// the runtime it needs is injected via setUserCommandRuntime() in the heartbeat
-// init block. Kept out of this module so transports can import the router
+// the runtime it needs is injected via setUserCommandRuntime() in the shared
+// memory-singletons block above (unconditionally, decoupled from
+// HEARTBEAT_ENABLED). Kept out of this module so transports can import the router
 // without triggering index.ts's server-start side effects.
 
 // ==========================================
@@ -856,8 +889,26 @@ process.on('unhandledRejection', (reason) => {
 // on Photon's side (a dangling connection breaks shared-pool inbound routing).
 let stopSpectrum: (() => Promise<void>) | null = null
 
+// The http.Server handle from app.listen(), captured so shutdown can stop
+// accepting new connections before draining in-flight work.
+let httpServer: Server | null = null
+
+// Bounded drain window for in-flight fire-and-forget orchestrator turns (Path B
+// replies + Spectrum flush turns) on shutdown. Long enough for a normal turn to
+// finish, short enough that a wedged turn never holds a deploy open.
+const SHUTDOWN_DRAIN_MS = 25_000
+
+let shuttingDown = false
+
 async function shutdown(signal: string) {
+  if (shuttingDown) return // a second signal must not re-close / double-exit
+  shuttingDown = true
   log('info', 'shutdown', { signal })
+  // Stop accepting new HTTP connections first (in-flight requests finish
+  // naturally). We don't await the close callback — keep-alive sockets can hold
+  // it open past the drain window, and the drain below is the real gate.
+  httpServer?.close()
+  // Stop the inbound adapters so no NEW orchestrator turns begin.
   if (stopSpectrum) {
     await stopSpectrum().catch((err) =>
       log('error', 'spectrum_stop_failed', { error: (err as Error).message }),
@@ -866,6 +917,11 @@ async function shutdown(signal: string) {
   await stopIMessageAdapter().catch((err) =>
     log('error', 'imessage_stop_failed', { error: (err as Error).message }),
   )
+  // Drain in-flight fire-and-forget turns (Path B replies + Spectrum flushes) so
+  // a deploy doesn't drop a reply mid-generation. Bounded so a wedged turn can't
+  // block exit past SHUTDOWN_DRAIN_MS.
+  const drain = await inflightTurns.drain(SHUTDOWN_DRAIN_MS)
+  log('info', 'shutdown_drain_complete', { drained: drain.drained, remaining: drain.remaining })
   process.exit(0)
 }
 
@@ -890,7 +946,7 @@ async function startServer() {
     throw err
   }
 
-  app.listen(config.port, () => {
+  httpServer = app.listen(config.port, () => {
     log('info', 'server_started', {
       port: config.port,
       tools: Object.keys(ALL_TOOLS).length,

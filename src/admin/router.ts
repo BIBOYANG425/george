@@ -2,9 +2,10 @@
 //
 // Admin dashboard router. Serves the single-page dashboard at /admin/dashboard
 // and a JSON analytics API at /admin/api/*. Every API route is gated by the
-// admin token (Bearer header, x-admin-token header, OR ?token= query — the
-// query form exists so the static page and a screenshot tool can load it with
-// one URL during local viewing).
+// admin token via the Authorization: Bearer header or the x-admin-token header
+// (constant-time compared). The ?token= query form was removed — query strings
+// leak into access logs, browser history, and Referer headers, so a token there
+// is a standing credential leak.
 //
 // Mount it in two ways:
 //   - inside the full george server (src/index.ts) — shares the app
@@ -58,10 +59,11 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
       res.status(503).json({ error: 'ADMIN_TOKEN not configured on the server' });
       return;
     }
+    // Header-only: Authorization: Bearer OR x-admin-token. No ?token= query form
+    // (query strings leak into logs / history / Referer). Constant-time compared.
     const bearer = req.headers.authorization?.replace('Bearer ', '');
     const header = req.headers['x-admin-token'];
-    const q = typeof req.query.token === 'string' ? req.query.token : undefined;
-    const token = bearer || (typeof header === 'string' ? header : undefined) || q || '';
+    const token = bearer || (typeof header === 'string' ? header : undefined) || '';
     if (!safeEqual(token, adminToken)) {
       res.status(401).json({ error: 'unauthorized' });
       return;
