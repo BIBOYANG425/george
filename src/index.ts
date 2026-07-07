@@ -80,6 +80,7 @@ import { setReachEvalDeps } from './agent/evaluators/reach.js'
 import { buildReachEvalDeps } from './services/reach-eval-deps.js'
 import type { EvalContext } from './agent/evaluators/types.js'
 import { inflightTurns } from './agent/inflight-registry.js'
+import { runShutdownSequence } from './shutdown-sequence.js'
 import type { Server } from 'node:http'
 import type { SpectrumClient } from './adapters/spectrum-client.js'
 
@@ -789,10 +790,13 @@ process.on('unhandledRejection', (reason) => {
   log('error', 'unhandled_rejection', { reason: String(reason) })
 })
 
-// Set when the Spectrum adapter is started (spectrum transport only) so the
-// shutdown handler can close the connection cleanly instead of orphaning it
-// on Photon's side (a dangling connection breaks shared-pool inbound routing).
-let stopSpectrum: (() => Promise<void>) | null = null
+// Set when the Spectrum adapter is started (spectrum transport only). Shutdown is
+// two-phase so an in-flight turn can still SEND during the drain: stopSpectrumIntake
+// halts inbound (no new turns) while keeping the gRPC client live; closeSpectrumClient
+// tears the client down AFTER the drain so the connection never dangles on Photon's
+// side (a dangling connection breaks shared-pool inbound routing).
+let stopSpectrumIntake: (() => Promise<void>) | null = null
+let closeSpectrumClient: (() => Promise<void>) | null = null
 
 // The http.Server handle from app.listen(), captured so shutdown can stop
 // accepting new connections before draining in-flight work.
@@ -809,23 +813,42 @@ async function shutdown(signal: string) {
   if (shuttingDown) return // a second signal must not re-close / double-exit
   shuttingDown = true
   log('info', 'shutdown', { signal })
-  // Stop accepting new HTTP connections first (in-flight requests finish
-  // naturally). We don't await the close callback — keep-alive sockets can hold
-  // it open past the drain window, and the drain below is the real gate.
-  httpServer?.close()
-  // Stop the inbound adapters so no NEW orchestrator turns begin.
-  if (stopSpectrum) {
-    await stopSpectrum().catch((err) =>
-      log('error', 'spectrum_stop_failed', { error: (err as Error).message }),
-    )
-  }
-  await stopIMessageAdapter().catch((err) =>
-    log('error', 'imessage_stop_failed', { error: (err as Error).message }),
-  )
-  // Drain in-flight fire-and-forget turns (Path B replies + Spectrum flushes) so
-  // a deploy doesn't drop a reply mid-generation. Bounded so a wedged turn can't
-  // block exit past SHUTDOWN_DRAIN_MS.
-  const drain = await inflightTurns.drain(SHUTDOWN_DRAIN_MS)
+  // Fixed, load-bearing order (see runShutdownSequence): stop http → stop inbound
+  // intake (no new turns) → drain in-flight turns WHILE clients are live → close
+  // clients. Closing the Spectrum client before the drain (the old order) stopped
+  // app.send too and dropped mid-generation replies — the loss the drain prevents.
+  const drain = await runShutdownSequence({
+    // Stop accepting new HTTP connections (in-flight requests finish naturally).
+    // We don't await the close callback — keep-alive sockets can hold it open past
+    // the drain window, and the drain is the real gate.
+    stopHttp: () => {
+      httpServer?.close()
+    },
+    // Stop inbound intake on both transports so no NEW orchestrator turns begin,
+    // but KEEP the Spectrum gRPC client live for the drain.
+    stopIntake: async () => {
+      if (stopSpectrumIntake) {
+        await stopSpectrumIntake().catch((err) =>
+          log('error', 'spectrum_intake_stop_failed', { error: (err as Error).message }),
+        )
+      }
+      await stopIMessageAdapter().catch((err) =>
+        log('error', 'imessage_stop_failed', { error: (err as Error).message }),
+      )
+    },
+    // Drain in-flight fire-and-forget turns (Path B replies + Spectrum turns/flushes)
+    // while the clients are still live. Bounded so a wedged turn can't block exit.
+    drain: () => inflightTurns.drain(SHUTDOWN_DRAIN_MS),
+    // Now that in-flight turns have flushed, close the Spectrum gRPC client so the
+    // connection never dangles on Photon's side.
+    closeClients: async () => {
+      if (closeSpectrumClient) {
+        await closeSpectrumClient().catch((err) =>
+          log('error', 'spectrum_close_failed', { error: (err as Error).message }),
+        )
+      }
+    },
+  })
   log('info', 'shutdown_drain_complete', { drained: drain.drained, remaining: drain.remaining })
   process.exit(0)
 }
@@ -882,8 +905,11 @@ async function startServer() {
       : `[transport] TRANSPORT=legacy (or unset) → NO Spectrum connection. Legacy iMessage adapter: ${config.imessage.enabled ? 'enabled' : 'disabled'}. Set TRANSPORT=spectrum for cloud iMessage.`,
   )
   if (transportCfg.transport === 'spectrum') {
-    const { startSpectrumAdapter, stopSpectrumAdapter, getActiveSpectrumClient } = await import('./adapters/spectrum.js')
-    stopSpectrum = stopSpectrumAdapter // let shutdown() close the connection cleanly
+    const { startSpectrumAdapter, stopSpectrumIntake: stopIntake, closeSpectrumClient: closeClient, getActiveSpectrumClient } = await import('./adapters/spectrum.js')
+    // Two-phase shutdown: stop intake (no new turns) → drain → close client. See
+    // shutdown() above; splitting these lets in-flight turns send during the drain.
+    stopSpectrumIntake = stopIntake
+    closeSpectrumClient = closeClient
     // Expose the live client to the heartbeat proactive sender so proactive nudges
     // go out over Spectrum (the legacy queue has no drainer under this transport).
     spectrumClientGetter = getActiveSpectrumClient

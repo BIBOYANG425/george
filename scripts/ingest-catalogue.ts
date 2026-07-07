@@ -599,7 +599,9 @@ async function insertCourses(details: CourseDetail[]) {
   // (Supabase caps selects at 1k by default) and only embed/upsert the missing ones.
   const existingCoids = new Set<string>()
   const existingCourses = await fetchAllPaged<{ coid: string }>((from, to) =>
-    supabase.from('courses').select('coid').range(from, to),
+    // Stable order on the natural key so offset paging can never skip/duplicate a
+    // row across page windows (an unordered paged select risks re-inserting rows).
+    supabase.from('courses').select('coid').order('coid').range(from, to),
   )
   for (const r of existingCourses) existingCoids.add(r.coid as string)
   console.log(`[insert] courses already in DB: ${existingCoids.size}`)
@@ -659,7 +661,8 @@ async function insertPrograms(programs: Program[]) {
   // Same idempotency pattern as courses: page the existing poid set past the 1k cap.
   const existingPoids = new Set<string>()
   const existingPrograms = await fetchAllPaged<{ poid: string }>((from, to) =>
-    supabase.from('programs').select('poid').range(from, to),
+    // Stable order on the natural key so offset paging never skips/duplicates a row.
+    supabase.from('programs').select('poid').order('poid').range(from, to),
   )
   for (const r of existingPrograms) existingPoids.add(r.poid as string)
   console.log(`[insert] programs already in DB: ${existingPoids.size}`)
@@ -712,7 +715,8 @@ async function mirrorProgramsToCampusKnowledge(programs: Program[]) {
   // past the 1k cap — usc_program rows exceed 1000, so an unpaged select saw only
   // the first page and re-mirrored the rest on every rerun (RAG duplication).
   const existingRows = await fetchAllPaged<{ title: string }>((from, to) =>
-    supabase.from('campus_knowledge').select('title').eq('category', 'usc_program').range(from, to),
+    // Stable order on the selected key so offset paging never skips/duplicates a row.
+    supabase.from('campus_knowledge').select('title').eq('category', 'usc_program').order('title').range(from, to),
   )
   const existingTitles = new Set(existingRows.map((r) => r.title))
   const todo = toMirror.filter((p) => !existingTitles.has(p.name))

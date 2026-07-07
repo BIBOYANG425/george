@@ -432,7 +432,7 @@ export function startSpectrumWatchdog(cfg: WatchdogConfig = loadWatchdogConfig()
   return true
 }
 
-// Stop + clear the watchdog timer (called from stopSpectrumAdapter).
+// Stop + clear the watchdog timer (called from stopSpectrumIntake).
 export function stopSpectrumWatchdog(): void {
   if (watchdogTimer) {
     clearInterval(watchdogTimer)

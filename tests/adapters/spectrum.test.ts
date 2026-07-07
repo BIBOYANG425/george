@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { runSpectrumLoop } from '../../src/adapters/spectrum.js'
+import { runSpectrumLoop, stopSpectrumIntake, closeSpectrumClient } from '../../src/adapters/spectrum.js'
 import { sendWithRetry, redactHandle, isTransientSendError } from '../../src/adapters/spectrum-client.js'
 import type { SpectrumClient, InboundMessage, ReplyHandle } from '../../src/adapters/spectrum-client.js'
 
@@ -321,5 +321,25 @@ describe('runSpectrumLoop — burst guard (flag ON)', () => {
     await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() }, { debounceMs: 0 })
     expect(sent.some((s) => s.includes('接不过来'))).toBe(false) // no cooldown for a 12-message vent
     expect(handle).toHaveBeenCalled()                            // the burst is answered (coalesced)
+  })
+})
+
+// FIX 1 (GG1): shutdown is split into stopSpectrumIntake (stop inbound, keep the
+// gRPC client live for the drain) and closeSpectrumClient (tear the client down
+// after the drain). Both must be safe to call when the adapter never started
+// (all module handles null → no-ops) so index.ts's shutdown() never throws in the
+// TRANSPORT=legacy / adapter-not-booted case.
+describe('spectrum shutdown split — stopSpectrumIntake / closeSpectrumClient', () => {
+  it('stopSpectrumIntake resolves without a live client (no-op teardown)', async () => {
+    await expect(stopSpectrumIntake()).resolves.toBeUndefined()
+  })
+
+  it('closeSpectrumClient resolves without a live client (no-op close)', async () => {
+    await expect(closeSpectrumClient()).resolves.toBeUndefined()
+  })
+
+  it('stopSpectrumIntake then closeSpectrumClient is safe (shutdown order)', async () => {
+    await stopSpectrumIntake()
+    await expect(closeSpectrumClient()).resolves.toBeUndefined()
   })
 })

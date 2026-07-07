@@ -238,6 +238,13 @@ export async function runSpectrumLoop(
 
   try {
     for await (const [reply, message] of client.messages()) {
+      // Graceful shutdown: intake was stopped (stopSpectrumIntake) but the client
+      // is deliberately kept live so in-flight turns can flush their replies during
+      // the drain. Drop any inbound that lands in that window so NO new turn starts.
+      // `continue` (not `break`): breaking would return from runSpectrumLoop and let
+      // the reconnect loop's finally close the client mid-drain — the client must
+      // stay open until closeSpectrumClient() runs after the drain completes.
+      if (spectrumStopping) continue
       recordSpectrumInbound()
       if (message.messageId) {
         if (seen.has(message.messageId)) continue
@@ -554,16 +561,16 @@ let spectrumStopping = false
 let activeSpectrumClient: SpectrumClient | null = null
 // Pacing drainer handle (default-OFF: null). Started ONCE at the top of
 // startSpectrumAdapter so it persists across reconnects, and stopped on loop
-// exit and in stopSpectrumAdapter. Module-level so the shutdown path can reach it.
+// exit and in stopSpectrumIntake. Module-level so the shutdown path can reach it.
 let activeDrainer: { stop(): void } | null = null
 // Pacing queue pruner handle (default-OFF: null). Started alongside the drainer
-// when pacing is on, and stopped on loop exit and in stopSpectrumAdapter so the
+// when pacing is on, and stopped on loop exit and in stopSpectrumIntake so the
 // delivered-row prune never outlives the adapter. Module-level so the shutdown
 // path can reach it (mirrors activeDrainer).
 let activePruner: { stop(): void } | null = null
 
 // startSpectrumAdapter connects to Spectrum and drives the downstream pipeline.
-// Runs until stopSpectrumAdapter() is called: if the message stream ends or
+// Runs until stopSpectrumIntake()/closeSpectrumClient() are called: if the message stream ends or
 // throws (transient drop), it reconnects with exponential backoff. Mirrors
 // startIMessageAdapter but for Spectrum's pushed app.messages stream.
 export async function startSpectrumAdapter(
@@ -648,13 +655,28 @@ export async function startSpectrumAdapter(
   log('info', 'spectrum_adapter_stopped', {})
 }
 
-// Close the live Spectrum connection cleanly and stop the reconnect loop.
-// Called from the process shutdown handler so a restart never orphans a
-// connection on Photon's side.
-export async function stopSpectrumAdapter(): Promise<void> {
+// Graceful shutdown is split into two phases so an in-flight turn can still SEND
+// its reply during the drain window:
+//
+//   1. stopSpectrumIntake()  — stop consuming NEW inbound (subscription + drainer
+//      + pruner + watchdog). The gRPC client stays LIVE so a turn still generating
+//      when SIGTERM arrives can flush its reply over space.send.
+//   2. <caller awaits inflightTurns.drain(...)>
+//   3. closeSpectrumClient() — tear down the gRPC client once turns have flushed,
+//      so the connection never dangles on Photon's side.
+//
+// The previous single stopSpectrumAdapter() closed the client (app.stop → app can
+// no longer send) BEFORE the drain, so an in-flight reply was silently lost —
+// exactly what the shutdown drain exists to prevent.
+
+// Phase 1: stop inbound intake WITHOUT closing the client. Sets spectrumStopping
+// so the reconnect loop won't reconnect and the inbound loop drops any message
+// that lands during the drain window (no new turn starts). Safe to call when the
+// adapter was never started (all handles are null → no-ops).
+export async function stopSpectrumIntake(): Promise<void> {
   spectrumStopping = true
-  // Tear down the watchdog timer first so a clean shutdown never trips it (no-op
-  // when the watchdog was never started, i.e. the default-OFF path).
+  // Tear down the watchdog timer so a clean shutdown never trips it (no-op when
+  // the watchdog was never started, i.e. the default-OFF path).
   stopSpectrumWatchdog()
   // Stop the pacing drainer so it doesn't keep firing after shutdown (no-op when
   // pacing was off / never started). startSpectrumAdapter's finally also stops it
@@ -668,6 +690,15 @@ export async function stopSpectrumAdapter(): Promise<void> {
     activePruner.stop()
     activePruner = null
   }
+}
+
+// Phase 2: close the live Spectrum connection cleanly and stop the reconnect loop.
+// Call AFTER the in-flight drain so a generating turn can still send its reply
+// first. Re-sets spectrumStopping so a standalone call (not preceded by
+// stopSpectrumIntake) still halts the reconnect loop and never orphans a
+// connection on Photon's side.
+export async function closeSpectrumClient(): Promise<void> {
+  spectrumStopping = true
   const client = activeSpectrumClient
   activeSpectrumClient = null
   if (client) await client.close().catch(() => {})
