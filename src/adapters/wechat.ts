@@ -1,14 +1,17 @@
-// WeChat Official Account adapter. POST /wechat receives XML → signature verify →
-// parse → dedup (60s window) → runOrchestrator(). Access token cached with lazy refresh.
-// Non-text messages (voice, image, video, location) return a playful inline refusal.
-// Non-null responses are split on blank-line boundaries into up to 4 chat messages with
-// INTER_MESSAGE_DELAY_MS between parts, matching WeChat's short-burst cadence.
-// Subscribe events trigger the BIA welcome copy.
+// WeChat Official Account adapter. Both /wechat handlers fail closed with 403 when
+// WECHAT_TOKEN is unconfigured (checked BEFORE signature verification — an empty
+// token is attacker-forgeable). POST /wechat receives XML → token guard → signature
+// verify → parse → msgId dedup (60s window) → runOrchestrator(). Access token cached
+// with lazy refresh. Non-text messages (voice, image, video, location) return a
+// playful inline refusal. Non-null responses are split on blank-line boundaries into
+// up to 4 chat messages with INTER_MESSAGE_DELAY_MS between parts, matching WeChat's
+// short-burst cadence. Subscribe events trigger the BIA welcome copy, handled AFTER
+// the msgId dedup so a retried subscribe (same MsgId) doesn't re-send the welcome.
 // Outbound custom/send treats a non-zero WeChat errcode (HTTP 200) as a failure
 // and throws, so callers (e.g. the shipping notifier) don't mark undelivered
 // messages as 'sent'.
 //
-// Header last reviewed: 2026-06-23
+// Header last reviewed: 2026-07-07
 
 import { Router } from 'express'
 import { config } from '../config.js'
@@ -107,6 +110,13 @@ export function createWeChatRouter(): Router {
   const router = Router()
 
   router.get('/wechat', (req, res) => {
+    // Fail closed: with no WECHAT_TOKEN configured, verifySignature hashes over an
+    // empty token, so an attacker who knows the (self-supplied) timestamp+nonce can
+    // forge a passing signature. Refuse every request until the token is set. MUST
+    // run before verifySignature.
+    if (!config.wechat.token) {
+      return res.status(403).send('WeChat token not configured')
+    }
     const { signature, timestamp, nonce, echostr } = req.query as Record<string, string>
     if (verifySignature(signature, timestamp, nonce, config.wechat.token)) {
       res.send(echostr)
@@ -116,6 +126,11 @@ export function createWeChatRouter(): Router {
   })
 
   router.post('/wechat', async (req, res) => {
+    // Fail closed on an unconfigured token (see the GET handler) — before any
+    // signature verification, so an empty token can never be attacker-forged.
+    if (!config.wechat.token) {
+      return res.status(403).send('WeChat token not configured')
+    }
     const { signature, timestamp, nonce } = req.query as Record<string, string>
     if (!verifySignature(signature, timestamp, nonce, config.wechat.token)) {
       return res.status(403).send('Invalid signature')
@@ -124,6 +139,15 @@ export function createWeChatRouter(): Router {
     try {
       const msg = await parseIncomingXml(req.body as string)
 
+      // Dedup FIRST: WeChat retries a push (same MsgId) when it doesn't receive
+      // "success" within ~5s, so a retried subscribe must not re-send the welcome.
+      // Moved ahead of the subscribe branch below so any event carrying a MsgId is
+      // deduped like a normal message. (Events without a MsgId are unchanged — the
+      // guard is a no-op for them and the subscribe welcome still fires once.)
+      if (msg.msgId && isDuplicate(msg.msgId)) {
+        return res.send('success')
+      }
+
       if (msg.msgType === 'event' && msg.event === 'subscribe') {
         res.send('success')
         await sendCustomerServiceMessage(
@@ -131,10 +155,6 @@ export function createWeChatRouter(): Router {
           '我是 George，BIA (Bridging Internationals Association) 的 AI 伙伴 —— 3,500+ USC 国际学生社群。\n\n找活动、选课、sublet、认识人、campus 攻略都可以问我。直接发消息就行。',
         )
         return
-      }
-
-      if (msg.msgId && isDuplicate(msg.msgId)) {
-        return res.send('success')
       }
 
       res.send('success')

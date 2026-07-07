@@ -5,7 +5,7 @@
 // (read from ?token= once, then kept in localStorage).
 
 export function renderDashboardHtml(): string {
-  return String.raw`<!doctype html>
+  return `<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8" />
@@ -272,12 +272,30 @@ function refresh(silent){
 }
 
 // ── helpers ──
-const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// esc() escapes & < > " AND ' (single quotes) — a value interpolated into a
+// single-quoted attribute (e.g. title='...') would otherwise break out.
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Auto-escaping HTML template. html\`\` runs every interpolation through esc() by
+// default (single quotes included), so user-derived strings (content, names, handles,
+// observations) stay inert even if a future edit forgets an explicit esc(). Wrap
+// already-safe HTML in raw() to opt out; nested html\`\` results and arrays of them
+// compose without double-escaping; the value coerces to its HTML string via toString
+// when assigned to .innerHTML. This makes escaping the DEFAULT, not a forgotten call.
+function raw(s){ return {__raw:String(s==null?'':s),toString(){return this.__raw;}}; }
+function isRaw(v){ return v!=null&&typeof v==='object'&&typeof v.__raw==='string'; }
+function html(strings,...vals){
+  let out=strings[0];
+  for(let i=0;i<vals.length;i++){
+    const v=vals[i];
+    out+=(isRaw(v)?v.__raw:Array.isArray(v)?v.map(x=>isRaw(x)?x.__raw:esc(x)).join(''):esc(v))+strings[i+1];
+  }
+  return raw(out);
+}
 const fmt=n=>n==null?'—':Number(n).toLocaleString('en-US');
 const money=n=>n==null?'—':'$'+Number(n).toFixed(n<1?4:2);
 function ago(iso){ if(!iso) return '—'; const s=(Date.now()-new Date(iso))/1000; if(s<60)return Math.floor(s)+'s'; if(s<3600)return Math.floor(s/60)+'m'; if(s<86400)return Math.floor(s/3600)+'h'; return Math.floor(s/86400)+'d'; }
 function hm(iso){ return iso? new Date(iso).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—'; }
-function barList(items,max){ if(!items||!items.length) return '<div class="empty">暂无数据</div>'; const m=max||Math.max(...items.map(i=>i.count),1); return '<div class="bars">'+items.map(i=>'<div class="bar"><span class="lbl" title="'+esc(i.label)+'">'+esc(i.label)+'</span><span class="track"><span class="fill" style="width:'+Math.max(3,Math.round(i.count/m*100))+'%"></span></span><span class="n">'+fmt(i.count)+'</span></div>').join('')+'</div>'; }
+function barList(items,max){ if(!items||!items.length) return html\`<div class="empty">暂无数据</div>\`; const m=max||Math.max(...items.map(i=>i.count),1); return html\`<div class="bars">\${items.map(i=>html\`<div class="bar"><span class="lbl" title="\${i.label}">\${i.label}</span><span class="track"><span class="fill" style="width:\${Math.max(3,Math.round(i.count/m*100))}%"></span></span><span class="n">\${fmt(i.count)}</span></div>\`)}</div>\`; }
 
 // ── OVERVIEW ──
 async function loadOverview(){
@@ -299,14 +317,14 @@ async function loadOverview(){
       +'</div>'
       +'<div class="panel"><h3>消息量趋势 <span class="tag">近 14 天 · 用户 vs George</span></h3>'+lineChart(ts)+'</div>'
       +'<div class="row2">'
-        +'<div class="panel"><h3>工具使用分布 <span class="tag">每轮调用的 george 工具 · single-agent 也适用</span></h3>'+((dist.tools&&dist.tools.length)?barList(dist.tools):'<div class="empty">工具数据从新对话开始采集（telemetry）</div>')+'</div>'
-        +'<div class="panel"><h3>渠道分布 <span class="tag">channel</span></h3>'+(dist.channels.length?barList(dist.channels):'<div class="empty">渠道数据从新对话开始采集</div>')+'</div>'
+        +'<div class="panel"><h3>工具使用分布 <span class="tag">每轮调用的 george 工具 · single-agent 也适用 · 近 10k 条消息</span></h3>'+((dist.tools&&dist.tools.length)?barList(dist.tools):'<div class="empty">工具数据从新对话开始采集（telemetry）</div>')+'</div>'
+        +'<div class="panel"><h3>渠道分布 <span class="tag">channel · 近 10k 条消息</span></h3>'+(dist.channels.length?barList(dist.channels):'<div class="empty">渠道数据从新对话开始采集</div>')+'</div>'
       +'</div>'
-      +(cov<100?'<div class="note">📊 Telemetry 覆盖率 '+cov+'%（'+fmt(o.telemetry.messagesWithTokens)+'/'+fmt(o.totals.messages)+' 条带 token）。历史消息无 token/cost（reactive 路径此前丢弃了 SDK usage）；新对话开始已逐条采集。</div>':'');
+      +(cov<100?'<div class="note">📊 Telemetry 覆盖率 '+cov+'%（'+fmt(o.telemetry.messagesWithTokens)+'/'+fmt(o.telemetry.assistantMessages)+' 条 assistant 回合带 token；分母与百分比一致）。历史消息无 token/cost（reactive 路径此前丢弃了 SDK usage）；新对话开始已逐条采集。</div>':'');
     stamp();
   }catch(e){ sec.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
 }
-function card(k,v,s,cls){ return '<div class="card"><div class="k">'+esc(k)+'</div><div class="v '+(cls||'')+'">'+v+'</div>'+(s?'<div class="s">'+esc(s)+'</div>':'')+'</div>'; }
+function card(k,v,s,cls){ return html\`<div class="card"><div class="k">\${k}</div><div class="v \${raw(cls||'')}">\${raw(v)}</div>\${s?html\`<div class="s">\${s}</div>\`:''}</div>\`; }
 
 function lineChart(ts){
   if(!ts||!ts.length) return '<div class="empty">暂无数据</div>';
@@ -352,19 +370,7 @@ async function loadLive(silent){
 function setLiveScope(t){ liveOnlyToday=t; loadLive(); }
 function renderMsg(m){
   const isUser=m.role==='user';
-  const who=m.who?esc(m.who):'';
-  return '<div class="msg '+(isUser?'user':'assistant')+'">'
-    +'<div class="av">'+(isUser?'U':'G')+'</div>'
-    +'<div class="body"><div class="top">'
-      +'<span class="id">'+(isUser?'👤 ':'🎓 ')+esc(m.handleShort)+'</span>'
-      +(who?'<span class="badge">'+who+'</span>':'')
-      +(m.agent?'<span class="badge agent">'+esc(m.agent)+'</span>':'')
-      +(m.channel?'<span class="badge ch">'+esc(m.channel)+'</span>':'')
-      +(m.tokens?'<span class="badge">'+fmt(m.tokens)+' tok</span>':'')
-      +(m.costUsd?'<span class="badge cost">'+money(m.costUsd)+'</span>':'')
-      +'<div class="spacer" style="flex:1"></div><span class="time">'+ago(m.createdAt)+'前 · '+hm(m.createdAt)+'</span>'
-      +(!isUser&&m.id?'<button class="btn sm flag" title="标记为坏回合（off-voice/编造/错误）" onclick="flagTurn(this,'+JSON.stringify(m.id).replace(/"/g,'&quot;')+')">👎</button>':'')
-    +'</div><div class="content">'+esc(m.content)+'</div></div></div>';
+  return html\`<div class="msg \${isUser?'user':'assistant'}"><div class="av">\${isUser?'U':'G'}</div><div class="body"><div class="top"><span class="id">\${isUser?'👤 ':'🎓 '}\${m.handleShort}</span>\${m.who?html\`<span class="badge">\${m.who}</span>\`:''}\${m.agent?html\`<span class="badge agent">\${m.agent}</span>\`:''}\${m.channel?html\`<span class="badge ch">\${m.channel}</span>\`:''}\${m.tokens?html\`<span class="badge">\${fmt(m.tokens)} tok</span>\`:''}\${m.costUsd?html\`<span class="badge cost">\${money(m.costUsd)}</span>\`:''}<div class="spacer" style="flex:1"></div><span class="time">\${ago(m.createdAt)}前 · \${hm(m.createdAt)}</span>\${!isUser&&m.id?raw('<button class="btn sm flag" title="标记为坏回合（off-voice/编造/错误）" onclick="flagTurn(this,'+JSON.stringify(m.id).replace(/"/g,'&quot;')+')">👎</button>'):''}</div><div class="content">\${m.content}</div></div></div>\`;
 }
 
 // Flag a George turn as a bad reply. Optional reason via prompt(); POSTs the flag
@@ -385,32 +391,22 @@ async function loadUsers(){
   const sec=document.getElementById('users');
   try{
     const rows=await api('/users?limit=150');
-    sec.innerHTML='<div class="panel"><h3>对话用户 <span class="tag">'+rows.length+' 人 · 按最近活跃排序</span></h3>'
+    sec.innerHTML='<div class="panel"><h3>对话用户 <span class="tag">'+rows.length+' 人 · 按最近活跃排序 · 近 10k 条消息</span></h3>'
       +'<div style="overflow-x:auto"><table><thead><tr>'
       +'<th>用户</th><th>身份</th><th class="num">消息</th><th class="num">提问</th><th class="num">Tokens</th><th class="num">成本</th><th>最近活跃</th><th>Heartbeat</th><th></th>'
       +'</tr></thead><tbody>'
       + rows.map(r=>{
           const hb = r.heartbeat? (r.heartbeat.paused?'<span class="pill paused">已暂停</span>':'<span class="pill live">运行中</span>') : '<span class="pill none">未配置</span>';
-          const who = r.name? esc(r.name) : (r.major? esc(r.major+' '+(r.year||'')) : (r.hasStudent?'<span class="skel">学生</span>':'<span class="skel">访客</span>'));
-          return '<tr>'
-            +'<td><strong>'+esc(r.handleShort)+'</strong>'+(r.onboarded?' <span class="badge cost">✓</span>':'')+ctrlBadges(r.control)+'</td>'
-            +'<td>'+who+'</td>'
-            +'<td class="num">'+fmt(r.messages)+'</td>'
-            +'<td class="num">'+fmt(r.questions)+'</td>'
-            +'<td class="num">'+(r.tokens?fmt(r.tokens):'—')+'</td>'
-            +'<td class="num">'+(r.costUsd?money(r.costUsd):'—')+'</td>'
-            +'<td>'+ago(r.lastActive)+'前</td>'
-            +'<td>'+hb+'</td>'
-            +'<td><button class="btn sm" onclick="openUser('+JSON.stringify(r.userId).replace(/"/g,'&quot;')+')">查看</button></td>'
-          +'</tr>';
+          const who = r.name? html\`\${r.name}\` : (r.major? html\`\${r.major+' '+(r.year||'')}\` : raw(r.hasStudent?'<span class="skel">学生</span>':'<span class="skel">访客</span>'));
+          return html\`<tr><td><strong>\${r.handleShort}</strong>\${r.onboarded?raw(' <span class="badge cost">✓</span>'):''}\${ctrlBadges(r.control)}</td><td>\${who}</td><td class="num">\${fmt(r.messages)}</td><td class="num">\${fmt(r.questions)}</td><td class="num">\${r.tokens?fmt(r.tokens):'—'}</td><td class="num">\${r.costUsd?money(r.costUsd):'—'}</td><td>\${ago(r.lastActive)}前</td><td>\${raw(hb)}</td><td><button class="btn sm" onclick="openUser(\${raw(JSON.stringify(r.userId).replace(/"/g,'&quot;'))})">查看</button></td></tr>\`;
         }).join('')
       +'</tbody></table></div></div>';
     stamp();
   }catch(e){ sec.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
 }
 
-function shortModel(m){ return String(m).replace('claude-','').replace(/-\d{8}$/,'').replace('-4-','4.'); }
-function ctrlBadges(c){ if(!c) return ''; let s=''; if(c.blocked) s+=' <span class="badge block">🚫封禁</span>'; if(c.modelOverride) s+=' <span class="badge model">主·'+esc(shortModel(c.modelOverride))+'</span>'; if(c.emotionalModel) s+=' <span class="badge model">情·'+esc(shortModel(c.emotionalModel))+'</span>'; if(c.dailyMessageLimit!=null) s+=' <span class="badge lim">限'+c.dailyMessageLimit+'/日</span>'; return s; }
+function shortModel(m){ return String(m).replace('claude-','').replace(/-\\d{8}$/,'').replace('-4-','4.'); }
+function ctrlBadges(c){ if(!c) return raw(''); let s=''; if(c.blocked) s+=' <span class="badge block">🚫封禁</span>'; if(c.modelOverride) s+=String(html\` <span class="badge model">主·\${shortModel(c.modelOverride)}</span>\`); if(c.emotionalModel) s+=String(html\` <span class="badge model">情·\${shortModel(c.emotionalModel)}</span>\`); if(c.dailyMessageLimit!=null) s+=' <span class="badge lim">限'+c.dailyMessageLimit+'/日</span>'; return raw(s); }
 
 // ── USER drawer ──
 async function openUser(id){
@@ -428,24 +424,7 @@ async function openUser(id){
     const p=d.profile||{};
     const blocks=['identity','academic','interests','relationships','state','george_notes'];
     const st=d.student;
-    document.getElementById('drawerBody').innerHTML=
-      '<div class="grid cards" style="grid-template-columns:repeat(3,1fr)">'
-        +card('消息',fmt(d.stats.messages))
-        +card('Tokens',d.stats.tokens?fmt(d.stats.tokens):'—')
-        +card('成本',d.stats.costUsd?money(d.stats.costUsd):'—','','good')
-      +'</div>'
-      +(st?'<div class="note">学生档案：'+esc(st.name||'(无名)')+' · '+esc(st.major||'—')+' · '+esc(st.year||'—')+' · onboarded='+(st.onboarding_complete?'是':'否')+'</div>':'<div class="note">未匹配到 students 记录（访客 / 仅 web 会话）。</div>')
-      +(d.heartbeat?'<div class="note">Heartbeat：cadence='+esc(d.heartbeat.cadence||'—')+' · 活跃 '+esc((d.heartbeat.active_hours_start||'')+'-'+(d.heartbeat.active_hours_end||''))+' · '+(d.heartbeat.paused?'已暂停':'运行中')+' · proactive 同意='+(d.heartbeat.consent_proactive_messages?'是':'否')+'</div>':'')
-      +controlsPanel(d)
-      +'<div class="panel"><h3>记忆档案 <span class="tag">user_profiles 6 blocks</span></h3><div class="blocks">'
-        + blocks.map(b=>'<div class="block"><div class="bk">'+b.replace('_',' ')
-            +(p[b]?'<button class="del" title="清空此 block（不可撤销）" onclick="clearBlock('+JSON.stringify(b).replace(/"/g,'&quot;')+')">🗑 清空</button>':'')
-          +'</div><div class="bv">'+(p[b]?esc(p[b]):'<span class="skel">空</span>')+'</div></div>').join('')
-      +'</div></div>'
-      +renderObsPanel(d)
-      +'<div class="panel"><h3>对话记录 <span class="tag">'+d.conversation.length+' 条</span></h3><div class="convo">'
-        + (d.conversation.length? d.conversation.map(renderConvoMsg).join('') : '<div class="empty">无记录</div>')
-      +'</div></div>';
+    document.getElementById('drawerBody').innerHTML=html\`<div class="grid cards" style="grid-template-columns:repeat(3,1fr)">\${card('消息',fmt(d.stats.messages))}\${card('Tokens',d.stats.tokens?fmt(d.stats.tokens):'—')}\${card('成本',d.stats.costUsd?money(d.stats.costUsd):'—','','good')}</div>\${st?html\`<div class="note">学生档案：\${st.name||'(无名)'} · \${st.major||'—'} · \${st.year||'—'} · onboarded=\${st.onboarding_complete?'是':'否'}</div>\`:raw('<div class="note">未匹配到 students 记录（访客 / 仅 web 会话）。</div>')}\${d.heartbeat?html\`<div class="note">Heartbeat：cadence=\${d.heartbeat.cadence||'—'} · 活跃 \${(d.heartbeat.active_hours_start||'')+'-'+(d.heartbeat.active_hours_end||'')} · \${d.heartbeat.paused?'已暂停':'运行中'} · proactive 同意=\${d.heartbeat.consent_proactive_messages?'是':'否'}</div>\`:''}\${controlsPanel(d)}<div class="panel"><h3>记忆档案 <span class="tag">user_profiles 6 blocks</span></h3><div class="blocks">\${blocks.map(b=>html\`<div class="block"><div class="bk">\${raw(b.replace('_',' '))}\${p[b]?raw('<button class="del" title="清空此 block（不可撤销）" onclick="clearBlock('+JSON.stringify(b).replace(/"/g,'&quot;')+')">🗑 清空</button>'):''}</div><div class="bv">\${p[b]?p[b]:raw('<span class="skel">空</span>')}</div></div>\`)}</div></div>\${renderObsPanel(d)}<div class="panel"><h3>对话记录 <span class="tag">\${d.conversation.length} 条</span></h3><div class="convo">\${d.conversation.length? d.conversation.map(renderConvoMsg) : raw('<div class="empty">无记录</div>')}</div></div>\`;
   }catch(e){ document.getElementById('drawerBody').innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
 }
 // Observations panel (read-only). Three states: rows, "未迁移" (table absent in
@@ -453,21 +432,15 @@ async function openUser(id){
 function renderObsPanel(d){
   const obs=d.observations||[];
   let inner;
-  if(obs.length) inner='<div class="obs">'+obs.map(renderObs).join('')+'</div>';
-  else if(d.observationsTableMissing) inner='<div class="empty">该表未迁移（user_observations 不在此环境）</div>';
-  else if(d.observationsError) inner='<div class="empty" style="color:var(--bad)">观察加载失败（权限/超时/查询错误）— 不是「没有观察」</div>';
-  else inner='<div class="empty">暂无观察记忆</div>';
-  return '<div class="panel"><h3>观察记忆 <span class="tag">user_observations · 按 salience 排序'+(obs.length?' · '+obs.length+' 条':'')+'</span></h3>'+inner+'</div>';
+  if(obs.length) inner=html\`<div class="obs">\${obs.map(renderObs)}</div>\`;
+  else if(d.observationsTableMissing) inner=html\`<div class="empty">该表未迁移（user_observations 不在此环境）</div>\`;
+  else if(d.observationsError) inner=html\`<div class="empty" style="color:var(--bad)">观察加载失败（权限/超时/查询错误）— 不是「没有观察」</div>\`;
+  else inner=html\`<div class="empty">暂无观察记忆</div>\`;
+  return html\`<div class="panel"><h3>观察记忆 <span class="tag">user_observations · 按 salience 排序\${obs.length?' · '+obs.length+' 条':''}</span></h3>\${inner}</div>\`;
 }
 function renderObs(o){
   const hi=Number(o.salience)>=4?' hi':'';
-  return '<div class="o"><span class="sal'+hi+'">S'+esc(String(o.salience))+'</span>'
-    +'<div style="flex:1"><div class="otext">'+esc(o.content)+'</div>'
-    +'<div class="ometa">'+(o.kind?'<span>'+esc(o.kind)+'</span>':'')
-      +(o.consolidated?'<span>已固化</span>':'')
-      +'<span>'+ago(o.createdAt)+'前</span>'
-      +'<button class="del" title="删除这条观察（不可撤销）" onclick="delObs('+JSON.stringify(o.id).replace(/"/g,'&quot;')+')">🗑 删除</button>'
-    +'</div></div></div>';
+  return html\`<div class="o"><span class="sal\${raw(hi)}">S\${String(o.salience)}</span><div style="flex:1"><div class="otext">\${o.content}</div><div class="ometa">\${o.kind?html\`<span>\${o.kind}</span>\`:''}\${o.consolidated?raw('<span>已固化</span>'):''}<span>\${ago(o.createdAt)}前</span><button class="del" title="删除这条观察（不可撤销）" onclick="delObs(\${raw(JSON.stringify(o.id).replace(/"/g,'&quot;'))})">🗑 删除</button></div></div></div>\`;
 }
 // Two-step destructive confirm: an accessible modal (focus-trapped, Esc cancels,
 // Tab cycles within the dialog) with an explicit warning ICON + TEXT (not red
@@ -475,11 +448,7 @@ function renderObs(o){
 function confirmDanger(opts){
   const trigger=document.activeElement;
   const scrim=document.createElement('div'); scrim.className='cdscrim';
-  scrim.innerHTML='<div class="cd" role="alertdialog" aria-modal="true" aria-labelledby="cdh">'
-    +'<div class="cdh" id="cdh">⚠️ '+esc(opts.title)+'</div>'
-    +'<div class="cdb">'+esc(opts.body)+'</div>'
-    +'<div class="cdf"><button class="btn" id="cdCancel">取消</button>'
-    +'<button class="btn danger" id="cdOk">🗑 '+esc(opts.confirmLabel||'确认删除')+'</button></div></div>';
+  scrim.innerHTML=html\`<div class="cd" role="alertdialog" aria-modal="true" aria-labelledby="cdh"><div class="cdh" id="cdh">⚠️ \${opts.title}</div><div class="cdb">\${opts.body}</div><div class="cdf"><button class="btn" id="cdCancel">取消</button><button class="btn danger" id="cdOk">🗑 \${opts.confirmLabel||'确认删除'}</button></div></div>\`;
   document.body.appendChild(scrim);
   const cancel=scrim.querySelector('#cdCancel'), ok=scrim.querySelector('#cdOk');
   const focusables=[cancel,ok];
@@ -514,14 +483,7 @@ async function delObs(oid){
 }
 function renderConvoMsg(m){
   const isUser=m.role==='user';
-  return '<div class="msg '+(isUser?'user':'assistant')+'"><div class="av">'+(isUser?'U':'G')+'</div><div class="body">'
-    +'<div class="top"><span class="id">'+(isUser?'用户':'George')+'</span>'
-    +(m.agent?'<span class="badge agent">'+esc(m.agent)+'</span>':'')
-    +(m.tokens?'<span class="badge">'+fmt(m.tokens)+' tok</span>':'')
-    +'<div class="spacer" style="flex:1"></div><span class="time">'+hm(m.createdAt)+'</span>'
-    +(!isUser&&m.id?'<button class="btn sm flag" title="标记为坏回合" onclick="flagTurn(this,'+JSON.stringify(m.id).replace(/"/g,'&quot;')+')">👎</button>':'')
-    +'</div>'
-    +'<div class="content">'+esc(m.content)+'</div></div></div>';
+  return html\`<div class="msg \${isUser?'user':'assistant'}"><div class="av">\${isUser?'U':'G'}</div><div class="body"><div class="top"><span class="id">\${isUser?'用户':'George'}</span>\${m.agent?html\`<span class="badge agent">\${m.agent}</span>\`:''}\${m.tokens?html\`<span class="badge">\${fmt(m.tokens)} tok</span>\`:''}<div class="spacer" style="flex:1"></div><span class="time">\${hm(m.createdAt)}</span>\${!isUser&&m.id?raw('<button class="btn sm flag" title="标记为坏回合" onclick="flagTurn(this,'+JSON.stringify(m.id).replace(/"/g,'&quot;')+')">👎</button>'):''}</div><div class="content">\${m.content}</div></div></div>\`;
 }
 // Model options are fetched from /admin/api/models per TIER (main / emotional),
 // each derived from the deployment's model catalog (env-filtered), cached after
@@ -539,7 +501,7 @@ async function loadModels(){
 }
 function modelOptions(models,cur){
   const known=models.some(m=>m[0]===cur);
-  return models.map(m=>'<option value="'+esc(m[0])+'"'+(m[0]===cur?' selected':'')+'>'+esc(m[1])+'</option>').join('')+'<option value="__custom"'+((!known&&cur)?' selected':'')+'>自定义…</option>';
+  return html\`\${models.map(m=>html\`<option value="\${m[0]}"\${m[0]===cur?raw(' selected'):''}>\${m[1]}</option>\`)}<option value="__custom"\${(!known&&cur)?raw(' selected'):''}>自定义…</option>\`;
 }
 function controlsPanel(d){
   const c=d.controls||{}, u=d.usage||{};
@@ -549,19 +511,7 @@ function controlsPanel(d){
   const curEmo=c.emotionalModel||'';
   const mKnown=MODELS_MAIN.some(m=>m[0]===curMain), eKnown=MODELS_EMO.some(m=>m[0]===curEmo);
   const usageStr = u.limit!=null ? (u.used+' / '+u.limit+' 条（今日）') : (u.used+' 条（今日）· 无限额');
-  return '<div class="panel"><h3>使用控制 <span class="tag">主/情绪模型 · 每日限额 · 封禁</span></h3>'
-    +'<div class="ctrl-grid">'
-      +'<label>主模型 Main<span class="tag">orchestrator + 子agent</span><select id="ctlModel" onchange="onModelSel(\'ctlModel\',\'ctlCustomWrap\')">'+modelOptions(MODELS_MAIN,curMain)+'</select></label>'
-      +'<label id="ctlCustomWrap" class="'+((!mKnown&&curMain)?'':'hide')+'">自定义主模型 ID<input id="ctlCustom" value="'+((!mKnown&&curMain)?esc(curMain):'')+'" placeholder="e.g. deepseek-chat"></label>'
-      +'<label>情绪模型 Emotional<span class="tag">快速回复 fast-path</span><select id="ctlEmo" onchange="onModelSel(\'ctlEmo\',\'ctlEmoCustomWrap\')">'+modelOptions(MODELS_EMO,curEmo)+'</select></label>'
-      +'<label id="ctlEmoCustomWrap" class="'+((!eKnown&&curEmo)?'':'hide')+'">自定义情绪模型 ID<input id="ctlEmoCustom" value="'+((!eKnown&&curEmo)?esc(curEmo):'')+'" placeholder="e.g. doubao-seed-2-0-lite-260215"></label>'
-      +'<label>每日消息上限<input id="ctlLimit" type="number" min="0" value="'+(c.dailyMessageLimit!=null?c.dailyMessageLimit:'')+'" placeholder="留空 = 不限"></label>'
-      +'<label class="ck"><input id="ctlBlocked" type="checkbox"'+(c.blocked?' checked':'')+'> 封禁此用户（直接拒绝，不调用模型）</label>'
-      +'<label class="fb">封禁/限额时给用户看的提示语（留空用默认）<textarea id="ctlFeedback" rows="2" placeholder="例如：你的提问额度今天用完啦，明天再来找学长哈～">'+(c.feedbackMessage?esc(c.feedbackMessage):'')+'</textarea></label>'
-    +'</div>'
-    +'<div class="ctrl-foot"><span class="usage">今日用量 '+esc(usageStr)+'</span><button class="btn" onclick="saveControls()">保存控制</button></div>'
-    +(c.updatedAt?'<div class="skel" style="font-size:11px;margin-top:8px">上次更新 '+hm(c.updatedAt)+' · by '+esc(c.updatedBy||'—')+'</div>':'')
-    +'<div id="ctlMsg" class="err"></div></div>';
+  return html\`<div class="panel"><h3>使用控制 <span class="tag">主/情绪模型 · 每日限额 · 封禁</span></h3><div class="ctrl-grid"><label>主模型 Main<span class="tag">orchestrator + 子agent</span><select id="ctlModel" onchange="onModelSel(\\'ctlModel\\',\\'ctlCustomWrap\\')">\${modelOptions(MODELS_MAIN,curMain)}</select></label><label id="ctlCustomWrap" class="\${raw((!mKnown&&curMain)?'':'hide')}">自定义主模型 ID<input id="ctlCustom" value="\${(!mKnown&&curMain)?curMain:''}" placeholder="e.g. deepseek-chat"></label><label>情绪模型 Emotional<span class="tag">快速回复 fast-path</span><select id="ctlEmo" onchange="onModelSel(\\'ctlEmo\\',\\'ctlEmoCustomWrap\\')">\${modelOptions(MODELS_EMO,curEmo)}</select></label><label id="ctlEmoCustomWrap" class="\${raw((!eKnown&&curEmo)?'':'hide')}">自定义情绪模型 ID<input id="ctlEmoCustom" value="\${(!eKnown&&curEmo)?curEmo:''}" placeholder="e.g. doubao-seed-2-0-lite-260215"></label><label>每日消息上限<input id="ctlLimit" type="number" min="0" value="\${c.dailyMessageLimit!=null?c.dailyMessageLimit:''}" placeholder="留空 = 不限"></label><label class="ck"><input id="ctlBlocked" type="checkbox"\${c.blocked?raw(' checked'):''}> 封禁此用户（直接拒绝，不调用模型）</label><label class="fb">封禁/限额时给用户看的提示语（留空用默认）<textarea id="ctlFeedback" rows="2" placeholder="例如：你的提问额度今天用完啦，明天再来找学长哈～">\${c.feedbackMessage?c.feedbackMessage:''}</textarea></label></div><div class="ctrl-foot"><span class="usage">今日用量 \${usageStr}</span><button class="btn" onclick="saveControls()">保存控制</button></div>\${c.updatedAt?html\`<div class="skel" style="font-size:11px;margin-top:8px">上次更新 \${hm(c.updatedAt)} · by \${c.updatedBy||'—'}</div>\`:''}<div id="ctlMsg" class="err"></div></div>\`;
 }
 function onModelSel(selId,wrapId){ const sel=document.getElementById(selId),w=document.getElementById(wrapId); if(w) w.classList.toggle('hide',sel.value!=='__custom'); }
 async function saveControls(){
@@ -632,31 +582,19 @@ async function loadReview(){
 // blank); when ON+hits it lists each student for a human to act on per the SOP.
 function renderCrisisPanel(cr){
   if(!cr.enabled){
-    return '<div class="panel crisis off"><h3>🛟 安危雷达 <span class="tag">未启用 · 需先定危机响应 SOP（谁看 / 多久 / 升级给谁 / 非工作时间）</span></h3>'
-      +'<div class="empty">雷达已就绪但未开启。定好 SOP 后设 GEORGE_CRISIS_RADAR_ENABLED=true 再上线。</div></div>';
+    return html\`<div class="panel crisis off"><h3>🛟 安危雷达 <span class="tag">未启用 · 需先定危机响应 SOP（谁看 / 多久 / 升级给谁 / 非工作时间）</span></h3><div class="empty">雷达已就绪但未开启。定好 SOP 后设 GEORGE_CRISIS_RADAR_ENABLED=true 再上线。</div></div>\`;
   }
   const q=cr.queue||[];
   if(!q.length){
-    return '<div class="panel crisis ok"><h3>🛟 安危雷达 <span class="tag">实时扫描学生消息 + 情绪观察</span></h3>'
-      +'<div class="empty">这会儿没人需要 check-in，一切安好 🌿</div></div>';
+    return html\`<div class="panel crisis ok"><h3>🛟 安危雷达 <span class="tag">实时扫描学生消息 + 情绪观察</span></h3><div class="empty">这会儿没人需要 check-in，一切安好 🌿</div></div>\`;
   }
-  return '<div class="panel crisis hit"><h3>🛟 安危雷达 <span class="tag">'+q.length+' 位可能需要关注 · 按 SOP 处理</span></h3>'
-    +'<div class="rev">'+q.map(renderDistress).join('')+'</div></div>';
+  return html\`<div class="panel crisis hit"><h3>🛟 安危雷达 <span class="tag">\${q.length} 位可能需要关注 · 按 SOP 处理</span></h3><div class="rev">\${q.map(renderDistress)}</div></div>\`;
 }
 function renderDistress(h){
-  return '<div class="r crisisrow"><div class="rtop">'
-    +'<span class="badge block">'+esc(h.handleShort||'—')+'</span>'
-    +(h.signals||[]).map(x=>'<span class="sig danger">'+esc(x)+'</span>').join('')
-    +'<span class="badge">'+esc(h.source==='observation'?'情绪观察':'消息')+'</span>'
-    +'<div class="spacer" style="flex:1"></div><span>'+ago(h.createdAt)+'前</span></div>'
-    +'<div class="rtext">'+esc(h.snippet||'')+'</div></div>';
+  return html\`<div class="r crisisrow"><div class="rtop"><span class="badge block">\${h.handleShort||'—'}</span>\${(h.signals||[]).map(x=>html\`<span class="sig danger">\${x}</span>\`)}<span class="badge">\${h.source==='observation'?'情绪观察':'消息'}</span><div class="spacer" style="flex:1"></div><span>\${ago(h.createdAt)}前</span></div><div class="rtext">\${h.snippet||''}</div></div>\`;
 }
 function renderInjection(e){
-  return '<div class="r"><div class="rtop">'
-    +'<span>'+esc(e.handleShort||'—')+'</span>'
-    +(e.source?'<span class="badge ch">'+esc(e.source)+'</span>':'')
-    +'<div class="spacer" style="flex:1"></div><span>'+ago(e.createdAt)+'前</span></div>'
-    +(e.preview?'<div class="rtext skel">'+esc(e.preview)+'</div>':'')+'</div>';
+  return html\`<div class="r"><div class="rtop"><span>\${e.handleShort||'—'}</span>\${e.source?html\`<span class="badge ch">\${e.source}</span>\`:''}<div class="spacer" style="flex:1"></div><span>\${ago(e.createdAt)}前</span></div>\${e.preview?html\`<div class="rtext skel">\${e.preview}</div>\`:''}</div>\`;
 }
 // Set/clear the 复盘 tab badge — only shows when there is at least one crisis hit.
 function setCrisisBadge(n){
@@ -668,27 +606,13 @@ function setCrisisBadge(n){
 }
 // Lightweight boot probe so the crisis badge can appear without opening 复盘.
 async function refreshCrisisBadge(){
-  try{ const d=await api('/review'); const cr=d.crisis||{}; setCrisisBadge(cr.enabled?(cr.queue||[]).length:0); }catch(e){}
+  try{ const d=await api('/review/crisis-count'); setCrisisBadge(d.count||0); }catch(e){}
 }
 function renderFlag(f){
-  return '<div class="r"><div class="rtop">'
-    +'<span class="badge block">'+esc(f.kind||'bad_turn')+'</span>'
-    +'<span>'+esc(f.handleShort||'—')+'</span>'
-    +(f.agent?'<span class="badge agent">'+esc(f.agent)+'</span>':'')
-    +(f.model?'<span class="badge model">'+esc(shortModel(f.model))+'</span>':'')
-    +'<div class="spacer" style="flex:1"></div><span>'+esc(f.actor||'')+' · '+ago(f.createdAt)+'前</span></div>'
-    +(f.reason?'<div class="rtext" style="color:var(--warn)">“'+esc(f.reason)+'”</div>':'')
-    +'<div class="rtext">'+(f.content?esc(f.content):'<span class="skel">（原消息已删除，仅存标记）</span>')+'</div></div>';
+  return html\`<div class="r"><div class="rtop"><span class="badge block">\${f.kind||'bad_turn'}</span><span>\${f.handleShort||'—'}</span>\${f.agent?html\`<span class="badge agent">\${f.agent}</span>\`:''}\${f.model?html\`<span class="badge model">\${shortModel(f.model)}</span>\`:''}<div class="spacer" style="flex:1"></div><span>\${f.actor||''} · \${ago(f.createdAt)}前</span></div>\${f.reason?html\`<div class="rtext" style="color:var(--warn)">“\${f.reason}”</div>\`:''}<div class="rtext">\${f.content?f.content:raw('<span class="skel">（原消息已删除，仅存标记）</span>')}</div></div>\`;
 }
 function renderSuspect(s){
-  return '<div class="r"><div class="rtop">'
-    +'<span>'+esc(s.handleShort||'—')+'</span>'
-    +(s.agent?'<span class="badge agent">'+esc(s.agent)+'</span>':'')
-    +(s.signals||[]).map(x=>'<span class="sig">'+esc(x)+'</span>').join('')
-    +'<div class="spacer" style="flex:1"></div>'
-    +'<button class="btn sm flag" title="确认为坏回合" onclick="flagTurn(this,'+JSON.stringify(s.id).replace(/"/g,'&quot;')+')">👎</button>'
-    +'<span style="margin-left:8px">'+ago(s.createdAt)+'前</span></div>'
-    +'<div class="rtext">'+esc(s.content)+'</div></div>';
+  return html\`<div class="r"><div class="rtop"><span>\${s.handleShort||'—'}</span>\${s.agent?html\`<span class="badge agent">\${s.agent}</span>\`:''}\${(s.signals||[]).map(x=>html\`<span class="sig">\${x}</span>\`)}<div class="spacer" style="flex:1"></div><button class="btn sm flag" title="确认为坏回合" onclick="flagTurn(this,\${raw(JSON.stringify(s.id).replace(/"/g,'&quot;'))})">👎</button><span style="margin-left:8px">\${ago(s.createdAt)}前</span></div><div class="rtext">\${s.content}</div></div>\`;
 }
 
 // ── SYSTEM ──

@@ -25,7 +25,15 @@ function requiredUnlessBridge(key: string): string {
 
 export const config = {
   anthropic: {
-    apiKey: requiredUnlessBridge('ANTHROPIC_API_KEY'),
+    // Lazy: importing config.ts must NOT require an LLM key. The throw fires only
+    // when a consumer actually reads the key (e.g. the agent constructing its
+    // Anthropic client), so the dashboard service — which never touches the LLM
+    // path — can transitively import config without an ANTHROPIC_API_KEY. Read per
+    // access (like the previous import-time read) so bridge-mode tolerance and any
+    // test-time env flip stay live.
+    get apiKey(): string {
+      return requiredUnlessBridge('ANTHROPIC_API_KEY');
+    },
   },
   // Two model tiers, env-overridable. FAST = orchestrator routing + small-talk and
   // the light sub-agents (find-people, whats-happening: single-domain lookup + voice
@@ -55,10 +63,20 @@ export const config = {
     // e.g. doubao-seed-1.6 / doubao-seed-code-preview-latest / ark-code-latest.
     model: process.env.DOUBAO_MODEL || '',
   },
+  // Lazy for the same reason as anthropic above (import side-effect free). The db
+  // layer reads SUPABASE_* directly from env (src/db/client.ts), so nothing consumes
+  // config.supabase today; these getters keep the fail-fast for any future consumer
+  // without a validation throw at import time.
   supabase: {
-    url: requiredUnlessBridge('SUPABASE_URL'),
-    anonKey: requiredUnlessBridge('SUPABASE_ANON_KEY'),
-    serviceRoleKey: requiredUnlessBridge('SUPABASE_SERVICE_ROLE_KEY'),
+    get url(): string {
+      return requiredUnlessBridge('SUPABASE_URL');
+    },
+    get anonKey(): string {
+      return requiredUnlessBridge('SUPABASE_ANON_KEY');
+    },
+    get serviceRoleKey(): string {
+      return requiredUnlessBridge('SUPABASE_SERVICE_ROLE_KEY');
+    },
   },
   wechat: {
     token: process.env.WECHAT_TOKEN || '',

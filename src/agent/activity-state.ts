@@ -17,6 +17,7 @@
 // returns '' so prompt assembly is byte-for-byte unchanged.
 
 import { tzHourMinute } from './la-time.js';
+import { getFlags } from '../flags.js';
 
 export type ActivityPhase = 'late-night' | 'sleeping' | 'in-class' | 'busy' | 'awake';
 
@@ -29,7 +30,7 @@ export interface ActivityState {
 }
 
 function flagOn(): boolean {
-  return process.env.GEORGE_ACTIVITY_STATE_ENABLED === 'true';
+  return getFlags().activityStateEnabled;
 }
 
 // Classify a plausible state from the LA wall-clock hour. Windows are

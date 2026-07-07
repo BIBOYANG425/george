@@ -17,6 +17,10 @@ export interface LLMClient {
     userPrompt: string;
     tools: Array<{ name: string; description: string; inputSchema: z.ZodSchema }>;
     maxTokens?: number;
+    // Optional caller abort (e.g. the heartbeat scheduler's per-run timeout). When
+    // provided it is combined with the client's own 30s fetch timeout so EITHER can
+    // cancel the in-flight request. Optional so existing callers are unaffected.
+    signal?: AbortSignal;
   }): Promise<LLMResponse>;
 }
 
@@ -25,7 +29,12 @@ export function createDeepSeekClient(): LLMClient {
   if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
 
   return {
-    async call({ systemPrompt, userPrompt, tools, maxTokens }) {
+    async call({ systemPrompt, userPrompt, tools, maxTokens, signal }) {
+      // Hard 30s ceiling on any single DeepSeek call so a hung upstream can't wedge
+      // a heartbeat run indefinitely. Combine it with the caller's signal (the
+      // scheduler's per-run timeout) via AbortSignal.any so EITHER aborts the fetch.
+      const timeout = AbortSignal.timeout(30_000);
+      const fetchSignal = signal ? AbortSignal.any([timeout, signal]) : timeout;
       const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -49,6 +58,7 @@ export function createDeepSeekClient(): LLMClient {
           tool_choice: 'required',
           max_tokens: maxTokens ?? 800,
         }),
+        signal: fetchSignal,
       });
       if (!res.ok) {
         const body = await res.text();

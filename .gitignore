@@ -10,3 +10,6 @@ data/user-controls.json
 
 # Scored-conversation eval harness output (report-<timestamp>.json + .md)
 tests/eval/conversation/.out/
+
+# Review-fix scratch reports (.fixreport-*.md) — never commit
+.fixreport-*.md

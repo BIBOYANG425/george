@@ -35,6 +35,7 @@ import { getWorldStateStore, worldStateEnabled } from './world-state.js';
 import { fastReply } from './fast-path.js';
 import { detectUnsourcedClaim } from './fast-path-guard.js';
 import { checkUsageAllowed, getMainModelOverride, resolveEmotionalModelForUser } from '../admin/user-controls.js';
+import { getFlags } from '../flags.js';
 
 // Register george's 23 tools as an in-process SDK MCP server so the model can
 // actually CALL them. Without this, the orchestrator/sub-agents only had tool
@@ -194,6 +195,66 @@ function buildMemoryToolsContextBlock(handle?: string | null): string {
   return lines.join('\n');
 }
 
+// ── Shared per-turn overlay stack ────────────────────────────────────────
+// The single, ordered list of per-turn overlay blocks that ALL FOUR prompt
+// builders (orchestrator / single-agent / trunk / agents-config) layer on top of
+// their base prompt. Extracted so the four builders can't drift: they used to
+// each hand-roll this sequence, and a block added to one but not another silently
+// diverged the prompts. Returns the non-empty blocks IN ORDER; each caller joins
+// them with '\n\n' and appends its own tail (web guidance / skill catalog / the
+// per-agent web block).
+//
+// The clock/profile-derived blocks (date, mood, activity, user profile, onboarding
+// nudge, student id) are computed HERE from the raw inputs — identical across every
+// builder. The flag-gated blocks (delayContext, worldStateBlock, relationshipNote,
+// recall, memoryTools) are passed in PRE-RENDERED so a caller that doesn't use one
+// simply omits it (→ '' → filtered out). agents-config omits worldState /
+// relationshipNote / recall / memoryTools, exactly as before, so its assembled
+// overlay stays the subset it has always been.
+//
+// filter(Boolean) reproduces the old `if (block) parts.push(block)` guards
+// byte-for-byte: an empty ('' / undefined) block is dropped, a non-empty one kept
+// in place. renderDateBlock() is always non-empty, matching the old unconditional
+// push.
+export function buildOverlayStack(i: {
+  profile?: Profile | null;
+  studentId?: string | null;
+  delayContext?: string;
+  worldStateBlock?: string;
+  relationshipNoteBlock?: string;
+  recallBlock?: string;
+  memoryToolsBlock?: string;
+}): string[] {
+  return [
+    // real current date — anchors "now" past the training cutoff
+    renderDateBlock(),
+    // Calendar-mood overlay (master.md "Calendar mood overlay"): the current
+    // academic-calendar tone so finals/orientation/etc. actually shifts behavior.
+    renderMoodBlock(),
+    // Activity-state overlay (time-of-day sibling of the mood): '' unless the
+    // GEORGE_ACTIVITY_STATE_ENABLED flag is on AND the hour shifts tone.
+    renderActivityBlock(),
+    // Delay-context (long-gap note from the transport adapter): already self-gated
+    // upstream — only non-empty when the flag is on and the gap was long.
+    i.delayContext ?? '',
+    // World Info timed-state overlay (P5): pre-rendered by the caller; '' by default.
+    i.worldStateBlock ?? '',
+    buildUserProfileBlock(i.profile),
+    // Relationship note (P3): pre-rendered by the caller; '' unless the eval flag is
+    // on and a note exists (and agents-config never renders it).
+    i.relationshipNoteBlock ?? '',
+    // P6 observational-memory recall ("## THINGS YOU REMEMBER"): pre-rendered via
+    // recallForTurn(). '' when GEORGE_RECALL_ENABLED is unset. Placed right after
+    // the profile so the model sees identity + memories together.
+    i.recallBlock ?? '',
+    isProfileEmpty(i.profile) ? ONBOARDING_NUDGE : '',
+    buildStudentIdBlock(i.studentId),
+    // recall_memory tool context (P6 Phase 5): pre-rendered; '' unless the flag is
+    // on AND a handle was supplied.
+    i.memoryToolsBlock ?? '',
+  ].filter(Boolean);
+}
+
 // `delayContext` (long-gap note), `worldStateBlock` (World Info timed-state
 // overlay) and `recallBlock` (P6 observational-memory "## THINGS YOU REMEMBER")
 // are optional per-turn overlays pre-rendered by the caller. All empty by default,
@@ -208,36 +269,17 @@ export function buildOrchestratorPrompt(
   handle?: string | null,
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
-  parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
-  // Calendar-mood overlay (master.md "Calendar mood overlay"): inject the current
-  // academic-calendar tone so finals/orientation/etc. actually changes behavior.
-  const moodBlock = renderMoodBlock();
-  if (moodBlock) parts.push(moodBlock);
-  // Activity-state overlay (time-of-day sibling of the mood): '' unless the
-  // GEORGE_ACTIVITY_STATE_ENABLED flag is on AND the hour shifts tone.
-  const activityBlock = renderActivityBlock();
-  if (activityBlock) parts.push(activityBlock);
-  // Delay-context (long-gap note from the transport adapter): already self-gated
-  // upstream — only non-empty when the flag is on and the gap was long.
-  if (delayContext) parts.push(delayContext);
-  // World Info timed-state overlay (P5): pre-rendered by the caller; '' by default.
-  if (worldStateBlock) parts.push(worldStateBlock);
-  const userProfileBlock = buildUserProfileBlock(profile);
-  if (userProfileBlock) parts.push(userProfileBlock);
-  const relationshipNoteBlock = buildRelationshipNoteBlock(profile);
-  if (relationshipNoteBlock) parts.push(relationshipNoteBlock);
-  // P6 observational-memory recall ("## THINGS YOU REMEMBER"): pre-rendered by the
-  // caller via recallForTurn(). '' when GEORGE_RECALL_ENABLED is unset, so OFF is
-  // byte-for-byte unchanged. Placed right after the profile so the model sees
-  // identity + memories together.
-  if (recallBlock) parts.push(recallBlock);
-  if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
-  const studentIdBlock = buildStudentIdBlock(studentId);
-  if (studentIdBlock) parts.push(studentIdBlock);
-  // recall_memory tool context (P6 Phase 5): '' unless GEORGE_RECALL_TOOL_ENABLED
-  // is on AND a handle is supplied, so OFF is byte-identical.
-  const memoryToolsBlock = buildMemoryToolsContextBlock(handle);
-  if (memoryToolsBlock) parts.push(memoryToolsBlock);
+  parts.push(
+    ...buildOverlayStack({
+      profile,
+      studentId,
+      delayContext,
+      worldStateBlock,
+      relationshipNoteBlock: buildRelationshipNoteBlock(profile),
+      recallBlock,
+      memoryToolsBlock: buildMemoryToolsContextBlock(handle),
+    }),
+  );
   // Web-search guidance reaches the orchestrator only while the student is under
   // their daily cap (paired with the WebSearch tool in buildOrchestratorToolNames).
   // The orchestrator answers general / current-web queries directly (e.g. "recent
@@ -291,30 +333,18 @@ export function buildSingleAgentPrompt(
   handle?: string | null,
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
-  parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
-  const moodBlock = renderMoodBlock();
-  if (moodBlock) parts.push(moodBlock);
-  // Activity-state overlay (see buildOrchestratorPrompt): self-gated to '' when
-  // GEORGE_ACTIVITY_STATE_ENABLED is off, so this is a no-op by default.
-  const activityBlock = renderActivityBlock();
-  if (activityBlock) parts.push(activityBlock);
-  // Delay-context (long-gap note): self-gated upstream; '' by default.
-  if (delayContext) parts.push(delayContext);
-  // World Info timed-state overlay (P5): pre-rendered by the caller; '' by default.
-  if (worldStateBlock) parts.push(worldStateBlock);
-  const userProfileBlock = buildUserProfileBlock(profile);
-  if (userProfileBlock) parts.push(userProfileBlock);
-  const relationshipNoteBlock = buildRelationshipNoteBlock(profile);
-  if (relationshipNoteBlock) parts.push(relationshipNoteBlock);
-  // P6 observational-memory recall (see buildOrchestratorPrompt): '' by default,
-  // so OFF is byte-for-byte unchanged.
-  if (recallBlock) parts.push(recallBlock);
-  if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
-  const studentIdBlock = buildStudentIdBlock(studentId);
-  if (studentIdBlock) parts.push(studentIdBlock);
-  // recall_memory tool context (P6 Phase 5): '' unless the flag is on, byte-identical OFF.
-  const memoryToolsBlock = buildMemoryToolsContextBlock(handle);
-  if (memoryToolsBlock) parts.push(memoryToolsBlock);
+  // Same ordered overlay stack the orchestrator builds (see buildOverlayStack).
+  parts.push(
+    ...buildOverlayStack({
+      profile,
+      studentId,
+      delayContext,
+      worldStateBlock,
+      relationshipNoteBlock: buildRelationshipNoteBlock(profile),
+      recallBlock,
+      memoryToolsBlock: buildMemoryToolsContextBlock(handle),
+    }),
+  );
   if (webAllowed) parts.push(webSearchGuidance());
   const catalog = getFullCatalog();
   if (catalog) parts.push(catalog);
@@ -395,28 +425,19 @@ export function buildTrunkPrompt(
     BATCH_TOOLS_GUIDANCE,
     COURSE_FASTPATH_GUIDANCE,
   ];
-  // Overlay stack — copied verbatim from buildOrchestratorPrompt / buildSingleAgentPrompt
-  // so the overlays are byte-identical for the same inputs.
-  parts.push(renderDateBlock()); // real current date — anchors "now" past the training cutoff
-  const moodBlock = renderMoodBlock();
-  if (moodBlock) parts.push(moodBlock);
-  const activityBlock = renderActivityBlock();
-  if (activityBlock) parts.push(activityBlock);
-  if (delayContext) parts.push(delayContext);
-  if (worldStateBlock) parts.push(worldStateBlock);
-  const userProfileBlock = buildUserProfileBlock(profile);
-  if (userProfileBlock) parts.push(userProfileBlock);
-  const relationshipNoteBlock = buildRelationshipNoteBlock(profile);
-  if (relationshipNoteBlock) parts.push(relationshipNoteBlock);
-  // P6 observational-memory recall (see buildOrchestratorPrompt): '' by default,
-  // so OFF is byte-for-byte unchanged.
-  if (recallBlock) parts.push(recallBlock);
-  if (isProfileEmpty(profile)) parts.push(ONBOARDING_NUDGE);
-  const studentIdBlock = buildStudentIdBlock(studentId);
-  if (studentIdBlock) parts.push(studentIdBlock);
-  // recall_memory tool context (P6 Phase 5): '' unless the flag is on, byte-identical OFF.
-  const memoryToolsBlock = buildMemoryToolsContextBlock(handle);
-  if (memoryToolsBlock) parts.push(memoryToolsBlock);
+  // Overlay stack — the SAME buildOverlayStack every builder uses, so the overlays
+  // are byte-identical for the same inputs.
+  parts.push(
+    ...buildOverlayStack({
+      profile,
+      studentId,
+      delayContext,
+      worldStateBlock,
+      relationshipNoteBlock: buildRelationshipNoteBlock(profile),
+      recallBlock,
+      memoryToolsBlock: buildMemoryToolsContextBlock(handle),
+    }),
+  );
   if (webAllowed) parts.push(webSearchGuidance());
   const catalog = getFullCatalog();
   if (catalog) parts.push(catalog);
@@ -481,34 +502,26 @@ export function buildAgentsConfig(
   webAllowed: boolean = false,
   delayContext?: string,
 ): Record<string, { description: string; prompt: string; tools: string[]; model?: string }> {
-  // Inject the user profile into each sub-agent so it doesn't have to be
-  // re-stated through the dispatch prompt (it often wasn't). Now know-things
-  // always knows the student's major/year/interests and can personalize.
-  const userProfileBlock = buildUserProfileBlock(profile);
-  // Sub-agents craft the actual reply, so the onboarding nudge has to reach
-  // them too — otherwise "im hungry" gets answered by what's-happening with no
-  // invitation woven in.
-  const nudge = isProfileEmpty(profile) ? ONBOARDING_NUDGE : '';
-  // The squad tools (create/find/join) run INSIDE the find-people sub-agent and
-  // need the real students.id. Inject the id block here too — relying on the
-  // orchestrator to relay it through the dispatch prompt is the loop's softest
-  // seam. With it in-context the sub-agent passes the exact uuid without a relay.
-  const studentIdBlock = buildStudentIdBlock(studentId);
-  // Sub-agents craft the reply, so they need the same per-turn overlays the
-  // single-agent / orchestrator prompts get: calendar mood, the activity-state
-  // tone (self-gated to '' unless GEORGE_ACTIVITY_STATE_ENABLED), and the long-gap
-  // delay-context note. Without these the legacy multi-agent path silently dropped
-  // the activity/delay overlays the other two paths inject.
-  const dateBlock = renderDateBlock(); // real current date — anchors "now" past the training cutoff
-  const moodBlock = renderMoodBlock();
-  const activityBlock = renderActivityBlock();
+  // Sub-agents craft the actual reply, so they need the SAME per-turn overlay
+  // stack the orchestrator / single-agent prompts get (see buildOverlayStack):
+  // date, calendar mood, the activity-state tone (self-gated to '' unless
+  // GEORGE_ACTIVITY_STATE_ENABLED), the long-gap delay-context note, the user
+  // profile (so know-things knows the student's major/year/interests), the
+  // onboarding nudge (so "im hungry" gets the invitation woven in), and the
+  // student-id block (the squad tools inside find-people need the real students.id
+  // without relying on the orchestrator to relay it through the dispatch prompt).
+  // Sub-agents intentionally do NOT get the worldState / relationshipNote / recall
+  // / memoryTools blocks, so those are omitted here — the assembled overlay is the
+  // subset it has always been. Built ONCE (the stack is identical across agents);
+  // only the per-agent web block varies below.
+  const sharedOverlay = buildOverlayStack({ profile, studentId, delayContext });
   const config: Record<string, { description: string; prompt: string; tools: string[]; model?: string }> = {};
   for (const [name, def] of Object.entries(SUB_AGENTS)) {
     // WebSearch (an SDK built-in, un-namespaced) goes to the two info agents
     // only, and only when the user is under their daily web-search cap.
     const wantsWeb = name === 'whats-happening' || name === 'know-things';
     const webBlock = wantsWeb && webAllowed ? webSearchGuidance() : '';
-    const extras = [dateBlock, moodBlock, activityBlock, delayContext, userProfileBlock, nudge, studentIdBlock, webBlock].filter(Boolean).join('\n\n');
+    const extras = [...sharedOverlay, webBlock].filter(Boolean).join('\n\n');
     config[name] = {
       description: def.description,
       prompt: extras ? `${def.prompt}\n\n${extras}` : def.prompt,
@@ -710,14 +723,38 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
  * to query(). Instead, we load the recent conversation history before calling
  * query() and prepend it to the user's message as context so the orchestrator
  * has continuity.
+ *
+ * De-dupe the just-saved live turn: the default paths (/chat, /chat/stream, Path
+ * B, spectrum non-burst) persist the user turn BEFORE running the orchestrator,
+ * so it reloads here as the LAST history row while `${historyPrefix}${args.text}`
+ * ALSO appends the same text as the live prompt — the model saw the current
+ * message twice. When `liveText` is supplied and the LAST loaded row is a user
+ * turn whose content equals it, drop that row (mirrors how the Spectrum
+ * burst-guard path avoids the dup by deferring its save). Only the LAST row is
+ * considered: an OLDER identical message is real history and is kept.
+ *
+ * Exported for a focused unit test of that de-dupe.
  */
-async function buildHistoryPrefix(sessionStore: SessionStore | undefined, userId: string): Promise<string> {
+export async function buildHistoryPrefix(
+  sessionStore: SessionStore | undefined,
+  userId: string,
+  liveText?: string,
+): Promise<string> {
   if (!sessionStore) return '';
 
   const session = await sessionStore.load(userId);
   if (!session || session.messages.length === 0) return '';
 
-  const historyLines = session.messages
+  let messages = session.messages;
+  if (liveText !== undefined) {
+    const last = messages[messages.length - 1];
+    if (last && last.role === 'user' && last.content === liveText) {
+      messages = messages.slice(0, -1);
+    }
+  }
+  if (messages.length === 0) return '';
+
+  const historyLines = messages
     .slice(-10) // last 10 messages to stay within context budget
     .map((m) => `[${m.role}]: ${m.content}`)
     .join('\n');
@@ -813,7 +850,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // neither consumes the other), so they run concurrently to shave one round-trip.
   const [recallBlock, historyPrefix] = await Promise.all([
     recallForTurn(args.userId, args.text),
-    buildHistoryPrefix(args.sessionStore, args.userId),
+    buildHistoryPrefix(args.sessionStore, args.userId, args.text),
   ]);
 
   // World Info timed-state (P5) — OBSERVE every user turn, BEFORE the fast-path
@@ -839,7 +876,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // agent. The eval harness sets it so an A/B over the agent TOPOLOGY (trunk vs
   // multi-agent) isn't diluted by fast-path turns, which are identical on both
   // arms and carry zero topology signal.
-  const fastPathDisabled = process.env.GEORGE_DISABLE_FAST_PATH === 'true';
+  const fastPathDisabled = getFlags().disableFastPath;
   const fast = fastPathDisabled
     ? null
     : await fastReply({
@@ -933,13 +970,13 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // are byte-for-byte what they are today. settingSources:[] is preserved in all
   // three branches — without it the SDK inherits the host's ~/.claude + project
   // settings, MCP servers, hooks, and slash commands.
-  const trunkHybrid = process.env.GEORGE_TRUNK_HYBRID === 'true';
+  const trunkHybrid = getFlags().trunkHybrid;
   // SINGLE_AGENT=true collapses the orchestrator + 3 sub-agents into ONE agent
   // that holds all tools and the unified domain prompt, so a tool query resolves
   // in one agentic loop instead of orchestrator-decide → dispatch → sub-agent.
   // Removes a full hop (and its per-hop thinking) per turn. Default off; the
   // dispatch path is byte-for-byte unchanged when the flag is unset.
-  const singleAgent = process.env.SINGLE_AGENT === 'true';
+  const singleAgent = getFlags().singleAgent;
   // Per-user model control (set from the admin dashboard). Falls back to the
   // global ORCHESTRATOR_MODEL (OFF/single paths) or TRUNK_MODEL (trunk path) when
   // no override is configured for this user.

@@ -18,11 +18,13 @@
 // blank lines) is removed, so every prompt is byte-for-byte what it was before
 // this feature. Mirrors ./noreply-gate.ts exactly.
 
+import { getFlags } from '../flags.js';
+
 const VOICE_EXAMPLES_BLOCK =
   /\n*<!-- GEORGE_VOICE_EXAMPLES_BEGIN -->[\s\S]*?<!-- GEORGE_VOICE_EXAMPLES_END -->\n*/;
 
 export function applyVoiceExamplesGate(master: string): string {
-  if (process.env.GEORGE_VOICE_EXAMPLES_ENABLED === 'true') {
+  if (getFlags().voiceExamplesEnabled) {
     // Keep the examples; only drop the sentinel comment lines so they aren't sent.
     return master
       .replace('<!-- GEORGE_VOICE_EXAMPLES_BEGIN -->\n', '')

@@ -8,9 +8,13 @@
 //   npm run dashboard                 # http://localhost:3009/admin/dashboard
 //   DASHBOARD_PORT=4000 npm run dashboard
 //
-// Open:  http://localhost:3009/admin/dashboard?token=$ADMIN_TOKEN
-// (the token is stored in the browser after the first load; or paste it on the
-//  login screen). Reads the same .env the server uses (SUPABASE_*, ADMIN_TOKEN).
+// Open:  http://localhost:3009/admin/dashboard
+// (paste the ADMIN_TOKEN on the login screen; it is stored in the browser after
+//  the first load). Reads the same .env the server uses (SUPABASE_*, ADMIN_TOKEN).
+//
+// CORS is OFF by default: the dashboard SPA is served same-origin, so no CORS
+// header is needed. Set ADMIN_DASHBOARD_ORIGIN to a specific origin to allow a
+// cross-origin dashboard front-end; absent → no cors middleware is mounted.
 
 import 'dotenv/config';
 import express from 'express';
@@ -45,7 +49,14 @@ process.on('unhandledRejection', (reason) => {
 const sb = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
 const app = express();
-app.use(cors());
+// CORS is OFF unless ADMIN_DASHBOARD_ORIGIN names a specific allowed origin. The
+// dashboard SPA is served same-origin, so the old wildcard cors() default let any
+// site call the token-gated API from a signed-in user's browser. Absent → no cors
+// middleware at all (same-origin only).
+const DASHBOARD_ORIGIN = process.env.ADMIN_DASHBOARD_ORIGIN;
+if (DASHBOARD_ORIGIN) {
+  app.use(cors({ origin: DASHBOARD_ORIGIN, credentials: false }));
+}
 app.use(express.json());
 app.use(createAdminDashboardRouter(sb, ADMIN_TOKEN));
 
@@ -56,8 +67,5 @@ app.listen(PORT, () => {
   console.log('\n  George Admin Dashboard (standalone)');
   console.log('  ───────────────────────────────────');
   console.log(`  ▸ http://localhost:${PORT}/admin/dashboard`);
-  if (ADMIN_TOKEN) {
-    console.log(`  ▸ direct (token in URL): http://localhost:${PORT}/admin/dashboard?token=${ADMIN_TOKEN}`);
-  }
   console.log(`  reading: ${SUPABASE_URL.replace(/https?:\/\//, '')}\n`);
 });

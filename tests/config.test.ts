@@ -68,3 +68,36 @@ describe('config.transport', () => {
     expect(loadTransportConfig().spectrum.projectId).toBe('namespaced-id')
   })
 })
+
+describe('config — lazy LLM/db getters (import side-effect free)', () => {
+  const originalEnv = { ...process.env }
+
+  beforeEach(() => {
+    vi.resetModules()
+    // Present-but-empty so dotenv.config() (which never overrides an existing key)
+    // leaves them empty — simulating a boot with no ANTHROPIC_API_KEY and not in
+    // bridge mode, the exact case the dashboard service boots under.
+    process.env.BACKEND_RELAY_URL = ''
+    process.env.ANTHROPIC_API_KEY = ''
+  })
+
+  afterEach(() => {
+    process.env = { ...originalEnv }
+  })
+
+  it('importing config does NOT throw when ANTHROPIC_API_KEY is unset', async () => {
+    // The eager version threw here; the lazy getter defers the throw to first access.
+    await expect(import('../src/config.js')).resolves.toBeDefined()
+  })
+
+  it('throws only when the LLM key is actually accessed', async () => {
+    const { config } = await import('../src/config.js')
+    expect(() => config.anthropic.apiKey).toThrow(/ANTHROPIC_API_KEY/)
+  })
+
+  it('returns the key once it is present (read per access)', async () => {
+    process.env.ANTHROPIC_API_KEY = 'sk-live'
+    const { config } = await import('../src/config.js')
+    expect(config.anthropic.apiKey).toBe('sk-live')
+  })
+})

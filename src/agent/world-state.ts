@@ -24,6 +24,8 @@
 
 // A single world-state topic: the trigger keywords that warm it and the
 // in-voice note George should keep in mind while it is warm.
+import { getFlags } from '../flags.js';
+
 export interface WorldTopic {
   key: string;
   // Lowercased keywords (any language) that, when seen in a user message, warm
@@ -202,5 +204,5 @@ export function getWorldStateStore(): WorldStateStore {
 // Whether the feature is on. Default-OFF: unset / anything but 'true' = off, so
 // the world-state path is never entered and prompts are byte-for-byte unchanged.
 export function worldStateEnabled(): boolean {
-  return process.env.WORLD_STATE_ENABLED === 'true';
+  return getFlags().worldStateEnabled;
 }

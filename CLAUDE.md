@@ -16,7 +16,7 @@ The full persona, voice fingerprint, sub-agent split, and domain rules live in `
 
 - **Not a Next.js project.** Express only. No SSR, no JSX, no `app/`.
 - **Not a place for user-facing pages.** The `/george` marketing page and `/george/chat` UI live in bia-roommate. This repo serves an HTTP API.
-- **Not the Supabase schema owner.** Migrations live in bia-admin/supabase/migrations. This repo reads from and writes to existing tables (`students`, `messages`, `reminders`, `events`).
+- **Not the Supabase schema owner.** Migrations live in bia-admin/supabase/migrations; this repo ships no `supabase/migrations/` of its own (a `tests/schema-ownership.test.ts` guard fails if it reappears). This repo reads from and writes to existing tables (`students`, `messages`, `reminders`, `events`).
 - **Not cloud-friendly out of the box.** The iMessage adapter requires macOS + Full Disk Access. To deploy to Fly.io or Railway, set `IMESSAGE_ENABLED=false` and accept that iMessage stops working in that instance.
 
 ## The BIA platform (3 repos)

@@ -1,14 +1,18 @@
 /**
- * One-shot applier for reviewed WeChat-ingest SQL files.
+ * Apply step for the `npm run ingest:wechat` pipeline (scripts/ingest-wechat.ts).
  *
- * Parses each `insert into <table> (...) values (...);` line, extracts the
- * string/null literal args (handling Postgres-style '' escaped quotes), and
- * calls supabase.from(table).insert({...}) with service-role auth.
+ * ingest-wechat.ts distills the WeChat export into REVIEWABLE SQL INSERT files
+ * (duplicates commented `-- DUP:`) and stops there so a human gate precedes any DB
+ * write. Once a human has reviewed/edited that SQL, THIS script applies it: it
+ * parses each `insert into <table> (...) values (...);` line, extracts the
+ * string/null literal args (handling Postgres-style '' escaped quotes), and calls
+ * supabase.from(table).insert({...}) with service-role auth.
  *
- * Stops on first failure and prints a line number so the SQL can be edited
- * and re-run from there. Not a general-purpose SQL executor.
+ * Stops on first failure and prints a line number so the SQL can be edited and
+ * re-run from there. Not a general-purpose SQL executor.
  *
- * Usage: tsx scripts/apply-ingest-sql.ts <sql-file>
+ * Pipeline:  npm run ingest:wechat  →  review the emitted .sql  →  this script.
+ * Usage:     tsx scripts/apply-ingest-sql.ts <sql-file>
  */
 import { readFileSync } from 'node:fs'
 import { supabase } from '../src/db/client.js'

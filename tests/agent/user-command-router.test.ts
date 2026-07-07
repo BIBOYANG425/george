@@ -121,3 +121,36 @@ describe('/delete me — per-user PII wipe', () => {
     }
   });
 });
+
+// Regression for GG1 item 4: user-command routing is decoupled from the heartbeat
+// scheduler. index.ts now injects the runtime unconditionally (outside the
+// HEARTBEAT_ENABLED gate), so a command like /delete me must still route with
+// heartbeats off, as long as the runtime is present. The router reads no env flag
+// itself; this pins that contract.
+describe('user commands decoupled from HEARTBEAT_ENABLED', () => {
+  it('handles /delete me with heartbeats off once the runtime is injected', async () => {
+    const prev = process.env.HEARTBEAT_ENABLED;
+    process.env.HEARTBEAT_ENABLED = 'false';
+    const { supabase, ops } = makeFakeSupabase();
+    const { cache, store } = makeFakeCache();
+    store.set(`user:${UID}:delete_pending`, '1'); // pre-arm the confirm gate
+
+    setUserCommandRuntime({
+      cache: cache as any,
+      profileStore: {} as any,
+      supabase,
+      sendImessage: async () => {},
+    });
+
+    try {
+      const reply = await tryHandleUserCommand(UID, '/delete me');
+      expect(reply).toBe('done. take care.');
+      expect(ops.user_profiles?.deleted).toBe(true);
+      expect(ops.user_profiles?.eq).toContainEqual(['user_id', UID]);
+    } finally {
+      setUserCommandRuntime(null);
+      if (prev === undefined) delete process.env.HEARTBEAT_ENABLED;
+      else process.env.HEARTBEAT_ENABLED = prev;
+    }
+  });
+});

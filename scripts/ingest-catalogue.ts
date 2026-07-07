@@ -13,7 +13,7 @@
 //
 // Run: npx tsx scripts/ingest-catalogue.ts [--phase=all|<name>] [--limit=N]
 //
-// Header last reviewed: 2026-04-20
+// Header last reviewed: 2026-07-07
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
@@ -56,6 +56,7 @@ type Program = {
   school?: string
   description: string
   href: string
+  required_courses?: string[]
 }
 type School = {
   ent_oid: string
@@ -121,6 +122,29 @@ function cleanText(s: string): string {
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+// PostgREST caps a select at 1000 rows by default. `fetchAllPaged` walks a
+// `.range(from, to)` query in PAGE_SIZE windows until a short/empty page signals
+// the end, so idempotency checks see the FULL existing set (a partial set makes
+// reruns re-insert already-present rows → RAG duplication). This is the exact
+// loop insertCourses used inline, extracted so every existing-row scan shares it.
+export const PAGE_SIZE = 1000
+
+export async function fetchAllPaged<Row>(
+  runPage: (from: number, to: number) => PromiseLike<{ data: Row[] | null; error: unknown }>,
+): Promise<Row[]> {
+  const all: Row[] = []
+  let from = 0
+  while (true) {
+    const { data, error } = await runPage(from, from + PAGE_SIZE - 1)
+    if (error) throw error
+    if (!data || data.length === 0) break
+    all.push(...data)
+    if (data.length < PAGE_SIZE) break
+    from += PAGE_SIZE
+  }
+  return all
 }
 
 async function runPool<T>(
@@ -399,9 +423,9 @@ function parseProgramDetail(html: string, p: Program): Program {
   return {
     ...p,
     description: descChunks.join(' ').slice(0, 4000),
-    required_courses: [...new Set(requiredCourses)].slice(0, 60) as unknown as undefined, // stored separately below
+    required_courses: [...new Set(requiredCourses)].slice(0, 60),
     degree_type: degreeMatch ? degreeMatch[1].trim() : undefined,
-  } as Program & { required_courses?: string[] }
+  }
 }
 
 async function phasePrograms(schoolGroups: Record<string, string>, limit?: number): Promise<Program[]> {
@@ -557,7 +581,7 @@ function courseEmbedText(c: CourseDetail): string {
   return parts.join('\n')
 }
 
-function programEmbedText(p: Program & { required_courses?: string[] }): string {
+function programEmbedText(p: Program): string {
   const parts: string[] = [p.name]
   if (p.school) parts.push(`School: ${p.school}`)
   if (p.description) parts.push(p.description)
@@ -574,18 +598,12 @@ async function insertCourses(details: CourseDetail[]) {
   // Idempotency: skip courses already in DB. We page through the existing coid set
   // (Supabase caps selects at 1k by default) and only embed/upsert the missing ones.
   const existingCoids = new Set<string>()
-  let from = 0
-  while (true) {
-    const { data, error } = await supabase
-      .from('courses')
-      .select('coid')
-      .range(from, from + 999)
-    if (error) throw error
-    if (!data || data.length === 0) break
-    for (const r of data) existingCoids.add(r.coid as string)
-    if (data.length < 1000) break
-    from += 1000
-  }
+  const existingCourses = await fetchAllPaged<{ coid: string }>((from, to) =>
+    // Stable order on the natural key so offset paging can never skip/duplicate a
+    // row across page windows (an unordered paged select risks re-inserting rows).
+    supabase.from('courses').select('coid').order('coid').range(from, to),
+  )
+  for (const r of existingCourses) existingCoids.add(r.coid as string)
   console.log(`[insert] courses already in DB: ${existingCoids.size}`)
   const todo = details.filter((c) => !existingCoids.has(c.coid))
   console.log(`[insert] courses to process: ${todo.length}`)
@@ -637,14 +655,16 @@ async function insertCourses(details: CourseDetail[]) {
   }
 }
 
-async function insertPrograms(programs: Array<Program & { required_courses?: string[] }>) {
+async function insertPrograms(programs: Program[]) {
   console.log(`[insert] programs: ${programs.length} candidates`)
 
-  // Same idempotency pattern as courses: skip poids already in DB.
+  // Same idempotency pattern as courses: page the existing poid set past the 1k cap.
   const existingPoids = new Set<string>()
-  const { data: existing, error } = await supabase.from('programs').select('poid')
-  if (error) throw error
-  for (const r of existing || []) existingPoids.add(r.poid as string)
+  const existingPrograms = await fetchAllPaged<{ poid: string }>((from, to) =>
+    // Stable order on the natural key so offset paging never skips/duplicates a row.
+    supabase.from('programs').select('poid').order('poid').range(from, to),
+  )
+  for (const r of existingPrograms) existingPoids.add(r.poid as string)
   console.log(`[insert] programs already in DB: ${existingPoids.size}`)
   const todo = programs.filter((p) => !existingPoids.has(p.poid))
   console.log(`[insert] programs to process: ${todo.length}`)
@@ -691,12 +711,14 @@ async function mirrorProgramsToCampusKnowledge(programs: Program[]) {
   const toMirror = programs.filter((p) => p.description && p.description.length >= 50)
   if (toMirror.length === 0) return
 
-  // Idempotency: skip titles already present with category='usc_program'.
-  const { data: existing } = await supabase
-    .from('campus_knowledge')
-    .select('title')
-    .eq('category', 'usc_program')
-  const existingTitles = new Set((existing || []).map((r) => r.title))
+  // Idempotency: skip titles already present with category='usc_program'. Page
+  // past the 1k cap — usc_program rows exceed 1000, so an unpaged select saw only
+  // the first page and re-mirrored the rest on every rerun (RAG duplication).
+  const existingRows = await fetchAllPaged<{ title: string }>((from, to) =>
+    // Stable order on the selected key so offset paging never skips/duplicates a row.
+    supabase.from('campus_knowledge').select('title').eq('category', 'usc_program').order('title').range(from, to),
+  )
+  const existingTitles = new Set(existingRows.map((r) => r.title))
   const todo = toMirror.filter((p) => !existingTitles.has(p.name))
   console.log(`[mirror] programs: existing=${existingTitles.size}, new=${todo.length}`)
 
@@ -790,7 +812,7 @@ async function main() {
     if (programs.length === 0) programs = loadJson('programs.json', [])
     if (schools.length === 0) schools = loadJson('schools.json', [])
     if (details.length > 0) await insertCourses(details)
-    if (programs.length > 0) await insertPrograms(programs as Array<Program & { required_courses?: string[] }>)
+    if (programs.length > 0) await insertPrograms(programs)
     if (programs.length > 0) await mirrorProgramsToCampusKnowledge(programs)
     if (schools.length > 0) await mirrorSchoolsToCampusKnowledge(schools)
   }
@@ -799,7 +821,13 @@ async function main() {
   process.exit(0)
 }
 
-main().catch((err) => {
-  console.error('[main] fatal:', err)
-  process.exit(1)
-})
+// Only run main() when invoked directly as a CLI, never on import (so the test
+// file can import fetchAllPaged without triggering a scrape/DB run).
+const invokedDirectly =
+  process.argv[1] !== undefined && process.argv[1].endsWith('ingest-catalogue.ts')
+if (invokedDirectly) {
+  main().catch((err) => {
+    console.error('[main] fatal:', err)
+    process.exit(1)
+  })
+}

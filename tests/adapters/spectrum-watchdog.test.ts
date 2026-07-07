@@ -3,6 +3,7 @@ import type { SpectrumHealth } from '../../src/adapters/spectrum-stats.js'
 import {
   isWedged,
   shouldRestart,
+  isFreshNeverConnected,
   pruneHistory,
   watchdogTick,
   loadWatchdogConfig,
@@ -43,6 +44,7 @@ const cfg = (over: Partial<WatchdogConfig> = {}): WatchdogConfig => ({
   maxRestarts: 3,
   windowSeconds: 1800,
   intervalSeconds: 60,
+  minUptimeSeconds: 120,
   markerPath: '/tmp/test-marker.json',
   ...over,
 })
@@ -200,11 +202,94 @@ describe('spectrum-watchdog — shouldRestart (decision core)', () => {
   })
 })
 
+describe('spectrum-watchdog — fresh-boot guard (never-connected crash-loop protection)', () => {
+  // A never-connected fresh boot: state cycling, NO connectedAt this boot. isWedged
+  // via signal A needs lastConnect/lastInbound outside the window → both absent here.
+  const neverConnectedWedged = () =>
+    health({
+      state: 'reconnecting',
+      lastErrorAt: secAgo(FAIL + 60),
+      connectedAt: null,
+      lastInboundAt: null,
+      secondsSinceInbound: null,
+    })
+  const baseOpts = { nowMs: NOW, failSeconds: FAIL, silentSeconds: SILENT, maxRestarts: 3, windowSeconds: 1800 }
+
+  it('isFreshNeverConnected: true when connectedAt is null AND uptime < minUptime', () => {
+    expect(isFreshNeverConnected(neverConnectedWedged(), 30_000, 120)).toBe(true)
+  })
+
+  it('isFreshNeverConnected: false once uptime passes minUptime', () => {
+    expect(isFreshNeverConnected(neverConnectedWedged(), 121_000, 120)).toBe(false)
+  })
+
+  it('isFreshNeverConnected: false once the stream HAS connected this boot (connectedAt set)', () => {
+    const connectedThenWedged = health({ state: 'reconnecting', connectedAt: secAgo(FAIL + 600) })
+    expect(isFreshNeverConnected(connectedThenWedged, 30_000, 120)).toBe(false)
+  })
+
+  it('shouldRestart: wedged fresh boot (never connected, uptime<min) → hold, NOT restart', () => {
+    expect(
+      shouldRestart(neverConnectedWedged(), {
+        ...baseOpts,
+        history: { restarts: [] },
+        uptimeMs: 30_000,
+        minUptimeSeconds: 120,
+      }),
+    ).toBe('hold')
+  })
+
+  it('shouldRestart: same wedge past minUptime → restart (guard released)', () => {
+    expect(
+      shouldRestart(neverConnectedWedged(), {
+        ...baseOpts,
+        history: { restarts: [] },
+        uptimeMs: 121_000,
+        minUptimeSeconds: 120,
+      }),
+    ).toBe('restart')
+  })
+
+  it('shouldRestart: connected-then-wedged fresh boot → restart (guard never applies)', () => {
+    const connectedThenWedged = health({
+      state: 'reconnecting',
+      lastErrorAt: secAgo(FAIL + 60),
+      connectedAt: secAgo(FAIL + 600),
+      lastInboundAt: secAgo(FAIL + 600),
+    })
+    expect(
+      shouldRestart(connectedThenWedged, {
+        ...baseOpts,
+        history: { restarts: [] },
+        uptimeMs: 30_000, // low uptime, but it DID connect → restart still allowed
+        minUptimeSeconds: 120,
+      }),
+    ).toBe('restart')
+  })
+
+  it('watchdogTick: never-connected fresh boot holds in-process — NO exit, NO marker', () => {
+    const deps = fakeDeps({ health: neverConnectedWedged(), uptimeMs: 30_000 })
+    const decision = watchdogTick(cfg(), deps)
+    expect(decision).toBe('hold')
+    expect(deps.exited).toEqual([]) // critical: did NOT crash-loop the fresh container
+    expect(deps.written).toHaveLength(0) // no restart marker burned
+    expect(deps.logs).toContainEqual(['warn', 'spectrum_watchdog_fresh_boot_hold'])
+  })
+
+  it('watchdogTick: after minUptime, the same never-connected wedge exits normally', () => {
+    const deps = fakeDeps({ health: neverConnectedWedged(), uptimeMs: 121_000 })
+    const decision = watchdogTick(cfg(), deps)
+    expect(decision).toBe('restart')
+    expect(deps.exited).toEqual([1])
+  })
+})
+
 // Build injectable deps backed by in-memory state (no real fs/process/clock).
 function fakeDeps(over: {
   health: SpectrumHealth
   history?: RestartHistory
   now?: number
+  uptimeMs?: number
 }): WatchdogDeps & { exited: number[]; written: RestartHistory[]; cleared: number; logs: Array<[string, string]> } {
   let history: RestartHistory = over.history ?? { restarts: [] }
   const exited: number[] = []
@@ -213,6 +298,10 @@ function fakeDeps(over: {
   let cleared = 0
   return {
     now: () => over.now ?? NOW,
+    // Default to a long uptime so the fresh-boot guard never engages in the
+    // pre-existing scenarios (they also all have connectedAt set). Guard tests
+    // override this explicitly.
+    uptimeMs: () => over.uptimeMs ?? 3_600_000,
     readHealth: () => over.health,
     readHistory: () => history,
     writeHistory: (h) => {

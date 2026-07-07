@@ -17,6 +17,7 @@
 // dispatcher returns before run(), and nothing changes.
 
 import type { Evaluator, EvalContext } from './types.js';
+import { getFlags } from '../../flags.js';
 import { getActivityState } from '../activity-state.js';
 
 export const activityEvaluator: Evaluator = {
@@ -24,7 +25,7 @@ export const activityEvaluator: Evaluator = {
   kind: 'pure',
   trigger: 'turn',
   // Reuses the SAME flag activity-state.ts reads — no second flag, no drift.
-  isEnabled: (): boolean => process.env.GEORGE_ACTIVITY_STATE_ENABLED === 'true',
+  isEnabled: (): boolean => getFlags().activityStateEnabled,
   // Pure cadence: only "runs" (logs) when there's an active phase overlay.
   shouldRun: (ctx: EvalContext): boolean => getActivityState(ctx.now) !== null,
   // Inert by design — the prompt path already renders the block. No LLM, no DB.

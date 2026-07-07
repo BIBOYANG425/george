@@ -39,6 +39,10 @@ import { checkRateLimit } from './rate-limiter.js'
 import { log } from '../observability/logger.js'
 import { renderDelayContext } from '../agent/activity-state.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
+import { collectOrchestratorReply } from '../agent/collect-reply.js'
+import { runInboundPipeline } from '../agent/inbound-pipeline.js'
+import { getFlags } from '../flags.js'
+import { inflightTurns } from '../agent/inflight-registry.js'
 import { captureFactsFromTurn } from '../memory/capture.js'
 import { TURN_EVALUATORS, dispatchEvaluators } from '../agent/evaluators/registry.js'
 import type { EvalContext } from '../agent/evaluators/types.js'
@@ -86,7 +90,7 @@ function readBurstConfig(): { enabled: boolean; perMin: number; strikes: number;
     return Number.isFinite(n) && n > 0 ? n : d
   }
   return {
-    enabled: process.env.SPECTRUM_BURST_GUARD_ENABLED === 'true',
+    enabled: getFlags().burstGuardEnabled,
     perMin: int(process.env.SPECTRUM_BURST_PER_MIN, 30),
     strikes: int(process.env.SPECTRUM_BURST_STRIKES, 3),
     cooldownMs: Math.min(Math.max(int(process.env.SPECTRUM_COOLDOWN_MS, 300_000), 300_000), 600_000), // clamp 5-10min
@@ -105,7 +109,7 @@ const BURST_COOLDOWN_NOTICE = '学长这会儿有点接不过来了😮‍💨 �
 // interval is how often the drainer re-reads the durable queue for due bubbles.
 function readPacingConfig(): { enabled: boolean; drainIntervalMs: number } {
   return {
-    enabled: process.env.GEORGE_PACING_ENABLED === 'true',
+    enabled: getFlags().pacingEnabled,
     drainIntervalMs: Number(process.env.PACING_DRAIN_INTERVAL_MS) || 1000,
   }
 }
@@ -182,6 +186,11 @@ export async function runSpectrumLoop(
     // Optional, default-OFF "reading" pause BEFORE generation (no-op when off).
     // Pre-generation only: this never delays an already-composed reply.
     await stageReadReceiptDelay({ readReceiptDelayMs: getReadReceiptDelayMs() })
+    // Track this flush-driven orchestrator turn so a graceful shutdown drains it
+    // before exit (see inflight-registry.ts) rather than dropping a reply
+    // mid-generation on deploy. begin() sits adjacent to the try so nothing
+    // between them can throw; end() in the finally covers send/abort/throw alike.
+    inflightTurns.begin()
     try {
       // stageGenerate owns startTyping + the long-turn "still thinking" nudge +
       // the handleText await + clearTimeout on success/throw. delayContext rides
@@ -223,11 +232,19 @@ export async function runSpectrumLoop(
     } finally {
       if (inflight.get(senderId)?.ac === ac) inflight.delete(senderId)
       await buf.reply.stopTyping().catch(() => {})
+      inflightTurns.end()
     }
   }
 
   try {
     for await (const [reply, message] of client.messages()) {
+      // Graceful shutdown: intake was stopped (stopSpectrumIntake) but the client
+      // is deliberately kept live so in-flight turns can flush their replies during
+      // the drain. Drop any inbound that lands in that window so NO new turn starts.
+      // `continue` (not `break`): breaking would return from runSpectrumLoop and let
+      // the reconnect loop's finally close the client mid-drain — the client must
+      // stay open until closeSpectrumClient() runs after the drain completes.
+      if (spectrumStopping) continue
       recordSpectrumInbound()
       if (message.messageId) {
         if (seen.has(message.messageId)) continue
@@ -322,15 +339,27 @@ export interface TextHandlerDeps {
 
 export function buildTextHandler(deps: TextHandlerDeps) {
   return async (rawUserId: string, text: string, reply: ReplyHandle, abortController?: AbortController, delayContext?: string): Promise<string | null> => {
-    const userId = deps.normalizeHandle(rawUserId)
-    // Gates run on the RAW user text only — delayContext is never part of what's
-    // checked, handshake-parsed, or command-matched; it only reaches the agent.
-    if (deps.checkInjection(text).blocked) return deps.pickRejection()
-    if (await deps.tryHandshake(userId, text, reply)) return null
-    const cmd = await deps.tryUserCommand(userId, text)
-    if (cmd !== null) return cmd
-    const out = await deps.runOrchestratorText(userId, text, abortController, delayContext, reply)
-    return out || null
+    // The injection → handshake → command → orchestrate sequence lives in the shared
+    // runInboundPipeline; this transport flattens its discriminated outcome back to
+    // the string | null the flush loop expects (byte-for-byte the previous behavior:
+    // injection → rejection, handshake → null, command → its reply, orchestrator →
+    // its reply or null when empty).
+    const outcome = await runInboundPipeline<ReplyHandle>(
+      // tryHandshake takes a required ReplyHandle here; widen it to the pipeline's
+      // optional-reply shape (spectrum always supplies one). Every other dep matches.
+      { ...deps, tryHandshake: (u, t, r) => deps.tryHandshake(u, t, r as ReplyHandle) },
+      { rawUserId, text, reply, abortController, delayContext },
+    )
+    switch (outcome.kind) {
+      case 'injection':
+        return outcome.reply
+      case 'handshake':
+        return null
+      case 'command':
+        return outcome.reply
+      case 'orchestrator':
+        return outcome.reply || null
+    }
   }
 }
 
@@ -426,38 +455,26 @@ export function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandle
       let finalText = ''
       let turnTelemetry: import('../agent/session-store.js').TurnTelemetry | undefined
       try {
-        for await (const event of runOrchestrator({
-          userId,
-          channel: 'imessage',
-          text,
-          sessionStore: deps.sessionStore,
-          profileStore: deps.profileStore,
-          abortController,
-          delayContext,
-        })) {
-          const e = event as {
-            type?: string
-            result?: string
-            emoji?: string
-            telemetry?: import('../agent/session-store.js').TurnTelemetry
-            message?: { content?: Array<{ type?: string; text?: string }> }
-          }
-          if (e.type === 'reaction' && typeof e.emoji === 'string' && e.emoji && reply?.react) {
-            // George tapped back (react_to_user). Apply the native iMessage
-            // tapback to the inbound message; best-effort, never blocks the reply.
-            void reply.react(e.emoji).catch(() => {})
-          } else if (e.type === 'telemetry') {
-            turnTelemetry = e.telemetry
-          } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
-            finalText = e.result
-          } else if (e.type === 'assistant' && e.message?.content && finalText === '') {
-            const t = e.message.content
-              .filter((c) => c.type === 'text' && typeof c.text === 'string')
-              .map((c) => c.text as string)
-              .join('')
-            if (t) finalText = t
-          }
-        }
+        const collected = await collectOrchestratorReply(
+          runOrchestrator({
+            userId,
+            channel: 'imessage',
+            text,
+            sessionStore: deps.sessionStore,
+            profileStore: deps.profileStore,
+            abortController,
+            delayContext,
+          }),
+          {
+            // George tapped back (react_to_user). Apply the native iMessage tapback
+            // to the inbound message; best-effort, never blocks the reply.
+            onReaction: (emoji) => {
+              if (reply?.react) void reply.react(emoji).catch(() => {})
+            },
+          },
+        )
+        finalText = collected.text
+        turnTelemetry = collected.telemetry
       } catch (err) {
         // ON path: a SUPERSEDED (aborted) turn persists NOTHING — its text is
         // refolded into the next turn. A genuine ERROR still saves the user turn
@@ -544,16 +561,16 @@ let spectrumStopping = false
 let activeSpectrumClient: SpectrumClient | null = null
 // Pacing drainer handle (default-OFF: null). Started ONCE at the top of
 // startSpectrumAdapter so it persists across reconnects, and stopped on loop
-// exit and in stopSpectrumAdapter. Module-level so the shutdown path can reach it.
+// exit and in stopSpectrumIntake. Module-level so the shutdown path can reach it.
 let activeDrainer: { stop(): void } | null = null
 // Pacing queue pruner handle (default-OFF: null). Started alongside the drainer
-// when pacing is on, and stopped on loop exit and in stopSpectrumAdapter so the
+// when pacing is on, and stopped on loop exit and in stopSpectrumIntake so the
 // delivered-row prune never outlives the adapter. Module-level so the shutdown
 // path can reach it (mirrors activeDrainer).
 let activePruner: { stop(): void } | null = null
 
 // startSpectrumAdapter connects to Spectrum and drives the downstream pipeline.
-// Runs until stopSpectrumAdapter() is called: if the message stream ends or
+// Runs until stopSpectrumIntake()/closeSpectrumClient() are called: if the message stream ends or
 // throws (transient drop), it reconnects with exponential backoff. Mirrors
 // startIMessageAdapter but for Spectrum's pushed app.messages stream.
 export async function startSpectrumAdapter(
@@ -638,13 +655,28 @@ export async function startSpectrumAdapter(
   log('info', 'spectrum_adapter_stopped', {})
 }
 
-// Close the live Spectrum connection cleanly and stop the reconnect loop.
-// Called from the process shutdown handler so a restart never orphans a
-// connection on Photon's side.
-export async function stopSpectrumAdapter(): Promise<void> {
+// Graceful shutdown is split into two phases so an in-flight turn can still SEND
+// its reply during the drain window:
+//
+//   1. stopSpectrumIntake()  — stop consuming NEW inbound (subscription + drainer
+//      + pruner + watchdog). The gRPC client stays LIVE so a turn still generating
+//      when SIGTERM arrives can flush its reply over space.send.
+//   2. <caller awaits inflightTurns.drain(...)>
+//   3. closeSpectrumClient() — tear down the gRPC client once turns have flushed,
+//      so the connection never dangles on Photon's side.
+//
+// The previous single stopSpectrumAdapter() closed the client (app.stop → app can
+// no longer send) BEFORE the drain, so an in-flight reply was silently lost —
+// exactly what the shutdown drain exists to prevent.
+
+// Phase 1: stop inbound intake WITHOUT closing the client. Sets spectrumStopping
+// so the reconnect loop won't reconnect and the inbound loop drops any message
+// that lands during the drain window (no new turn starts). Safe to call when the
+// adapter was never started (all handles are null → no-ops).
+export async function stopSpectrumIntake(): Promise<void> {
   spectrumStopping = true
-  // Tear down the watchdog timer first so a clean shutdown never trips it (no-op
-  // when the watchdog was never started, i.e. the default-OFF path).
+  // Tear down the watchdog timer so a clean shutdown never trips it (no-op when
+  // the watchdog was never started, i.e. the default-OFF path).
   stopSpectrumWatchdog()
   // Stop the pacing drainer so it doesn't keep firing after shutdown (no-op when
   // pacing was off / never started). startSpectrumAdapter's finally also stops it
@@ -658,6 +690,15 @@ export async function stopSpectrumAdapter(): Promise<void> {
     activePruner.stop()
     activePruner = null
   }
+}
+
+// Phase 2: close the live Spectrum connection cleanly and stop the reconnect loop.
+// Call AFTER the in-flight drain so a generating turn can still send its reply
+// first. Re-sets spectrumStopping so a standalone call (not preceded by
+// stopSpectrumIntake) still halts the reconnect loop and never orphans a
+// connection on Photon's side.
+export async function closeSpectrumClient(): Promise<void> {
+  spectrumStopping = true
   const client = activeSpectrumClient
   activeSpectrumClient = null
   if (client) await client.close().catch(() => {})

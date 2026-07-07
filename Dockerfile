@@ -34,5 +34,5 @@ COPY assets/ ./assets/
 ENV NODE_ENV=production
 EXPOSE 3001
 # Railway injects PORT; default to 3001 for local docker runs.
-HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch(`http://localhost:${process.env.PORT||3001}/health`).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://localhost:'+(process.env.PORT||3001)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "dist/index.js"]

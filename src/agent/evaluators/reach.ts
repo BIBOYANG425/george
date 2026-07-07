@@ -28,11 +28,12 @@
 // never queries, never sends — behavior is byte-for-byte unchanged.
 
 import type { Evaluator, EvalContext } from './types.js';
+import { getFlags } from '../../flags.js';
 import { log } from '../../observability/logger.js';
 import { bannedVoiceHits } from '../voice-guard.js';
 
 export function isReachEvalEnabled(): boolean {
-  return process.env.SQUAD_REREACH_EVAL_ENABLED === 'true';
+  return getFlags().squadRereachEvalEnabled;
 }
 
 // Staleness threshold in hours. Default deliberately past the coordinator's 24h

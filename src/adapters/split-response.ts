@@ -28,6 +28,7 @@
 const MAX_PARTS = 4
 
 import { stripMarkdown } from './strip-markdown.js'
+import { getFlags } from '../flags.js'
 
 export function splitIntoMessages(response: string): string[] {
   if (!response) return []
@@ -91,7 +92,7 @@ export function stripControlTokens(response: string): string {
 // unset the parser still strips tokens, but a detected {{NO_REPLY}} does NOT
 // suppress the reply, so behavior is byte-for-byte unchanged from before.
 export function isNoReplyEnabled(): boolean {
-  return process.env.GEORGE_NOREPLY_ENABLED === 'true'
+  return getFlags().noReplyEnabled
 }
 
 // Inter-message delay that feels like typing, not a flood. 600ms is long
@@ -111,7 +112,7 @@ export function sleep(ms: number): Promise<void> {
 // (NaN / negative -> 0). When the flag is off or the duration is 0, the stage
 // is a no-op so flush() is byte-for-byte unchanged.
 export function isReadReceiptDelayEnabled(): boolean {
-  return process.env.GEORGE_READRECEIPT_DELAY_ENABLED === 'true'
+  return getFlags().readReceiptDelayEnabled
 }
 
 export function getReadReceiptDelayMs(): number {

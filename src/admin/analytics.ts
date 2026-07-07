@@ -26,6 +26,24 @@ function startOfTodayISO(): string {
   return startOfLADayISO();
 }
 
+// The America/Los_Angeles calendar day (YYYY-MM-DD) an instant falls on. DST-correct:
+// the day boundary is LA midnight, which shifts an hour across PST/PDT — so we ask Intl
+// for the LA wall-clock date directly instead of slicing the UTC ISO string (which would
+// misfile the 7-8h window after UTC midnight onto the wrong LA day — the same reason
+// startOfLADayISO exists). Exported so the bucketing is unit-testable without the DB.
+const LA_DAY_FMT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Los_Angeles',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+export function laDayKey(instant: string | number | Date): string {
+  const d = instant instanceof Date ? instant : new Date(instant);
+  const parts = LA_DAY_FMT.formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
 // ── shared row shapes ──────────────────────────────────────────────────────
 interface MsgRow {
   id: string;
@@ -128,7 +146,10 @@ export async function getOverview(sb: SupabaseClient) {
     headCount('events', (q) => q.eq('status', 'active')),
     headCount('proactive_log'),
     headCount('heartbeat_log'),
-    headCount('messages', (q) => q.not('tokens_used', 'is', null)),
+    // Numerator matches getSystemHealth: only assistant turns carry tokens_used, so
+    // the token-bearing count must be scoped to assistant rows too — otherwise the
+    // fraction's numerator and denominator count different row populations.
+    headCount('messages', (q) => q.eq('role', 'assistant').not('tokens_used', 'is', null)),
     // Only assistant turns ever carry tokens_used, so coverage must divide by
     // assistant rows — dividing by ALL messages structurally caps it near 50%.
     headCount('messages', (q) => q.eq('role', 'assistant')),
@@ -191,14 +212,21 @@ export async function getTimeseries(sb: SupabaseClient, days = 14) {
     .order('created_at', { ascending: true })
     .limit(10000);
 
+  // Bucket by LA-local calendar day (matching the overview cards / startOfLADayISO),
+  // NOT the raw UTC date — slicing created_at would push the 7-8h window after UTC
+  // midnight onto the wrong day. The bucket keys walk back from today's LA date using
+  // UTC arithmetic on the pure calendar date (DST-free: every UTC day is exactly 24h),
+  // so we always get `days` sequential LA days with no gap/dup across a DST boundary.
+  const todayKey = laDayKey(Date.now());
+  const [ty, tm, td] = todayKey.split('-').map(Number);
+  const anchor = Date.UTC(ty, tm - 1, td);
   const buckets = new Map<string, { user: number; assistant: number; total: number }>();
   for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(Date.now() - i * DAY_MS).toISOString().slice(0, 10);
+    const d = new Date(anchor - i * DAY_MS).toISOString().slice(0, 10);
     buckets.set(d, { user: 0, assistant: 0, total: 0 });
   }
   for (const r of data ?? []) {
-    const d = String(r.created_at).slice(0, 10);
-    const b = buckets.get(d);
+    const b = buckets.get(laDayKey(r.created_at));
     if (!b) continue;
     b.total++;
     if (r.role === 'user') b.user++;
@@ -241,9 +269,13 @@ export async function getLiveFeed(sb: SupabaseClient, opts: { limit?: number; on
 
 // ── AGENT / CHANNEL distributions ──────────────────────────────────────────
 export async function getDistributions(sb: SupabaseClient) {
+  // Windowed over the most-recent 10k messages (DESC + limit), so the distribution
+  // reflects current behavior rather than a truncated arbitrary slice. The dashboard
+  // labels these panels "近 10k 条消息" to match.
   const { data } = await sb
     .from('messages')
     .select('agent, tool_calls, role')
+    .order('created_at', { ascending: false })
     .limit(10000);
   const agents = new Map<string, number>();
   const channels = new Map<string, number>();

@@ -5,9 +5,11 @@ import { supabase } from './client.js'
 // must not blast a multi-day backlog at real students.
 const STALE_AFTER_MS = 24 * 60 * 60 * 1000
 
-// Drains the shipping_notifications queue (producer = parcels AFTER-UPDATE
-// trigger, migration 20260606_parcel_notification_enqueue.sql). Joins students
-// for the delivery platform id. Bounded LIMIT so one cron tick can't run away.
+// Drains the shipping_notifications queue (producer = the parcels AFTER-UPDATE
+// trigger defined in bia-admin's canonical schema — bia-admin owns this producer
+// migration (…_parcel_notification_enqueue.sql), not bia-roommate or george).
+// Joins students for the delivery platform id. Bounded LIMIT so one cron tick
+// can't run away.
 // Only rows scheduled within the last 24h are eligible — older pending rows
 // are triaged to 'skipped' by markStaleNotificationsSkipped() at job start.
 export async function getPendingShippingNotifications() {

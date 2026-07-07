@@ -21,6 +21,7 @@
 // appends non-empty notes.
 
 import { createServiceRoleClient } from '../memory/supabase-client.js';
+import { getFlags } from '../flags.js';
 
 export interface ProactiveMessage {
   role: 'user' | 'assistant';
@@ -42,7 +43,7 @@ export interface OpenThread {
 // never triggers config.ts's eager required-env validation. Unset / any value
 // other than 'true' => disabled, and the heartbeat prompt is unchanged.
 export function isGroundedProactiveEnabled(): boolean {
-  return process.env.GROUNDED_PROACTIVE_ENABLED === 'true';
+  return getFlags().groundedProactiveEnabled;
 }
 
 const MAX_THREADS = 3;

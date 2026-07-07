@@ -2,9 +2,10 @@
 //
 // Admin dashboard router. Serves the single-page dashboard at /admin/dashboard
 // and a JSON analytics API at /admin/api/*. Every API route is gated by the
-// admin token (Bearer header, x-admin-token header, OR ?token= query — the
-// query form exists so the static page and a screenshot tool can load it with
-// one URL during local viewing).
+// admin token via the Authorization: Bearer header or the x-admin-token header
+// (constant-time compared). The ?token= query form was removed — query strings
+// leak into access logs, browser history, and Referer headers, so a token there
+// is a standing credential leak.
 //
 // Mount it in two ways:
 //   - inside the full george server (src/index.ts) — shares the app
@@ -35,13 +36,23 @@ import { ProfileStore, createSupabaseProfileDB } from '../memory/profile.js';
 import { getKVCache } from '../memory/kv-cache.js';
 import { createSupabaseObservationDB } from '../memory/observations.js';
 
-export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: string): express.Router {
+export function createAdminDashboardRouter(
+  sb: SupabaseClient,
+  adminToken: string,
+  // Shared ProfileStore from the agent process. When index.ts mounts this router
+  // in-process (ADMIN_DASHBOARD_ENABLED=true) it passes its own store so we don't
+  // build a second one — their configs are identical (both
+  // `new ProfileStore(createSupabaseProfileDB(), getKVCache())`). Omitted by the
+  // standalone dashboard service (scripts/dashboard-server.ts), which has no agent
+  // singletons, so we fall back to building our own.
+  sharedProfileStore?: ProfileStore,
+): express.Router {
   const router = express.Router();
 
   // Memory stores for the destructive endpoints. ProfileStore is built with the
   // SAME KV cache the agent uses (getKVCache) so a clear-block busts the shared
-  // edge cache, not a private copy. Built lazily/once per router.
-  const profileStore = new ProfileStore(createSupabaseProfileDB(), getKVCache());
+  // edge cache, not a private copy. Reuse the injected agent store when present.
+  const profileStore = sharedProfileStore ?? new ProfileStore(createSupabaseProfileDB(), getKVCache());
   const observationDB = createSupabaseObservationDB();
 
   // The dashboard page itself is harmless static HTML (it carries no data); the
@@ -58,10 +69,11 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
       res.status(503).json({ error: 'ADMIN_TOKEN not configured on the server' });
       return;
     }
+    // Header-only: Authorization: Bearer OR x-admin-token. No ?token= query form
+    // (query strings leak into logs / history / Referer). Constant-time compared.
     const bearer = req.headers.authorization?.replace('Bearer ', '');
     const header = req.headers['x-admin-token'];
-    const q = typeof req.query.token === 'string' ? req.query.token : undefined;
-    const token = bearer || (typeof header === 'string' ? header : undefined) || q || '';
+    const token = bearer || (typeof header === 'string' ? header : undefined) || '';
     if (!safeEqual(token, adminToken)) {
       res.status(401).json({ error: 'unauthorized' });
       return;
@@ -104,6 +116,15 @@ export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: strin
       getInjectionLog(sb, 50),
     ]);
     return { crisis, flagged, fabrication: fab, injection };
+  }));
+
+  // Lightweight crisis count for the boot badge — ONLY the distress queue, no flagged/
+  // fabrication/injection fan-out. The dashboard boot probe calls this instead of the
+  // full /review so the badge can surface without the heavy payload. When the radar is
+  // gated OFF, getDistressQueue short-circuits (no DB reads) and this returns { count: 0 }.
+  api.get('/review/crisis-count', wrap(async () => {
+    const cr = await getDistressQueue(sb, {});
+    return { count: cr.enabled ? cr.queue.length : 0 };
   }));
 
   // Flag a George turn as a bad reply. Snapshot is built server-side from the
