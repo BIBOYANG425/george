@@ -12,8 +12,10 @@
 // defined (who watches, how often, escalation path, off-hours). Default OFF; set
 // GEORGE_CRISIS_RADAR_ENABLED=true only once the SOP is in place. Read at call time
 // (same pattern as MEMORY_CAPTURE_ENABLED) so it flips without a code change.
+import { getFlags } from '../flags.js';
+
 export function crisisRadarEnabled(): boolean {
-  return process.env.GEORGE_CRISIS_RADAR_ENABLED === 'true';
+  return getFlags().crisisRadarEnabled;
 }
 
 // Hyperbole / intensifier patterns that must NEVER count as distress. Chinese uses

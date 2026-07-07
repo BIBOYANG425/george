@@ -12,10 +12,12 @@
 // it was before this feature. The parser in adapters/split-response.ts is gated
 // by the SAME flag, so prompt + suppression turn on together.
 
+import { getFlags } from '../flags.js';
+
 const NOREPLY_BLOCK = /\n*<!-- GEORGE_NOREPLY_BEGIN -->[\s\S]*?<!-- GEORGE_NOREPLY_END -->\n*/;
 
 export function applyNoReplyGate(master: string): string {
-  if (process.env.GEORGE_NOREPLY_ENABLED === 'true') {
+  if (getFlags().noReplyEnabled) {
     // Keep the wording; only drop the sentinel comment lines so they aren't sent.
     return master
       .replace('<!-- GEORGE_NOREPLY_BEGIN -->\n', '')

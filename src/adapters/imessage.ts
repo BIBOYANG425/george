@@ -31,6 +31,7 @@
 import type { IMessageSDK as IMessageSDKType } from '@photon-ai/imessage-kit'
 import { config } from '../config.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
+import { collectOrchestratorReply } from '../agent/collect-reply.js'
 import { log } from '../observability/logger.js'
 import { splitIntoMessages, sleep, INTER_MESSAGE_DELAY_MS } from './split-response.js'
 import type { IncomingMessage } from './types.js'
@@ -317,27 +318,13 @@ export async function startIMessageAdapter() {
         if (config.backendRelayUrl) {
           response = await forwardToBackend(incoming)
         } else {
-          let finalText = ''
-          for await (const event of runOrchestrator({
-            userId: incoming.userId,
-            channel: 'imessage',
-            text: incoming.text,
-          })) {
-            const e = event as {
-              type?: string
-              result?: string
-              message?: { content?: Array<{ type?: string; text?: string }> }
-            }
-            if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
-              finalText = e.result
-            } else if (e.type === 'assistant' && e.message?.content && finalText === '') {
-              const text = e.message.content
-                .filter((c) => c.type === 'text' && typeof c.text === 'string')
-                .map((c) => c.text as string)
-                .join('')
-              if (text) finalText = text
-            }
-          }
+          const { text: finalText } = await collectOrchestratorReply(
+            runOrchestrator({
+              userId: incoming.userId,
+              channel: 'imessage',
+              text: incoming.text,
+            }),
+          )
           response = finalText || null
         }
 

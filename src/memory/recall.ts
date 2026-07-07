@@ -19,6 +19,7 @@
 // the Observer) and it does not inject into the prompt (that's Phase 2.2).
 
 import { resolveProfileUserId } from '../db/students.js';
+import { getFlags } from '../flags.js';
 import { log } from '../observability/logger.js';
 import {
   embedObservation,
@@ -47,7 +48,7 @@ const HALF_LIFE_DAYS_FLOOR = 1;
 const BLOCK_CHAR_CAP = 600;
 
 export function isRecallEnabled(): boolean {
-  return process.env.GEORGE_RECALL_ENABLED === 'true';
+  return getFlags().recallEnabled;
 }
 
 // Parse an int env var, falling back to `fallback` on missing / NaN.

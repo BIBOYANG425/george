@@ -36,13 +36,23 @@ import { ProfileStore, createSupabaseProfileDB } from '../memory/profile.js';
 import { getKVCache } from '../memory/kv-cache.js';
 import { createSupabaseObservationDB } from '../memory/observations.js';
 
-export function createAdminDashboardRouter(sb: SupabaseClient, adminToken: string): express.Router {
+export function createAdminDashboardRouter(
+  sb: SupabaseClient,
+  adminToken: string,
+  // Shared ProfileStore from the agent process. When index.ts mounts this router
+  // in-process (ADMIN_DASHBOARD_ENABLED=true) it passes its own store so we don't
+  // build a second one — their configs are identical (both
+  // `new ProfileStore(createSupabaseProfileDB(), getKVCache())`). Omitted by the
+  // standalone dashboard service (scripts/dashboard-server.ts), which has no agent
+  // singletons, so we fall back to building our own.
+  sharedProfileStore?: ProfileStore,
+): express.Router {
   const router = express.Router();
 
   // Memory stores for the destructive endpoints. ProfileStore is built with the
   // SAME KV cache the agent uses (getKVCache) so a clear-block busts the shared
-  // edge cache, not a private copy. Built lazily/once per router.
-  const profileStore = new ProfileStore(createSupabaseProfileDB(), getKVCache());
+  // edge cache, not a private copy. Reuse the injected agent store when present.
+  const profileStore = sharedProfileStore ?? new ProfileStore(createSupabaseProfileDB(), getKVCache());
   const observationDB = createSupabaseObservationDB();
 
   // The dashboard page itself is harmless static HTML (it carries no data); the

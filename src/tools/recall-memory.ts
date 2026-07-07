@@ -21,6 +21,7 @@
 // (wrapTool also backstops), so a recall failure can never break a turn.
 
 import { z } from 'zod'
+import { getFlags } from '../flags.js'
 import { resolveProfileUserId } from '../db/students.js'
 import { log } from '../observability/logger.js'
 import {
@@ -33,7 +34,7 @@ import { resolveTopK, resolveMinSalience, resolveHalfLifeDays } from '../memory/
 import { wrapTool } from './_wrap.js'
 
 export function isRecallToolEnabled(): boolean {
-  return process.env.GEORGE_RECALL_TOOL_ENABLED === 'true'
+  return getFlags().recallToolEnabled
 }
 
 const EMPTY_RESULT = JSON.stringify({ memories: [], note: 'no relevant memories found' })

@@ -1,5 +1,6 @@
 // src/agent/heartbeat.ts
 import fs from 'node:fs';
+import { getFlags } from '../flags.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProfileStore, BlockName, BLOCK_NAMES, MAX_BLOCK_CHARS, type Profile } from '../memory/profile.js';
@@ -176,7 +177,7 @@ async function realSummarize(_block: BlockName, content: string): Promise<string
 // identity|academic|interests|relationships|state.
 
 export function isReflectEnabled(): boolean {
-  return process.env.GEORGE_REFLECT_ENABLED === 'true';
+  return getFlags().reflectEnabled;
 }
 
 // Parse an int env var, falling back to `fallback` on missing / NaN. Mirrors the

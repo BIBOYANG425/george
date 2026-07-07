@@ -27,6 +27,7 @@
 // dedup + cache bust), so capturer + tool writing the same fact never double-stores.
 
 import { z } from 'zod'
+import { getFlags } from '../flags.js'
 import { resolveProfileUserId, getMemoryConsent } from '../db/students.js'
 import { log } from '../observability/logger.js'
 import {
@@ -39,7 +40,7 @@ import { getKVCache } from '../memory/kv-cache.js'
 import { wrapTool } from './_wrap.js'
 
 export function isUpdateMemoryToolEnabled(): boolean {
-  return process.env.GEORGE_UPDATE_MEMORY_TOOL_ENABLED === 'true'
+  return getFlags().updateMemoryToolEnabled
 }
 
 // Graceful, non-throwing outcomes the model can read back. A "not saved" result is

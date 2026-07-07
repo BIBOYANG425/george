@@ -34,11 +34,14 @@ import express from 'express'
 import cors from 'cors'
 import cron from 'node-cron'
 import { config, loadTransportConfig } from './config.js'
+import { getFlags } from './flags.js'
 import { createWeChatRouter } from './adapters/wechat.js'
 import { getSpectrumHealth } from './adapters/spectrum-stats.js'
 import { isWedged, loadWatchdogConfig } from './adapters/spectrum-watchdog.js'
 import { startIMessageAdapter, stopIMessageAdapter } from './adapters/imessage.js'
 import { runOrchestrator } from './agent/orchestrator.js'
+import { collectOrchestratorReply } from './agent/collect-reply.js'
+import { runInboundPipeline } from './agent/inbound-pipeline.js'
 import { createSupabaseSessionStore } from './agent/session-store.js'
 import { getStats, log } from './observability/logger.js'
 import { matchStudentsToEvents } from './jobs/proactive.js'
@@ -59,14 +62,11 @@ import { checkInjection, INJECTION_REJECTIONS } from './security/injection-filte
 import { startHeartbeatScheduler, makeProactiveSender } from './jobs/heartbeat-scheduler.js'
 import { InboundDedup } from './adapters/inbound-dedup.js'
 import { startPendingUsersCleanupCron } from './jobs/pending-users-cleanup-cron.js'
+import { scheduleGuardedCron } from './jobs/guarded-cron.js'
 import { runHeartbeat } from './agent/heartbeat.js'
-import { createSupabaseRaisedThreadDB } from './agent/grounded-proactive.js'
+import { buildHeartbeatDeps } from './jobs/heartbeat-deps.js'
 import { ProfileStore, createSupabaseProfileDB } from './memory/profile.js'
-import { createSupabaseObservationDB } from './memory/observations.js'
-import { InstructionsStore, createSupabaseInstructionsDB } from './memory/instructions.js'
 import { getKVCache } from './memory/kv-cache.js'
-import { createDeepSeekClient } from './agent/llm-clients.js'
-import { createServiceRoleClient } from './memory/supabase-client.js'
 import { tryHandleUserCommand, setUserCommandRuntime } from './agent/user-command-router.js'
 import { draftSquadPost } from './services/squad-draft.js'
 import { checkRateLimit } from './adapters/rate-limiter.js'
@@ -89,10 +89,19 @@ import type { SpectrumClient } from './adapters/spectrum-client.js'
 // Supabase client; calling it per-request would leak connections.
 const sessionStore = createSupabaseSessionStore()
 
-// Module-level profile-store handle, populated once the heartbeat block
-// initializes below. Both /chat and /imessage/incoming pass it to the
-// orchestrator. The user-command runtime (cache + supabase + sender) is
-// injected into ./agent/user-command-router via setUserCommandRuntime() there.
+// Shared memory singletons (KV cache + ProfileStore), built ONCE at module load and
+// reused everywhere: the user-command runtime, the orchestrator (via _profileStore),
+// the heartbeat deps, AND the in-process admin dashboard mount below — so no second
+// ProfileStore/Supabase client is created. Safe to build unconditionally: db/client.ts
+// already constructs a service-role client at import, so any env that boots this module
+// already holds valid SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.
+const cache = getKVCache()
+const profileStore = new ProfileStore(createSupabaseProfileDB(), cache)
+
+// Module-level profile-store handle, populated in the shared-singletons block below.
+// Both /chat and /imessage/incoming pass it to the orchestrator. The user-command
+// runtime (cache + supabase + sender) is injected into ./agent/user-command-router
+// via setUserCommandRuntime() there.
 let _profileStore: ProfileStore | null = null
 
 // Reader for the LIVE Spectrum client, populated ONLY when startServer takes the
@@ -222,8 +231,8 @@ app.use(createWeChatRouter())
 // surface here would make it publicly reachable, gated only by a token already
 // distributed to bia-roommate's Vercel relay. Opt in with ADMIN_DASHBOARD_ENABLED=true
 // for trusted/local hosts; otherwise view it via the standalone `npm run dashboard`.
-if (process.env.ADMIN_DASHBOARD_ENABLED === 'true') {
-  app.use(createAdminDashboardRouter(supabase, config.adminToken))
+if (getFlags().adminDashboardEnabled) {
+  app.use(createAdminDashboardRouter(supabase, config.adminToken, profileStore))
   console.log('[admin] dashboard mounted at /admin/dashboard (ADMIN_DASHBOARD_ENABLED=true)')
 }
 
@@ -255,27 +264,9 @@ app.post('/chat', adminAuth, async (req, res) => {
       systemContext: {},
     })
 
-    let response = ''
-    let turnTelemetry: import('./agent/session-store.js').TurnTelemetry | undefined
-    for await (const event of runOrchestrator({ userId, channel, text, sessionStore, profileStore: _profileStore ?? undefined })) {
-      const e = event as {
-        type?: string
-        result?: string
-        telemetry?: import('./agent/session-store.js').TurnTelemetry
-        message?: { content?: Array<{ type?: string; text?: string }> }
-      }
-      if (e.type === 'telemetry') {
-        turnTelemetry = e.telemetry
-      } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
-        response = e.result
-      } else if (e.type === 'assistant' && e.message?.content && response === '') {
-        const text = e.message.content
-          .filter((c) => c.type === 'text' && typeof c.text === 'string')
-          .map((c) => c.text as string)
-          .join('')
-        if (text) response = text
-      }
-    }
+    const { text: response, telemetry: turnTelemetry } = await collectOrchestratorReply(
+      runOrchestrator({ userId, channel, text, sessionStore, profileStore: _profileStore ?? undefined }),
+    )
 
     // Save assistant turn (with per-turn telemetry enrichment when available).
     await sessionStore.save(userId, {
@@ -341,30 +332,10 @@ app.post('/chat/stream', adminAuth, async (req, res) => {
       systemContext: {},
     })
 
-    let response = ''
-    let turnTelemetry: import('./agent/session-store.js').TurnTelemetry | undefined
-    for await (const event of runOrchestrator({ userId, channel, text, sessionStore, profileStore: _profileStore ?? undefined })) {
-      const e = event as {
-        type?: string
-        result?: string
-        text?: string
-        telemetry?: import('./agent/session-store.js').TurnTelemetry
-        message?: { content?: Array<{ type?: string; text?: string }> }
-      }
-      if (e.type === 'telemetry') {
-        turnTelemetry = e.telemetry
-      } else if (e.type === 'interstitial' && e.text) {
-        send('interstitial', { text: e.text })
-      } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
-        response = e.result
-      } else if (e.type === 'assistant' && e.message?.content && response === '') {
-        const t = e.message.content
-          .filter((c) => c.type === 'text' && typeof c.text === 'string')
-          .map((c) => c.text as string)
-          .join('')
-        if (t) response = t
-      }
-    }
+    const { text: response, telemetry: turnTelemetry } = await collectOrchestratorReply(
+      runOrchestrator({ userId, channel, text, sessionStore, profileStore: _profileStore ?? undefined }),
+      { onInterstitial: (t) => send('interstitial', { text: t }) },
+    )
 
     // Strip {{NO_REPLY}} (and any control token); a suppressed reply streams an
     // empty message so the SSE client still gets a clean 'message' then 'done'.
@@ -491,115 +462,107 @@ app.post('/imessage/incoming', phoneAuth, async (req, res) => {
     const userId = body.sender!
     const text = body.text!
     try {
-      // Onboarding handshake: incoming text matches "<code>-START" (legacy)
-      // or the natural "...george (<code>)" prefill. Routes to the 3-message
-      // greeting via the imessage_outgoing queue. A natural-format code that
-      // misses the pending_users lookup is treated as a normal conversation
-      // and falls through to the orchestrator (runHandshake returns false).
-      // The Shortcut consumer runs on a phone that cannot read this host's
-      // filesystem, so attachment paths are rewritten to public URLs under
-      // ONBOARDING_ASSET_BASE_URL; if that's unset, handshake messages are
-      // queued text-only.
-      const handshake = extractCodeFromStartMessage(text)
-      if (handshake) {
-        try {
-          const assetBaseUrl = process.env.ONBOARDING_ASSET_BASE_URL
-          if (!assetBaseUrl) {
-            log('warn', 'handshake_assets_skipped', {
-              reason: 'ONBOARDING_ASSET_BASE_URL unset; Path B handshake is text-only',
-            })
-          }
-          const handled = await runHandshake({
-            code: handshake.code,
-            format: handshake.format,
-            imessageHandle: userId,
-            sendImessage: async (msg) => {
-              const images = msg.imagePaths?.length
-                ? toPublicAssetUrls(msg.imagePaths, assetBaseUrl)
-                : null
-              const files = msg.filePaths?.length
-                ? toPublicAssetUrls(msg.filePaths, assetBaseUrl)
-                : null
-              await enqueueOutgoing(msg.to, {
-                text: msg.text,
-                images: images ?? undefined,
-                files: files ?? undefined,
+      // Injection → handshake → command → orchestrate via the shared inbound
+      // pipeline (same sequence Spectrum's buildTextHandler runs). The discriminated
+      // outcome lets this queue-backed transport keep its exact per-stage handling:
+      // a command reply is enqueued RAW, an orchestrator reply goes through
+      // resolveReply first, a consumed handshake sends nothing. Injection was already
+      // enforced at the HTTP boundary above, so the pipeline's re-check is a no-op
+      // here (a passed message can never re-block).
+      const outcome = await runInboundPipeline(
+        {
+          checkInjection,
+          pickRejection: () => INJECTION_REJECTIONS[Math.floor(Math.random() * INJECTION_REJECTIONS.length)],
+          // Onboarding handshake: incoming text matches "<code>-START" (legacy) or
+          // the natural "...george (<code>)" prefill. Routes to the 3-message greeting
+          // via the imessage_outgoing queue. A natural-format code that misses the
+          // pending_users lookup is a normal conversation and falls through to the
+          // orchestrator (runHandshake returns false). The Shortcut consumer runs on a
+          // phone that can't read this host's filesystem, so attachment paths are
+          // rewritten to public URLs under ONBOARDING_ASSET_BASE_URL; if that's unset,
+          // handshake messages are queued text-only.
+          tryHandshake: async (uid, txt) => {
+            const handshake = extractCodeFromStartMessage(txt)
+            if (!handshake) return false
+            try {
+              const assetBaseUrl = process.env.ONBOARDING_ASSET_BASE_URL
+              if (!assetBaseUrl) {
+                log('warn', 'handshake_assets_skipped', {
+                  reason: 'ONBOARDING_ASSET_BASE_URL unset; Path B handshake is text-only',
+                })
+              }
+              return await runHandshake({
+                code: handshake.code,
+                format: handshake.format,
+                imessageHandle: uid,
+                sendImessage: async (msg) => {
+                  const images = msg.imagePaths?.length
+                    ? toPublicAssetUrls(msg.imagePaths, assetBaseUrl)
+                    : null
+                  const files = msg.filePaths?.length
+                    ? toPublicAssetUrls(msg.filePaths, assetBaseUrl)
+                    : null
+                  await enqueueOutgoing(msg.to, {
+                    text: msg.text,
+                    images: images ?? undefined,
+                    files: files ?? undefined,
+                  })
+                },
+                lookupPending: (code) => lookupByCode(supabase, code),
+                linkImessageHandle: (code, h) => linkImessageHandle(supabase, code, h),
+                profileUrlBase:
+                  process.env.ONBOARDING_PROFILE_URL_BASE ?? 'https://uscbia.com/george/profile',
               })
-            },
-            lookupPending: (code) => lookupByCode(supabase, code),
-            linkImessageHandle: (code, h) => linkImessageHandle(supabase, code, h),
-            profileUrlBase:
-              process.env.ONBOARDING_PROFILE_URL_BASE ?? 'https://uscbia.com/george/profile',
-          })
-          if (handled) return
-        } catch (err) {
-          log('error', 'handshake_error', { error: (err as Error).message })
-          return
-        }
-      }
+            } catch (err) {
+              // A handshake error stops the turn (send nothing further), exactly as
+              // before; report it as consumed so the pipeline does not fall through.
+              log('error', 'handshake_error', { error: (err as Error).message })
+              return true
+            }
+          },
+          // User control commands (/profile, /correct, /pause, /resume, /delete me)
+          // are handled before the orchestrator so they never incur LLM cost.
+          tryUserCommand: (uid, txt) => tryHandleUserCommand(uid, txt),
+          runOrchestratorText: async (uid, txt) => {
+            // Save user turn first so it's persisted even if the orchestrator errors.
+            await sessionStore.save(uid, {
+              sessionId: uid,
+              messages: [{ role: 'user', content: txt }],
+              systemContext: {},
+            })
+            // "Checking…" interstitial is sent as its own bubble right away via the hook.
+            const { text: reply, telemetry: turnTelemetry } = await collectOrchestratorReply(
+              runOrchestrator({ userId: uid, channel: 'imessage', text: txt, sessionStore, profileStore: _profileStore ?? undefined }),
+              { onInterstitial: async (t) => { await enqueueOutgoing(uid, t) } },
+            )
+            if (!reply) return '' // filtered as automated-message noise
+            // Save assistant turn (with per-turn telemetry enrichment when available).
+            await sessionStore.save(uid, {
+              sessionId: uid,
+              messages: [{ role: 'assistant', content: reply, telemetry: turnTelemetry }],
+              systemContext: {},
+            })
+            // Fire-and-forget per-turn memory capture (no-op unless MEMORY_CAPTURE_ENABLED).
+            if (_profileStore) void captureFactsFromTurn(_profileStore, uid, txt, reply)
+            return reply
+          },
+        },
+        { rawUserId: userId, text },
+      )
 
-      // User control commands (/profile, /correct, /pause, /resume, /delete me)
-      // are handled before the orchestrator so they never incur LLM cost.
-      const commandReply = await tryHandleUserCommand(userId, text)
-      if (commandReply !== null) {
-        await enqueueOutgoing(userId, commandReply)
+      if (outcome.kind === 'handshake') return
+      if (outcome.kind === 'injection') {
+        await enqueueOutgoing(userId, outcome.reply)
         return
       }
-
-      // Save user turn first so it's persisted even if the orchestrator errors.
-      await sessionStore.save(userId, {
-        sessionId: userId,
-        messages: [{ role: 'user', content: text }],
-        systemContext: {},
-      })
-
-      let reply = ''
-      let turnTelemetry: import('./agent/session-store.js').TurnTelemetry | undefined
-      for await (const event of runOrchestrator({ userId, channel: 'imessage', text, sessionStore, profileStore: _profileStore ?? undefined })) {
-        const e = event as {
-          type?: string
-          result?: string
-          text?: string
-          telemetry?: import('./agent/session-store.js').TurnTelemetry
-          message?: { content?: Array<{ type?: string; text?: string }> }
-        }
-        if (e.type === 'telemetry') {
-          turnTelemetry = e.telemetry
-          continue
-        }
-        // "Checking…" interstitial — send it as its own bubble right away.
-        if (e.type === 'interstitial') {
-          if (e.text) await enqueueOutgoing(userId, e.text)
-          continue
-        }
-        if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
-          reply = e.result
-        } else if (e.type === 'assistant' && e.message?.content && reply === '') {
-          const text = e.message.content
-            .filter((c) => c.type === 'text' && typeof c.text === 'string')
-            .map((c) => c.text as string)
-            .join('')
-          if (text) reply = text
-        }
+      if (outcome.kind === 'command') {
+        await enqueueOutgoing(userId, outcome.reply)
+        return
       }
-
-      if (!reply) return // filtered as automated-message noise
-
-      // Save assistant turn (with per-turn telemetry enrichment when available).
-      await sessionStore.save(userId, {
-        sessionId: userId,
-        messages: [{ role: 'assistant', content: reply, telemetry: turnTelemetry }],
-        systemContext: {},
-      })
-
-      // Strip {{NO_REPLY}} (and any control token). On this queue-backed iMessage
-      // path a suppressed reply means enqueue nothing — George stays silent, same
-      // as the empty-reply ("filtered as automated-message noise") case above.
-      const outgoing = resolveReply(reply)
+      // orchestrator: strip {{NO_REPLY}} (and any control token). A suppressed or
+      // empty reply enqueues nothing — George stays silent, same as before.
+      const outgoing = resolveReply(outcome.reply)
       if (outgoing) await enqueueOutgoing(userId, outgoing)
-
-      // Fire-and-forget per-turn memory capture (no-op unless MEMORY_CAPTURE_ENABLED).
-      if (_profileStore) void captureFactsFromTurn(_profileStore, userId, text, reply)
     } catch (err) {
       log('error', 'phone_incoming_error', { error: (err as Error).message })
     } finally {
@@ -731,22 +694,9 @@ if (process.env.ONBOARDING_ENABLED !== 'false') {
 // Squad Coordinator (Phase 4): after-join coordination. Off by default; reuses
 // the Spectrum proactive seam. A running-flag skips a tick if the previous is
 // still in flight (ticks are cheap but a slow DB shouldn't stack them).
-if (process.env.SQUAD_COORDINATION_ENABLED === 'true') {
+if (getFlags().squadCoordinationEnabled) {
   const interval = process.env.SQUAD_COORDINATION_INTERVAL_CRON || '*/15 * * * *'
-  let running = false
-  cron.schedule(interval, async () => {
-    if (running) { console.log('[squad-coordinator] previous tick still running, skipping'); return }
-    running = true
-    const t0 = Date.now()
-    try {
-      await runCoordinatorOnce(buildCoordinatorDeps())
-      console.log(`[squad-coordinator] tick complete in ${Date.now() - t0}ms`)
-    } catch (err) {
-      console.error('[squad-coordinator] tick failed:', err)
-    } finally {
-      running = false
-    }
-  })
+  scheduleGuardedCron('squad-coordinator', interval, () => runCoordinatorOnce(buildCoordinatorDeps()))
   console.log(`[squad-coordinator] enabled (${interval})`)
 }
 
@@ -756,23 +706,12 @@ if (process.env.SQUAD_COORDINATION_ENABLED === 'true') {
 // SQUAD_COORDINATION_ENABLED block (own interval, own running flag, own
 // try/catch/log). When the flag is unset this block is never registered — zero
 // new cron, zero new queries (incl. the new rereached_at column), zero sends.
-if (process.env.SQUAD_REREACH_EVAL_ENABLED === 'true') {
+if (getFlags().squadRereachEvalEnabled) {
   const interval = process.env.SQUAD_REREACH_EVAL_INTERVAL_CRON || '0 * * * *'
   setReachEvalDeps(buildReachEvalDeps())
-  let running = false
-  cron.schedule(interval, async () => {
-    if (running) { console.log('[rereach-eval] previous tick still running, skipping'); return }
-    running = true
-    const t0 = Date.now()
-    try {
-      const ctx: EvalContext = { now: new Date(), trigger: 'cron' }
-      await dispatchEvaluators(CRON_EVALUATORS, ctx)
-      console.log(`[rereach-eval] tick complete in ${Date.now() - t0}ms`)
-    } catch (err) {
-      console.error('[rereach-eval] tick failed:', err)
-    } finally {
-      running = false
-    }
+  scheduleGuardedCron('rereach-eval', interval, async () => {
+    const ctx: EvalContext = { now: new Date(), trigger: 'cron' }
+    await dispatchEvaluators(CRON_EVALUATORS, ctx)
   })
   console.log(`[rereach-eval] enabled (${interval})`)
 }
@@ -781,72 +720,29 @@ if (process.env.SQUAD_REREACH_EVAL_ENABLED === 'true') {
 // HEARTBEAT SCHEDULER
 // ==========================================
 
-// ── Shared memory singletons (user-command routing + heartbeat) ──────────
+// ── Shared memory singletons wiring (user-command routing + heartbeat) ──────
 // User control commands (/profile, /correct, /pause, /resume, /delete me) route
 // through the memory-layer singletons and must work whether or not the heartbeat
-// scheduler is running. Build them + inject the command runtime OUTSIDE the
-// HEARTBEAT_ENABLED gate so `/delete me` keeps working with heartbeats off; the
-// heartbeat block below reuses the SAME instances (no second Supabase client /
-// ProfileStore). Safe to build unconditionally: db/client.ts already constructs a
-// service-role client at import, so any env that boots this module already holds
-// valid SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.
-const cache = getKVCache();
-const profileStore = new ProfileStore(createSupabaseProfileDB(), cache);
-const memorySupabase = createServiceRoleClient();
-
-// Promote the profile store to module scope so /chat and /imessage/incoming can
-// pass it to the orchestrator, and inject the user-command runtime so
-// tryHandleUserCommand can act on commands regardless of the heartbeat flag.
+// scheduler is running. Inject the command runtime OUTSIDE the HEARTBEAT_ENABLED
+// gate so `/delete me` keeps working with heartbeats off; the heartbeat block below
+// reuses the SAME instances (cache + profileStore + the db/client Supabase — no
+// second client/store). `supabase` here is the shared service-role client from
+// db/client.js (the one the rest of this module already uses).
 _profileStore = profileStore;
 setUserCommandRuntime({
   cache,
   profileStore,
-  supabase: memorySupabase,
+  supabase,
   sendImessage: async (msg: { to: string; text: string }) => {
     await enqueueOutgoing(msg.to, msg.text);
   },
 });
 
 if (process.env.HEARTBEAT_ENABLED !== 'false') {
-  const instructionsStore = new InstructionsStore(createSupabaseInstructionsDB(), cache);
-  const supabase = memorySupabase;
-  const llm = createDeepSeekClient();
-  const heartbeatDeps = {
+  const heartbeatDeps = buildHeartbeatDeps({
     profileStore,
-    instructionsStore,
-    raisedThreadDb: createSupabaseRaisedThreadDB(),
-    // P6 observational-memory — Reflector seam. Harmless when GEORGE_REFLECT_ENABLED
-    // is off (the flag gates execution in runHeartbeat).
-    observationDB: createSupabaseObservationDB(),
-    async loadConfig(userId: string) {
-      const { data, error } = await supabase
-        .from('user_heartbeat_config')
-        .select('*')
-        .eq('user_id', userId)
-        .maybeSingle();
-      if (error) throw error;
-      return data;
-    },
-    async loadRecentMessages(userId: string, limit: number) {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('role, content, created_at')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false })
-        .limit(limit);
-      if (error) throw error;
-      return (data ?? []).reverse();
-    },
-    async loadDueFollowups(userId: string) {
-      const { data, error } = await supabase
-        .from('student_followups')
-        .select('id, content, scheduled_for')
-        .eq('user_id', userId)
-        .eq('status', 'pending')
-        .lte('scheduled_for', new Date().toISOString());
-      if (error) throw error;
-      return data ?? [];
-    },
+    cache,
+    supabase,
     // Proactive heartbeat sends route through the active transport. Under
     // TRANSPORT=spectrum the legacy imessage_outgoing queue has NO drainer, so a
     // proactive enqueued there would rot forever; makeProactiveSender routes it
@@ -858,27 +754,7 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
       getSpectrumClient: () => spectrumClientGetter?.() ?? null,
       enqueueLegacy: (to: string, text: string) => enqueueOutgoing(to, text),
     }),
-    async insertFollowup(row: { userId: string; content: string; scheduledFor: string }) {
-      const { error } = await supabase.from('student_followups').insert({
-        user_id: row.userId,
-        content: row.content,
-        scheduled_for: row.scheduledFor,
-      });
-      if (error) throw error;
-    },
-    async writeLog(entry: any) {
-      const { error } = await supabase.from('heartbeat_log').insert(entry);
-      if (error) console.error('heartbeat log write failed', error);
-    },
-    async updateLastHeartbeatAt(userId: string) {
-      const { error } = await supabase
-        .from('user_heartbeat_config')
-        .update({ last_heartbeat_at: new Date().toISOString() })
-        .eq('user_id', userId);
-      if (error) throw error;
-    },
-    callLLM: llm.call.bind(llm),
-  };
+  });
   startHeartbeatScheduler({
     async loadAllConfigs() {
       const { data, error } = await supabase.from('user_heartbeat_config').select('*');

@@ -19,13 +19,14 @@
 // runs and never writes — behavior is byte-for-byte unchanged.
 
 import { callLightweightLLM } from '../llm-providers.js';
+import { getFlags } from '../../flags.js';
 import { config } from '../../config.js';
 import { ProfileStore } from '../../memory/profile.js';
 import { log } from '../../observability/logger.js';
 import type { Evaluator, EvalContext } from './types.js';
 
 export function isRelationshipEvalEnabled(): boolean {
-  return process.env.GEORGE_RELATIONSHIP_EVAL_ENABLED === 'true';
+  return getFlags().relationshipEvalEnabled;
 }
 
 // Rewrite cadence: roughly every Nth user message. Kept as a pure decision so it

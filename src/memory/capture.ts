@@ -20,6 +20,7 @@
 // no-op: no LLM call, no writes — byte-identical to the pre-P6 behavior.
 
 import { callLightweightLLM } from '../agent/llm-providers.js';
+import { getFlags } from '../flags.js';
 import { ProfileStore, DURABLE_FACT_BLOCKS, BlockName } from './profile.js';
 import { resolveProfileUserId, getMemoryConsent } from '../db/students.js';
 import { log } from '../observability/logger.js';
@@ -30,11 +31,11 @@ import {
 } from './observations.js';
 
 export function isCaptureEnabled(): boolean {
-  return process.env.MEMORY_CAPTURE_ENABLED === 'true';
+  return getFlags().memoryCaptureEnabled;
 }
 
 export function isObserveEnabled(): boolean {
-  return process.env.GEORGE_OBSERVE_ENABLED === 'true';
+  return getFlags().observeEnabled;
 }
 
 // Which blocks the capturer (and the update_memory tool) may write to is the

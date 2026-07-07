@@ -39,6 +39,9 @@ import { checkRateLimit } from './rate-limiter.js'
 import { log } from '../observability/logger.js'
 import { renderDelayContext } from '../agent/activity-state.js'
 import { runOrchestrator } from '../agent/orchestrator.js'
+import { collectOrchestratorReply } from '../agent/collect-reply.js'
+import { runInboundPipeline } from '../agent/inbound-pipeline.js'
+import { getFlags } from '../flags.js'
 import { inflightTurns } from '../agent/inflight-registry.js'
 import { captureFactsFromTurn } from '../memory/capture.js'
 import { TURN_EVALUATORS, dispatchEvaluators } from '../agent/evaluators/registry.js'
@@ -87,7 +90,7 @@ function readBurstConfig(): { enabled: boolean; perMin: number; strikes: number;
     return Number.isFinite(n) && n > 0 ? n : d
   }
   return {
-    enabled: process.env.SPECTRUM_BURST_GUARD_ENABLED === 'true',
+    enabled: getFlags().burstGuardEnabled,
     perMin: int(process.env.SPECTRUM_BURST_PER_MIN, 30),
     strikes: int(process.env.SPECTRUM_BURST_STRIKES, 3),
     cooldownMs: Math.min(Math.max(int(process.env.SPECTRUM_COOLDOWN_MS, 300_000), 300_000), 600_000), // clamp 5-10min
@@ -106,7 +109,7 @@ const BURST_COOLDOWN_NOTICE = '学长这会儿有点接不过来了😮‍💨 �
 // interval is how often the drainer re-reads the durable queue for due bubbles.
 function readPacingConfig(): { enabled: boolean; drainIntervalMs: number } {
   return {
-    enabled: process.env.GEORGE_PACING_ENABLED === 'true',
+    enabled: getFlags().pacingEnabled,
     drainIntervalMs: Number(process.env.PACING_DRAIN_INTERVAL_MS) || 1000,
   }
 }
@@ -329,15 +332,27 @@ export interface TextHandlerDeps {
 
 export function buildTextHandler(deps: TextHandlerDeps) {
   return async (rawUserId: string, text: string, reply: ReplyHandle, abortController?: AbortController, delayContext?: string): Promise<string | null> => {
-    const userId = deps.normalizeHandle(rawUserId)
-    // Gates run on the RAW user text only — delayContext is never part of what's
-    // checked, handshake-parsed, or command-matched; it only reaches the agent.
-    if (deps.checkInjection(text).blocked) return deps.pickRejection()
-    if (await deps.tryHandshake(userId, text, reply)) return null
-    const cmd = await deps.tryUserCommand(userId, text)
-    if (cmd !== null) return cmd
-    const out = await deps.runOrchestratorText(userId, text, abortController, delayContext, reply)
-    return out || null
+    // The injection → handshake → command → orchestrate sequence lives in the shared
+    // runInboundPipeline; this transport flattens its discriminated outcome back to
+    // the string | null the flush loop expects (byte-for-byte the previous behavior:
+    // injection → rejection, handshake → null, command → its reply, orchestrator →
+    // its reply or null when empty).
+    const outcome = await runInboundPipeline<ReplyHandle>(
+      // tryHandshake takes a required ReplyHandle here; widen it to the pipeline's
+      // optional-reply shape (spectrum always supplies one). Every other dep matches.
+      { ...deps, tryHandshake: (u, t, r) => deps.tryHandshake(u, t, r as ReplyHandle) },
+      { rawUserId, text, reply, abortController, delayContext },
+    )
+    switch (outcome.kind) {
+      case 'injection':
+        return outcome.reply
+      case 'handshake':
+        return null
+      case 'command':
+        return outcome.reply
+      case 'orchestrator':
+        return outcome.reply || null
+    }
   }
 }
 
@@ -433,38 +448,26 @@ export function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandle
       let finalText = ''
       let turnTelemetry: import('../agent/session-store.js').TurnTelemetry | undefined
       try {
-        for await (const event of runOrchestrator({
-          userId,
-          channel: 'imessage',
-          text,
-          sessionStore: deps.sessionStore,
-          profileStore: deps.profileStore,
-          abortController,
-          delayContext,
-        })) {
-          const e = event as {
-            type?: string
-            result?: string
-            emoji?: string
-            telemetry?: import('../agent/session-store.js').TurnTelemetry
-            message?: { content?: Array<{ type?: string; text?: string }> }
-          }
-          if (e.type === 'reaction' && typeof e.emoji === 'string' && e.emoji && reply?.react) {
-            // George tapped back (react_to_user). Apply the native iMessage
-            // tapback to the inbound message; best-effort, never blocks the reply.
-            void reply.react(e.emoji).catch(() => {})
-          } else if (e.type === 'telemetry') {
-            turnTelemetry = e.telemetry
-          } else if (e.type === 'result' && typeof e.result === 'string' && e.result.length > 0) {
-            finalText = e.result
-          } else if (e.type === 'assistant' && e.message?.content && finalText === '') {
-            const t = e.message.content
-              .filter((c) => c.type === 'text' && typeof c.text === 'string')
-              .map((c) => c.text as string)
-              .join('')
-            if (t) finalText = t
-          }
-        }
+        const collected = await collectOrchestratorReply(
+          runOrchestrator({
+            userId,
+            channel: 'imessage',
+            text,
+            sessionStore: deps.sessionStore,
+            profileStore: deps.profileStore,
+            abortController,
+            delayContext,
+          }),
+          {
+            // George tapped back (react_to_user). Apply the native iMessage tapback
+            // to the inbound message; best-effort, never blocks the reply.
+            onReaction: (emoji) => {
+              if (reply?.react) void reply.react(emoji).catch(() => {})
+            },
+          },
+        )
+        finalText = collected.text
+        turnTelemetry = collected.telemetry
       } catch (err) {
         // ON path: a SUPERSEDED (aborted) turn persists NOTHING — its text is
         // refolded into the next turn. A genuine ERROR still saves the user turn

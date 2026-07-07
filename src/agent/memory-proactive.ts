@@ -30,13 +30,14 @@
 // remembered observation is never raised twice.
 
 import type { UnconsolidatedObservation } from '../memory/observations.js';
+import { getFlags } from '../flags.js';
 
 // DEFAULT-OFF feature gate. Read from process.env at call time (same precedent as
 // isGroundedProactiveEnabled / isRecallEnabled) so importing this module never
 // triggers config.ts's eager required-env validation. Unset / any value other
 // than 'true' => disabled, and the heartbeat prompt is unchanged.
 export function isMemoryProactiveEnabled(): boolean {
-  return process.env.GEORGE_MEMORY_PROACTIVE_ENABLED === 'true';
+  return getFlags().memoryProactiveEnabled;
 }
 
 // Higher salience bar than per-turn Recall (RECALL_MIN_SALIENCE default 2): an
