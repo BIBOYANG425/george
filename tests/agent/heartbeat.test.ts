@@ -10,6 +10,7 @@ function makeStores() {
   const profileRows = new Map<string, any>();
   const instructionsRows = new Map<string, string>();
   const followupRows: any[] = [];
+  const claimedFollowups: any[] = [];
   const logs: any[] = [];
   const sentMessages: any[] = [];
 
@@ -94,7 +95,19 @@ function makeStores() {
         last_heartbeat_at: null,
       })),
       loadRecentMessages: vi.fn(async () => []),
-      loadDueFollowups: vi.fn(async () => []),
+      claimDueFollowups: vi.fn(async () => claimedFollowups.map((row) => ({ ...row }))),
+      markFollowupsTriggered: vi.fn(async (ids: number[]) => {
+        for (const id of ids) {
+          const row = claimedFollowups.find((candidate) => candidate.id === id);
+          if (row) row.status = 'triggered';
+        }
+      }),
+      releaseFollowups: vi.fn(async (ids: number[]) => {
+        for (const id of ids) {
+          const row = claimedFollowups.find((candidate) => candidate.id === id);
+          if (row) row.status = 'pending';
+        }
+      }),
       sendImessage: vi.fn(async (msg: any) => {
         sentMessages.push(msg);
       }),
@@ -111,6 +124,7 @@ function makeStores() {
     followupRows,
     logs,
     sentMessages,
+    claimedFollowups,
     raisedThreadRows,
   };
 }
@@ -139,6 +153,50 @@ describe('runHeartbeat', () => {
     await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
     expect(logs[0].outcome).toBe('error');
     expect(logs[0].error_message).toMatch(/LLM unavailable/);
+  });
+
+  it('claims due followups and marks them triggered after a successful proactive send', async () => {
+    const { deps, claimedFollowups } = makeStores();
+    claimedFollowups.push({ id: 7, content: 'ask about interview', scheduled_for: '2026-07-01T00:00:00Z', status: 'claimed' });
+    const mockLLM = vi.fn().mockResolvedValue({
+      toolCalls: [{ name: 'send_proactive_message', input: { text: 'how did the interview go?', channel: 'imessage' } }],
+    });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    expect(deps.claimDueFollowups).toHaveBeenCalledTimes(1);
+    expect(deps.markFollowupsTriggered).toHaveBeenCalledWith([7]);
+    expect(deps.releaseFollowups).not.toHaveBeenCalled();
+  });
+
+  it('releases due followups when the chosen action does not fulfill them', async () => {
+    const { deps, claimedFollowups } = makeStores();
+    claimedFollowups.push({ id: 9, content: 'ask about interview', scheduled_for: '2026-07-01T00:00:00Z', status: 'claimed' });
+    const mockLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    expect(deps.markFollowupsTriggered).not.toHaveBeenCalled();
+    expect(deps.releaseFollowups).toHaveBeenCalledWith([9]);
+  });
+
+  it('releases claimed followups when heartbeat handling fails', async () => {
+    const { deps, claimedFollowups } = makeStores();
+    claimedFollowups.push({ id: 8, content: 'retry me', scheduled_for: '2026-07-01T00:00:00Z', status: 'claimed' });
+    const mockLLM = vi.fn().mockRejectedValue(new Error('LLM unavailable'));
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    expect(deps.releaseFollowups).toHaveBeenCalledWith([8]);
+    expect(deps.markFollowupsTriggered).not.toHaveBeenCalled();
+  });
+
+  it('rejects multiple tool calls before executing any side effects', async () => {
+    const { deps, logs, sentMessages } = makeStores();
+    const mockLLM = vi.fn().mockResolvedValue({
+      toolCalls: [
+        { name: 'send_proactive_message', input: { text: 'first', channel: 'imessage' } },
+        { name: 'heartbeat_ok', input: {} },
+      ],
+    });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    expect(sentMessages).toEqual([]);
+    expect(logs[0].outcome).toBe('error');
+    expect(logs[0].error_message).toMatch(/exactly one tool call/i);
   });
 });
 

@@ -20,9 +20,17 @@ const HEARTBEAT_TIMEOUT_MS = 60_000;
 // long LLM round-trip). A small pool keeps the fan-out bounded without a new dep.
 const HEARTBEAT_MAX_CONCURRENCY = 4;
 
-function parseCadenceHours(cadence: string): number {
-  const m = cadence.match(/(\d+)\s*hours?/);
-  return m ? parseInt(m[1], 10) : 12;
+const CADENCE_MS: Readonly<Record<string, number | null>> = {
+  '12 hours': 12 * 60 * 60 * 1000,
+  '24 hours': 24 * 60 * 60 * 1000,
+  '7 days': 7 * 24 * 60 * 60 * 1000,
+  off: null,
+};
+
+export function parseCadenceMs(cadence: string): number | null {
+  return Object.prototype.hasOwnProperty.call(CADENCE_MS, cadence)
+    ? CADENCE_MS[cadence]!
+    : null;
 }
 
 // Per-user timezone (not always LA), so pass the row's timezone through to the
@@ -64,10 +72,11 @@ export function selectDueUsers(rows: ConfigRow[], now: Date): ConfigRow[] {
     if (!isWithinActiveHours(now, row)) {
       return false;
     }
+    const cadenceMs = parseCadenceMs(row.cadence);
+    if (cadenceMs === null) return false;
     if (row.last_heartbeat_at) {
       const last = new Date(row.last_heartbeat_at);
-      const hours = parseCadenceHours(row.cadence);
-      if (now.getTime() - last.getTime() < hours * 3600 * 1000) {
+      if (now.getTime() - last.getTime() < cadenceMs) {
         return false;
       }
     }
@@ -158,22 +167,19 @@ export interface ProactiveSpectrumClient {
 
 export interface ProactiveSenderDeps {
   // Live Spectrum client when connected, else null (legacy transport, or Spectrum
-  // reconnecting). Read per-send so a reconnect is picked up.
+// reconnecting). Read per-send so a reconnect is picked up.
   getSpectrumClient: () => ProactiveSpectrumClient | null;
   // Durable legacy queue (imessage_outgoing) fallback.
   enqueueLegacy: (to: string, text: string) => Promise<void>;
+  transport?: 'legacy' | 'spectrum';
 }
 
 // Build the heartbeat proactive-send function. Under the Spectrum transport the
 // legacy imessage_outgoing queue has NO drainer (no iPhone Shortcut polling), so a
 // proactive enqueued there would rot forever; route it through the LIVE Spectrum
-// client (sendProactive opens a 1:1 space) when connected. Fall back to the durable
-// legacy queue when there is no client — either the transport is legacy (today's
-// byte-identical behavior, getSpectrumClient always null) OR Spectrum is the
-// transport but momentarily reconnecting. In the reconnecting case we deliberately
-// QUEUE (persist) rather than drop: a queued retry a human/future drain can pick up
-// beats a silently-lost proactive. Deps-injected so it unit-tests without importing
-// the server or spectrum-ts.
+// client (sendProactive opens a 1:1 space) when connected. Legacy transport retains
+// its durable queue. Spectrum reconnects fail retryably because that legacy queue has
+// no drainer in Spectrum mode and therefore cannot truthfully report delivery.
 export function makeProactiveSender(
   deps: ProactiveSenderDeps,
 ): (msg: { to: string; text: string }) => Promise<void> {
@@ -182,6 +188,9 @@ export function makeProactiveSender(
     if (client) {
       await client.sendProactive(msg.to, [msg.text]);
       return;
+    }
+    if (deps.transport === 'spectrum') {
+      throw new Error('Spectrum transport unavailable; proactive delivery is retryable');
     }
     await deps.enqueueLegacy(msg.to, msg.text);
   };

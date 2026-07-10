@@ -77,7 +77,9 @@ export interface HeartbeatDeps {
   raisedThreadDb: RaisedThreadDB;
   loadConfig: (userId: string) => Promise<HeartbeatConfig | null>;
   loadRecentMessages: (userId: string, limit: number) => Promise<MessageRow[]>;
-  loadDueFollowups: (userId: string) => Promise<FollowupRow[]>;
+  claimDueFollowups: (userId: string) => Promise<FollowupRow[]>;
+  markFollowupsTriggered: (ids: number[]) => Promise<void>;
+  releaseFollowups: (ids: number[]) => Promise<void>;
   sendImessage: (msg: { to: string; text: string }) => Promise<void>;
   insertFollowup: (row: { userId: string; content: string; scheduledFor: string }) => Promise<void>;
   writeLog: (entry: HeartbeatLogEntry) => Promise<void>;
@@ -310,6 +312,7 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?:
   const tickState = { proactivesSent: 0 };
   let outcome: HeartbeatLogEntry['outcome'] = 'ok';
   let errorMessage: string | null = null;
+  let claimedFollowupIds: number[] = [];
 
   const logAction = (action: Record<string, unknown>) => {
     actions.push(action);
@@ -323,8 +326,9 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?:
       deps.profileStore.loadProfile(userId),
       deps.instructionsStore.load(userId),
       deps.loadRecentMessages(userId, RECENT_MESSAGES_LIMIT),
-      deps.loadDueFollowups(userId),
+      deps.claimDueFollowups(userId),
     ]);
+    claimedFollowupIds = dueFollowups.map((followup) => followup.id);
 
     // The grounded-proactive guidance is part of the feature's prompt footprint,
     // so it is appended ONLY when the flag is on. With the flag off the system
@@ -437,14 +441,15 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?:
       signal,
     });
 
-    for (const call of response.toolCalls) {
-      const tool = tools.find((t) => t.name === call.name);
-      if (!tool) {
-        throw new Error(`Unknown tool: ${call.name}`);
-      }
-      await tool.handler(call.input as any);
-      if (call.name === 'update_block') outcome = 'block_update';
-      else if (call.name === 'send_proactive_message') {
+    if (response.toolCalls.length !== 1) {
+      throw new Error(`Heartbeat must return exactly one tool call; received ${response.toolCalls.length}`);
+    }
+    const call = response.toolCalls[0]!;
+    const tool = tools.find((candidate) => candidate.name === call.name);
+    if (!tool) throw new Error(`Unknown tool: ${call.name}`);
+    await tool.handler(call.input as any);
+    if (call.name === 'update_block') outcome = 'block_update';
+    else if (call.name === 'send_proactive_message') {
         outcome = 'proactive_send';
         // P4 — mark the grounded thread raised so it is not raised again next
         // tick. The ledger now writes to the proactive_raised_threads table;
@@ -474,8 +479,16 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?:
             memoryKeys: memoryCandidates.map((c) => c.key),
           });
         }
-      } else if (call.name === 'add_followup') outcome = 'followup_scheduled';
-      else outcome = 'ok';
+    } else if (call.name === 'add_followup') outcome = 'followup_scheduled';
+    else outcome = 'ok';
+
+    if (claimedFollowupIds.length > 0) {
+      if (call.name === 'send_proactive_message') {
+        await deps.markFollowupsTriggered(claimedFollowupIds);
+      } else {
+        await deps.releaseFollowups(claimedFollowupIds);
+      }
+      claimedFollowupIds = [];
     }
 
     await deps.updateLastHeartbeatAt(userId);
@@ -506,6 +519,17 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?:
   } catch (err) {
     outcome = 'error';
     errorMessage = err instanceof Error ? err.message : String(err);
+    if (claimedFollowupIds.length > 0) {
+      try {
+        await deps.releaseFollowups(claimedFollowupIds);
+      } catch (releaseErr) {
+        log('error', 'followup_release_failed', {
+          userId,
+          ids: claimedFollowupIds,
+          error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
+        });
+      }
+    }
   } finally {
     await deps.writeLog({
       user_id: userId,
