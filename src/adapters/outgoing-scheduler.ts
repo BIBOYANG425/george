@@ -26,6 +26,7 @@
  */
 
 import { pacedDelays, type TypingSimOpts } from './typing-sim.js'
+import { randomUUID } from 'node:crypto'
 
 // ---------------------------------------------------------------------------
 // Storage seam
@@ -45,6 +46,8 @@ export interface OutgoingBubbleRow {
   seq: number
   sendAt: number
   sentAt: number | null
+  claimedBy?: string | null
+  claimExpiresAt?: number | null
 }
 
 /**
@@ -56,10 +59,12 @@ export interface OutgoingSchedulerDB {
   insertBubbles(
     rows: Array<{ handle: string; content: string; seq: number; sendAt: number }>,
   ): Promise<void>
-  /** Pending rows due now: sentAt IS null AND sendAt <= nowMs, ordered by sendAt asc. */
-  selectDue(nowMs: number, limit?: number): Promise<OutgoingBubbleRow[]>
-  /** Flip a row to sent at the given epoch-ms. */
-  markSent(id: string, sentAtMs: number): Promise<void>
+  /** Atomically lease pending due rows to one worker. */
+  claimDue(nowMs: number, workerId: string, leaseMs: number, limit?: number): Promise<OutgoingBubbleRow[]>
+  /** Flip a row to sent only when its lease is still owned by this worker. */
+  markSent(id: string, workerId: string, sentAtMs: number): Promise<boolean>
+  /** Release a failed send for retry by another drain. */
+  releaseClaim(id: string, workerId: string): Promise<void>
   /** Delete still-pending rows for a handle; return the count deleted. */
   cancelPending(handle: string): Promise<number>
   /**
@@ -108,17 +113,32 @@ export function createInMemoryOutgoingSchedulerDB(
         })
       }
     },
-    async selectDue(nowMs, limit) {
+    async claimDue(nowMs, workerId, leaseMs, limit) {
       const due = rows
-        .filter((r) => r.sentAt === null && r.sendAt <= nowMs)
+        .filter((r) => r.sentAt === null && r.sendAt <= nowMs && (!r.claimExpiresAt || r.claimExpiresAt <= nowMs))
         .sort((a, b) => a.sendAt - b.sendAt)
       const capped = limit !== undefined ? due.slice(0, limit) : due
+      for (const row of capped) {
+        row.claimedBy = workerId
+        row.claimExpiresAt = nowMs + leaseMs
+      }
       // Hand back copies so callers can't mutate the store through the snapshot.
       return capped.map((r) => ({ ...r }))
     },
-    async markSent(id, sentAtMs) {
-      const row = rows.find((r) => r.id === id)
-      if (row) row.sentAt = sentAtMs
+    async markSent(id, workerId, sentAtMs) {
+      const row = rows.find((r) => r.id === id && r.claimedBy === workerId && r.sentAt === null)
+      if (!row) return false
+      row.sentAt = sentAtMs
+      row.claimedBy = null
+      row.claimExpiresAt = null
+      return true
+    },
+    async releaseClaim(id, workerId) {
+      const row = rows.find((r) => r.id === id && r.claimedBy === workerId && r.sentAt === null)
+      if (row) {
+        row.claimedBy = null
+        row.claimExpiresAt = null
+      }
     },
     async cancelPending(handle) {
       let deleted = 0
@@ -183,7 +203,13 @@ export interface OutgoingScheduler {
   cancelPending(handle: string): Promise<number>
 }
 
-export function createOutgoingScheduler(db: OutgoingSchedulerDB): OutgoingScheduler {
+export function createOutgoingScheduler(
+  db: OutgoingSchedulerDB,
+  opts?: { workerId?: string; leaseMs?: number; markAttempts?: number },
+): OutgoingScheduler {
+  const workerId = opts?.workerId ?? `outgoing-worker-${randomUUID()}`
+  const leaseMs = opts?.leaseMs ?? 30_000
+  const markAttempts = Math.max(1, opts?.markAttempts ?? 3)
   return {
     async schedule(handle, bubbles, opts) {
       // Nothing to defer: a single bubble (or empty) is fully handled inline.
@@ -209,7 +235,7 @@ export function createOutgoingScheduler(db: OutgoingSchedulerDB): OutgoingSchedu
     },
 
     async drainDue(nowMs, send) {
-      const due = await db.selectDue(nowMs)
+      const due = await db.claimDue(nowMs, workerId, leaseMs)
       let sentCount = 0
       for (const row of due) {
         try {
@@ -218,13 +244,29 @@ export function createOutgoingScheduler(db: OutgoingSchedulerDB): OutgoingSchedu
           // Per-row isolation: leave this row pending (no markSent) so it retries
           // next tick, log, and move on to the next due row.
           console.error(
-            `[outgoing-scheduler] send failed for bubble ${row.id} (${row.handle}, seq ${row.seq}); leaving pending`,
+            `[outgoing-scheduler] send failed for bubble ${row.id} (${row.handle}, seq ${row.seq}); releasing claim`,
             err,
           )
+          await db.releaseClaim(row.id, workerId).catch((releaseErr) => {
+            console.error(`[outgoing-scheduler] release failed for bubble ${row.id}`, releaseErr)
+          })
           continue
         }
-        await db.markSent(row.id, nowMs)
-        sentCount += 1
+        let marked = false
+        for (let attempt = 1; attempt <= markAttempts; attempt += 1) {
+          try {
+            marked = await db.markSent(row.id, workerId, nowMs)
+            if (marked) break
+          } catch (err) {
+            if (attempt === markAttempts) {
+              console.error(
+                `[outgoing-scheduler] delivered bubble ${row.id} but acknowledgement failed after ${markAttempts} attempts; retaining lease`,
+                err,
+              )
+            }
+          }
+        }
+        if (marked) sentCount += 1
       }
       return sentCount
     },
@@ -240,8 +282,8 @@ export function createOutgoingScheduler(db: OutgoingSchedulerDB): OutgoingSchedu
 // ---------------------------------------------------------------------------
 
 /**
- * Drive scheduler.drainDue on a fixed interval. Errors are swallowed/logged so a
- * single bad tick never kills the interval. `clock` defaults to Date.now (it is
+ * Drive scheduler.drainDue with adaptive polling. Errors are swallowed/logged so a
+ * single bad tick never kills the loop. `clock` defaults to Date.now (it is
  * overridable only so a test can prove the wiring without real wall-clock time).
  * The real logic lives in drainDue, not here — keep this dumb.
  *
@@ -255,30 +297,47 @@ export function createOutgoingScheduler(db: OutgoingSchedulerDB): OutgoingSchedu
 export function startDrainer(
   scheduler: Pick<OutgoingScheduler, 'drainDue'>,
   send: (handle: string, content: string) => Promise<void>,
-  opts?: { intervalMs?: number; clock?: () => number },
+  opts?: {
+    intervalMs?: number
+    activeIntervalMs?: number
+    idleIntervalMs?: number
+    errorIntervalMs?: number
+    clock?: () => number
+  },
 ): { stop(): void } {
-  const intervalMs = opts?.intervalMs ?? 1000
+  const activeIntervalMs = opts?.activeIntervalMs ?? opts?.intervalMs ?? 250
+  const idleIntervalMs = opts?.idleIntervalMs ?? opts?.intervalMs ?? 2_000
+  const errorIntervalMs = opts?.errorIntervalMs ?? opts?.intervalMs ?? 5_000
   const clock = opts?.clock ?? Date.now
   let running = false
+  let stopped = false
+  let handle: ReturnType<typeof setTimeout>
 
-  const handle = setInterval(() => {
-    if (running) return // previous tick still draining — skip, never overlap
+  const schedule = (delayMs: number) => {
+    if (stopped) return
+    handle = setTimeout(tick, delayMs)
+    if (typeof handle.unref === 'function') handle.unref()
+  }
+  const tick = () => {
+    if (running || stopped) return
     running = true
     void scheduler
       .drainDue(clock(), send)
+      .then((count) => schedule(count > 0 ? activeIntervalMs : idleIntervalMs))
       .catch((err) => {
         console.error('[outgoing-scheduler] drain tick failed', err)
+        schedule(errorIntervalMs)
       })
       .finally(() => {
         running = false
       })
-  }, intervalMs)
-  // Don't let the drainer keep the process alive on its own.
-  if (typeof handle.unref === 'function') handle.unref()
+  }
+  schedule(activeIntervalMs)
 
   return {
     stop() {
-      clearInterval(handle)
+      stopped = true
+      clearTimeout(handle)
     },
   }
 }
