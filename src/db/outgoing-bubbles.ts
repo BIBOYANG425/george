@@ -25,8 +25,8 @@ import type {
   OutgoingSchedulerDB,
 } from '../adapters/outgoing-scheduler.js'
 
-// Default selectDue page size. The drainer ticks ~1/s, so a burst's tail is a
-// handful of rows; 50 is comfortable headroom without unbounded reads.
+// Default atomic-claim batch size. A burst's tail is a handful of rows; 50 is
+// comfortable headroom without unbounded reads when the drainer wakes.
 const DEFAULT_DUE_LIMIT = 50
 
 // Raw row shape as it comes back from PostgREST (timestamptz are ISO strings).

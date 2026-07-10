@@ -288,11 +288,9 @@ export function createOutgoingScheduler(
  * The real logic lives in drainDue, not here — keep this dumb.
  *
  * RE-ENTRANCY GUARD (critical): a tick is SKIPPED while a previous tick is still
- * draining. drainDue selects rows by `sentAt IS null`, which stays true during the
- * send → markSent gap; a single send (sendProactive opens a fresh iMessage space)
- * can outlast intervalMs, so without this guard a second overlapping tick would
- * re-select and RE-SEND already-delivered bubbles (duplicate messages to a real
- * user). With exactly one drainer + this guard, no row is ever in flight twice.
+ * draining. Durable claims prevent other workers from selecting the same row, and
+ * this local guard prevents re-entry within one process while a transport send is
+ * still in flight.
  */
 export function startDrainer(
   scheduler: Pick<OutgoingScheduler, 'drainDue'>,
@@ -306,7 +304,7 @@ export function startDrainer(
   },
 ): { stop(): void } {
   const activeIntervalMs = opts?.activeIntervalMs ?? opts?.intervalMs ?? 250
-  const idleIntervalMs = opts?.idleIntervalMs ?? opts?.intervalMs ?? 2_000
+  const idleIntervalMs = opts?.idleIntervalMs ?? opts?.intervalMs ?? 30_000
   const errorIntervalMs = opts?.errorIntervalMs ?? opts?.intervalMs ?? 5_000
   const clock = opts?.clock ?? Date.now
   let running = false

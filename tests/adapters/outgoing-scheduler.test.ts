@@ -274,10 +274,8 @@ describe('startDrainer re-entrancy guard', () => {
     try {
       let calls = 0
       let resolveFirst: ((value: void | PromiseLike<void>) => void) | undefined
-      // drainDue selects on sentAt===null, which stays true during the send→markSent
-      // gap. If a slow tick overlapped the next, the same rows would be re-selected
-      // and RE-SENT. This proves the guard prevents that: tick 1 blocks; tick 2 is
-      // skipped, not run concurrently.
+      // If a slow tick overlaps the next local wake-up it must not start a second
+      // drain. Durable row claims protect cross-worker delivery separately.
       const scheduler = {
         drainDue: vi.fn(async (): Promise<number> => {
           calls += 1
@@ -322,6 +320,25 @@ describe('startDrainer re-entrancy guard', () => {
       expect(scheduler.drainDue).toHaveBeenCalledTimes(1)
       await vi.advanceTimersByTimeAsync(1)
       expect(scheduler.drainDue).toHaveBeenCalledTimes(2)
+      drainer.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('uses a 30-second idle recovery poll by default', async () => {
+    vi.useFakeTimers()
+    try {
+      const scheduler = { drainDue: vi.fn(async () => 0) }
+      const drainer = startDrainer(scheduler, async () => {}, { clock: () => 0 })
+
+      await vi.advanceTimersByTimeAsync(250)
+      expect(scheduler.drainDue).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(scheduler.drainDue).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(scheduler.drainDue).toHaveBeenCalledTimes(2)
+
       drainer.stop()
     } finally {
       vi.useRealTimers()
