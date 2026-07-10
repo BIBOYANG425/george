@@ -159,12 +159,77 @@ describe('runHeartbeat', () => {
     const { deps, claimedFollowups } = makeStores();
     claimedFollowups.push({ id: 7, content: 'ask about interview', scheduled_for: '2026-07-01T00:00:00Z', status: 'claimed' });
     const mockLLM = vi.fn().mockResolvedValue({
-      toolCalls: [{ name: 'send_proactive_message', input: { text: 'how did the interview go?', channel: 'imessage' } }],
+      toolCalls: [{ name: 'send_proactive_message', input: { text: 'how did the interview go?', channel: 'imessage', followup_ids: [7] } }],
     });
     await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
     expect(deps.claimDueFollowups).toHaveBeenCalledTimes(1);
     expect(deps.markFollowupsTriggered).toHaveBeenCalledWith([7]);
     expect(deps.releaseFollowups).not.toHaveBeenCalled();
+  });
+
+  it('exposes claimed followup IDs in the prompt for explicit fulfillment', async () => {
+    const { deps, claimedFollowups } = makeStores();
+    claimedFollowups.push({ id: 15, content: 'ask about interview', scheduled_for: '2026-07-01T00:00:00Z', status: 'claimed' });
+    const mockLLM = vi.fn().mockResolvedValue({ toolCalls: [{ name: 'heartbeat_ok', input: {} }] });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    expect(mockLLM.mock.calls[0][0].userPrompt).toContain('[followup_id=15]');
+  });
+
+  it('releases referenced followups when NO_REPLY suppresses the proactive send', async () => {
+    const previous = process.env.GEORGE_NOREPLY_ENABLED;
+    process.env.GEORGE_NOREPLY_ENABLED = 'true';
+    try {
+      const { deps, claimedFollowups, sentMessages } = makeStores();
+      claimedFollowups.push({ id: 10, content: 'ask about interview', scheduled_for: '2026-07-01T00:00:00Z', status: 'claimed' });
+      const mockLLM = vi.fn().mockResolvedValue({
+        toolCalls: [{ name: 'send_proactive_message', input: { text: '{{NO_REPLY}} not sending', channel: 'imessage', followup_ids: [10] } }],
+      });
+      await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+      expect(sentMessages).toEqual([]);
+      expect(deps.markFollowupsTriggered).not.toHaveBeenCalled();
+      expect(deps.releaseFollowups).toHaveBeenCalledWith([10]);
+    } finally {
+      if (previous === undefined) delete process.env.GEORGE_NOREPLY_ENABLED;
+      else process.env.GEORGE_NOREPLY_ENABLED = previous;
+    }
+  });
+
+  it('marks only referenced claimed followups and releases the rest after an actual send', async () => {
+    const { deps, claimedFollowups } = makeStores();
+    claimedFollowups.push(
+      { id: 11, content: 'ask about interview', scheduled_for: '2026-07-01T00:00:00Z', status: 'claimed' },
+      { id: 12, content: 'ask about housing', scheduled_for: '2026-07-01T00:00:00Z', status: 'claimed' },
+    );
+    const mockLLM = vi.fn().mockResolvedValue({
+      toolCalls: [{ name: 'send_proactive_message', input: { text: 'how did the interview go?', channel: 'imessage', followup_ids: [11] } }],
+    });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    expect(deps.markFollowupsTriggered).toHaveBeenCalledWith([11]);
+    expect(deps.releaseFollowups).toHaveBeenCalledWith([12]);
+  });
+
+  it('releases all due followups after an unrelated proactive send', async () => {
+    const { deps, claimedFollowups } = makeStores();
+    claimedFollowups.push({ id: 13, content: 'ask about interview', scheduled_for: '2026-07-01T00:00:00Z', status: 'claimed' });
+    const mockLLM = vi.fn().mockResolvedValue({
+      toolCalls: [{ name: 'send_proactive_message', input: { text: 'campus closes early today', channel: 'imessage' } }],
+    });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    expect(deps.markFollowupsTriggered).not.toHaveBeenCalled();
+    expect(deps.releaseFollowups).toHaveBeenCalledWith([13]);
+  });
+
+  it('rejects unclaimed followup IDs before sending and releases valid claims', async () => {
+    const { deps, claimedFollowups, sentMessages, logs } = makeStores();
+    claimedFollowups.push({ id: 14, content: 'ask about interview', scheduled_for: '2026-07-01T00:00:00Z', status: 'claimed' });
+    const mockLLM = vi.fn().mockResolvedValue({
+      toolCalls: [{ name: 'send_proactive_message', input: { text: 'how did the interview go?', channel: 'imessage', followup_ids: [999] } }],
+    });
+    await runHeartbeat('u1', { ...deps, callLLM: mockLLM as any });
+    expect(sentMessages).toEqual([]);
+    expect(deps.markFollowupsTriggered).not.toHaveBeenCalled();
+    expect(deps.releaseFollowups).toHaveBeenCalledWith([14]);
+    expect(logs[0].error_message).toMatch(/unclaimed followup/i);
   });
 
   it('releases due followups when the chosen action does not fulfill them', async () => {
