@@ -603,7 +603,7 @@ export async function startSpectrumAdapter(
       if (!c) throw new Error('no_spectrum_connection')
       await c.sendProactive(handle, [content])
     }
-    activeDrainer = startDrainer(scheduler, sendFn, { intervalMs: pacing.drainIntervalMs })
+    activeDrainer = startDrainer(scheduler, sendFn, { activeIntervalMs: pacing.drainIntervalMs })
     // Keep the delivered-bubble table bounded: prune SENT rows > 24h old, hourly.
     activePruner = startQueuePruner(db, {})
     log('info', 'spectrum_pacing_enabled', { drainIntervalMs: pacing.drainIntervalMs })

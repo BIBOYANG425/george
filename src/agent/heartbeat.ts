@@ -77,7 +77,9 @@ export interface HeartbeatDeps {
   raisedThreadDb: RaisedThreadDB;
   loadConfig: (userId: string) => Promise<HeartbeatConfig | null>;
   loadRecentMessages: (userId: string, limit: number) => Promise<MessageRow[]>;
-  loadDueFollowups: (userId: string) => Promise<FollowupRow[]>;
+  claimDueFollowups: (userId: string) => Promise<FollowupRow[]>;
+  markFollowupsTriggered: (ids: number[]) => Promise<void>;
+  releaseFollowups: (ids: number[]) => Promise<void>;
   sendImessage: (msg: { to: string; text: string }) => Promise<void>;
   insertFollowup: (row: { userId: string; content: string; scheduledFor: string }) => Promise<void>;
   writeLog: (entry: HeartbeatLogEntry) => Promise<void>;
@@ -310,6 +312,7 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?:
   const tickState = { proactivesSent: 0 };
   let outcome: HeartbeatLogEntry['outcome'] = 'ok';
   let errorMessage: string | null = null;
+  let claimedFollowupIds: number[] = [];
 
   const logAction = (action: Record<string, unknown>) => {
     actions.push(action);
@@ -323,8 +326,9 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?:
       deps.profileStore.loadProfile(userId),
       deps.instructionsStore.load(userId),
       deps.loadRecentMessages(userId, RECENT_MESSAGES_LIMIT),
-      deps.loadDueFollowups(userId),
+      deps.claimDueFollowups(userId),
     ]);
+    claimedFollowupIds = dueFollowups.map((followup) => followup.id);
 
     // The grounded-proactive guidance is part of the feature's prompt footprint,
     // so it is appended ONLY when the flag is on. With the flag off the system
@@ -397,7 +401,7 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?:
       }`,
       `# PENDING FOLLOWUPS DUE NOW\n${
         dueFollowups.length
-          ? dueFollowups.map((f) => `- (${f.scheduled_for}) ${f.content}`).join('\n')
+          ? dueFollowups.map((f) => `- [followup_id=${f.id}] (${f.scheduled_for}) ${f.content}`).join('\n')
           : '(none)'
       }`,
       ...(groundedNote ? [groundedNote] : []),
@@ -437,15 +441,30 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?:
       signal,
     });
 
-    for (const call of response.toolCalls) {
-      const tool = tools.find((t) => t.name === call.name);
-      if (!tool) {
-        throw new Error(`Unknown tool: ${call.name}`);
+    if (response.toolCalls.length !== 1) {
+      throw new Error(`Heartbeat must return exactly one tool call; received ${response.toolCalls.length}`);
+    }
+    const call = response.toolCalls[0]!;
+    const tool = tools.find((candidate) => candidate.name === call.name);
+    if (!tool) throw new Error(`Unknown tool: ${call.name}`);
+    let referencedFollowupIds: number[] = [];
+    if (call.name === 'send_proactive_message') {
+      const rawIds = (call.input as { followup_ids?: unknown }).followup_ids ?? [];
+      if (!Array.isArray(rawIds) || rawIds.some((id) => !Number.isInteger(id))) {
+        throw new Error('send_proactive_message followup_ids must contain integer IDs');
       }
-      await tool.handler(call.input as any);
-      if (call.name === 'update_block') outcome = 'block_update';
-      else if (call.name === 'send_proactive_message') {
-        outcome = 'proactive_send';
+      referencedFollowupIds = [...new Set(rawIds as number[])];
+      const claimedIds = new Set(claimedFollowupIds);
+      const unclaimedIds = referencedFollowupIds.filter((id) => !claimedIds.has(id));
+      if (unclaimedIds.length > 0) {
+        throw new Error(`Unclaimed followup IDs: ${unclaimedIds.join(', ')}`);
+      }
+    }
+    await tool.handler(call.input as any);
+    if (call.name === 'update_block') outcome = 'block_update';
+    else if (call.name === 'send_proactive_message') {
+      outcome = tickState.proactivesSent > 0 ? 'proactive_send' : 'ok';
+      if (tickState.proactivesSent > 0) {
         // P4 — mark the grounded thread raised so it is not raised again next
         // tick. The ledger now writes to the proactive_raised_threads table;
         // recordRaisedThread is idempotent (unique (user_id, thread) index), so
@@ -474,8 +493,19 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?:
             memoryKeys: memoryCandidates.map((c) => c.key),
           });
         }
-      } else if (call.name === 'add_followup') outcome = 'followup_scheduled';
-      else outcome = 'ok';
+      }
+    } else if (call.name === 'add_followup') outcome = 'followup_scheduled';
+    else outcome = 'ok';
+
+    if (claimedFollowupIds.length > 0) {
+      const triggeredIds = call.name === 'send_proactive_message' && tickState.proactivesSent > 0
+        ? referencedFollowupIds
+        : [];
+      const triggeredSet = new Set(triggeredIds);
+      const releasedIds = claimedFollowupIds.filter((id) => !triggeredSet.has(id));
+      if (triggeredIds.length > 0) await deps.markFollowupsTriggered(triggeredIds);
+      if (releasedIds.length > 0) await deps.releaseFollowups(releasedIds);
+      claimedFollowupIds = [];
     }
 
     await deps.updateLastHeartbeatAt(userId);
@@ -506,6 +536,17 @@ export async function runHeartbeat(userId: string, deps: HeartbeatDeps, signal?:
   } catch (err) {
     outcome = 'error';
     errorMessage = err instanceof Error ? err.message : String(err);
+    if (claimedFollowupIds.length > 0) {
+      try {
+        await deps.releaseFollowups(claimedFollowupIds);
+      } catch (releaseErr) {
+        log('error', 'followup_release_failed', {
+          userId,
+          ids: claimedFollowupIds,
+          error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
+        });
+      }
+    }
   } finally {
     await deps.writeLog({
       user_id: userId,

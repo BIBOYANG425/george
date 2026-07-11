@@ -25,8 +25,8 @@ import type {
   OutgoingSchedulerDB,
 } from '../adapters/outgoing-scheduler.js'
 
-// Default selectDue page size. The drainer ticks ~1/s, so a burst's tail is a
-// handful of rows; 50 is comfortable headroom without unbounded reads.
+// Default atomic-claim batch size. A burst's tail is a handful of rows; 50 is
+// comfortable headroom without unbounded reads when the drainer wakes.
 const DEFAULT_DUE_LIMIT = 50
 
 // Raw row shape as it comes back from PostgREST (timestamptz are ISO strings).
@@ -37,6 +37,8 @@ interface OutgoingBubbleDbRow {
   seq: number
   send_at: string
   sent_at: string | null
+  claimed_by?: string | null
+  claim_expires_at?: string | null
 }
 
 function toSeamRow(r: OutgoingBubbleDbRow): OutgoingBubbleRow {
@@ -47,6 +49,8 @@ function toSeamRow(r: OutgoingBubbleDbRow): OutgoingBubbleRow {
     seq: r.seq,
     sendAt: Date.parse(r.send_at),
     sentAt: r.sent_at === null ? null : Date.parse(r.sent_at),
+    claimedBy: r.claimed_by ?? null,
+    claimExpiresAt: r.claim_expires_at ? Date.parse(r.claim_expires_at) : null,
   }
 }
 
@@ -71,25 +75,38 @@ export function createSupabaseOutgoingSchedulerDB(
       if (error) throw new Error(`insertBubbles failed: ${error.message}`)
     },
 
-    async selectDue(nowMs, limit) {
-      const isoNow = new Date(nowMs).toISOString()
-      const { data, error } = await sb
-        .from('outgoing_bubbles')
-        .select('id, handle, content, seq, send_at, sent_at')
-        .is('sent_at', null)
-        .lte('send_at', isoNow)
-        .order('send_at')
-        .limit(limit ?? DEFAULT_DUE_LIMIT)
-      if (error) throw new Error(`selectDue failed: ${error.message}`)
+    async claimDue(nowMs, workerId, leaseMs, limit) {
+      const { data, error } = await sb.rpc('claim_due_outgoing_bubbles', {
+        p_now: new Date(nowMs).toISOString(),
+        p_worker_id: workerId,
+        p_lease_seconds: Math.ceil(leaseMs / 1000),
+        p_limit: limit ?? DEFAULT_DUE_LIMIT,
+      })
+      if (error) throw new Error(`claimDue failed: ${error.message}`)
       return ((data ?? []) as OutgoingBubbleDbRow[]).map(toSeamRow)
     },
 
-    async markSent(id, sentAtMs) {
+    async markSent(id, workerId, sentAtMs) {
+      const { data, error } = await sb
+        .from('outgoing_bubbles')
+        .update({ sent_at: new Date(sentAtMs).toISOString(), claimed_by: null, claim_expires_at: null })
+        .eq('id', id)
+        .eq('claimed_by', workerId)
+        .is('sent_at', null)
+        .select('id')
+        .maybeSingle()
+      if (error) throw new Error(`markSent failed: ${error.message}`)
+      return data !== null
+    },
+
+    async releaseClaim(id, workerId) {
       const { error } = await sb
         .from('outgoing_bubbles')
-        .update({ sent_at: new Date(sentAtMs).toISOString() })
+        .update({ claimed_by: null, claim_expires_at: null })
         .eq('id', id)
-      if (error) throw new Error(`markSent failed: ${error.message}`)
+        .eq('claimed_by', workerId)
+        .is('sent_at', null)
+      if (error) throw new Error(`releaseClaim failed: ${error.message}`)
     },
 
     async cancelPending(handle) {

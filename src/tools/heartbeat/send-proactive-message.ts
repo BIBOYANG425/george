@@ -9,6 +9,9 @@ import { parseControlTokens, isNoReplyEnabled } from '../../adapters/split-respo
 const inputSchema = z.object({
   text: z.string().min(10).max(500),
   channel: z.enum(['imessage', 'web']).default('imessage'),
+  // Explicitly identifies which already-claimed commitments this message fulfills.
+  // runHeartbeat validates ownership before invoking this side-effecting handler.
+  followup_ids: z.array(z.number().int()).default([]),
 });
 
 export interface TickState {
@@ -29,7 +32,7 @@ export function createSendProactiveTool(opts: SendProactiveOptions) {
   return {
     name: 'send_proactive_message' as const,
     description:
-      'Send an unprompted message to the user. Use sparingly: only when the user benefits clearly (followup reminder, event brief, anomaly check-in if opted-in). Max 1 per heartbeat tick.',
+      'Send an unprompted message to the user. Use sparingly: only when the user benefits clearly (followup reminder, event brief, anomaly check-in if opted-in). Include only the followup_ids explicitly fulfilled by this message; use [] for unrelated proactives. Max 1 per heartbeat tick.',
     inputSchema,
     async handler(input: z.infer<typeof inputSchema>) {
       const parsed = inputSchema.parse(input);

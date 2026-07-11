@@ -2,6 +2,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   selectDueUsers,
+  parseCadenceMs,
   dispatchHeartbeats,
   isWithinActiveHours,
   runWithConcurrency,
@@ -28,6 +29,18 @@ function activeHoursRow(start: string, end: string, timezone = 'America/Los_Ange
 const laAt = (hhmm: string) => new Date(`2026-07-07T${hhmm}:00-07:00`);
 
 describe('selectDueUsers', () => {
+  it('maps weekly cadence to seven days and fails closed for unknown values', () => {
+    expect(parseCadenceMs('7 days')).toBe(168 * 60 * 60 * 1000);
+    expect(parseCadenceMs('12 hours')).toBe(12 * 60 * 60 * 1000);
+    expect(parseCadenceMs('24 hours')).toBe(24 * 60 * 60 * 1000);
+    expect(parseCadenceMs('off')).toBeNull();
+    expect(parseCadenceMs('weekly')).toBeNull();
+
+    const now = new Date('2026-06-07T15:00:00-07:00');
+    const base = activeHoursRow('09:00', '22:00');
+    expect(selectDueUsers([{ ...base, cadence: '7 days', last_heartbeat_at: '2026-06-04T15:00:00-07:00' }], now)).toEqual([]);
+    expect(selectDueUsers([{ ...base, cadence: 'bogus', last_heartbeat_at: '2026-05-01T15:00:00-07:00' }], now)).toEqual([]);
+  });
   it('returns users whose last_heartbeat_at + cadence is past', async () => {
     const now = new Date('2026-06-07T15:00:00-07:00');
     const rows = [
@@ -237,11 +250,23 @@ describe('makeProactiveSender', () => {
     expect(enqueueLegacy).not.toHaveBeenCalled();
   });
 
-  it('falls back to the legacy queue when there is no client (legacy transport / reconnecting)', async () => {
+  it('reports retryable failure instead of enqueueing into an undrained legacy queue during Spectrum reconnect', async () => {
     const enqueueLegacy = vi.fn(async () => {});
     const send = makeProactiveSender({
       getSpectrumClient: () => null,
       enqueueLegacy,
+      transport: 'spectrum',
+    });
+    await expect(send({ to: '+15551234567', text: 'proactive nudge' })).rejects.toThrow(/Spectrum.*unavailable/i);
+    expect(enqueueLegacy).not.toHaveBeenCalled();
+  });
+
+  it('uses the durable legacy queue for the legacy transport', async () => {
+    const enqueueLegacy = vi.fn(async () => {});
+    const send = makeProactiveSender({
+      getSpectrumClient: () => null,
+      enqueueLegacy,
+      transport: 'legacy',
     });
     await send({ to: '+15551234567', text: 'proactive nudge' });
     expect(enqueueLegacy).toHaveBeenCalledWith('+15551234567', 'proactive nudge');

@@ -184,6 +184,45 @@ describe('restart durability (the headline)', () => {
   })
 })
 
+describe('durable claims', () => {
+  it('allows only one of two workers to claim and send the same due row', async () => {
+    const db = createInMemoryOutgoingSchedulerDB()
+    const producer = createOutgoingScheduler(db, { workerId: 'producer' })
+    await producer.schedule('+1555', ['first', 'tail'], { nowMs: 1000, simOpts: SIM })
+
+    const workerA = createOutgoingScheduler(db, { workerId: 'worker-a' })
+    const workerB = createOutgoingScheduler(db, { workerId: 'worker-b' })
+    const delivered: string[] = []
+    await Promise.all([
+      workerA.drainDue(1_000_000, async (_h, content) => { delivered.push(`a:${content}`) }),
+      workerB.drainDue(1_000_000, async (_h, content) => { delivered.push(`b:${content}`) }),
+    ])
+
+    expect(delivered).toHaveLength(1)
+  })
+
+  it('retries acknowledgement and retains the lease when acknowledgement remains ambiguous', async () => {
+    const inner = createInMemoryOutgoingSchedulerDB()
+    let failMarks = 3
+    const db = {
+      ...inner,
+      markSent: vi.fn(async (...args: Parameters<typeof inner.markSent>) => {
+        if (failMarks-- > 0) throw new Error('database unavailable after send')
+        return inner.markSent(...args)
+      }),
+    }
+    const scheduler = createOutgoingScheduler(db, { workerId: 'worker-a', markAttempts: 3, leaseMs: 10_000 })
+    await scheduler.schedule('+1555', ['first', 'tail'], { nowMs: 1000, simOpts: SIM })
+    const send = vi.fn(async () => {})
+
+    expect(await scheduler.drainDue(1_000_000, send)).toBe(0)
+    expect(db.markSent).toHaveBeenCalledTimes(3)
+    expect(send).toHaveBeenCalledTimes(1)
+    await scheduler.drainDue(1_000_001, send)
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('per-row failure isolation', () => {
   it('a throwing send leaves that row pending; a later drain re-sends it', async () => {
     const db = createInMemoryOutgoingSchedulerDB()
@@ -235,10 +274,8 @@ describe('startDrainer re-entrancy guard', () => {
     try {
       let calls = 0
       let resolveFirst: ((value: void | PromiseLike<void>) => void) | undefined
-      // drainDue selects on sentAt===null, which stays true during the send→markSent
-      // gap. If a slow tick overlapped the next, the same rows would be re-selected
-      // and RE-SENT. This proves the guard prevents that: tick 1 blocks; tick 2 is
-      // skipped, not run concurrently.
+      // If a slow tick overlaps the next local wake-up it must not start a second
+      // drain. Durable row claims protect cross-worker delivery separately.
       const scheduler = {
         drainDue: vi.fn(async (): Promise<number> => {
           calls += 1
@@ -260,6 +297,47 @@ describe('startDrainer re-entrancy guard', () => {
 
       await vi.advanceTimersByTimeAsync(10)
       expect(calls).toBe(2) // a fresh tick now runs
+
+      drainer.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('backs off after an idle drain instead of polling every second', async () => {
+    vi.useFakeTimers()
+    try {
+      const scheduler = { drainDue: vi.fn(async () => 0) }
+      const drainer = startDrainer(scheduler, async () => {}, {
+        activeIntervalMs: 10,
+        idleIntervalMs: 100,
+        errorIntervalMs: 200,
+        clock: () => 0,
+      })
+      await vi.advanceTimersByTimeAsync(10)
+      expect(scheduler.drainDue).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(99)
+      expect(scheduler.drainDue).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(scheduler.drainDue).toHaveBeenCalledTimes(2)
+      drainer.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('uses a 30-second idle recovery poll by default', async () => {
+    vi.useFakeTimers()
+    try {
+      const scheduler = { drainDue: vi.fn(async () => 0) }
+      const drainer = startDrainer(scheduler, async () => {}, { clock: () => 0 })
+
+      await vi.advanceTimersByTimeAsync(250)
+      expect(scheduler.drainDue).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(scheduler.drainDue).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(scheduler.drainDue).toHaveBeenCalledTimes(2)
 
       drainer.stop()
     } finally {

@@ -61,15 +61,30 @@ export function buildHeartbeatDeps(cfg: HeartbeatDepsConfig): HeartbeatDeps {
       if (error) throw error;
       return (data ?? []).reverse();
     },
-    async loadDueFollowups(userId) {
-      const { data, error } = await supabase
-        .from('student_followups')
-        .select('id, content, scheduled_for')
-        .eq('user_id', userId)
-        .eq('status', 'pending')
-        .lte('scheduled_for', new Date().toISOString());
+    async claimDueFollowups(userId) {
+      const { data, error } = await supabase.rpc('claim_due_student_followups', {
+        p_user_id: userId,
+      });
       if (error) throw error;
       return data ?? [];
+    },
+    async markFollowupsTriggered(ids) {
+      if (ids.length === 0) return;
+      const { error } = await supabase
+        .from('student_followups')
+        .update({ status: 'triggered', triggered_at: new Date().toISOString() })
+        .in('id', ids)
+        .eq('status', 'claimed');
+      if (error) throw error;
+    },
+    async releaseFollowups(ids) {
+      if (ids.length === 0) return;
+      const { error } = await supabase
+        .from('student_followups')
+        .update({ status: 'pending', claimed_at: null })
+        .in('id', ids)
+        .eq('status', 'claimed');
+      if (error) throw error;
     },
     sendImessage,
     async insertFollowup(row) {

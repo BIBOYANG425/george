@@ -747,13 +747,13 @@ if (process.env.HEARTBEAT_ENABLED !== 'false') {
     // Proactive heartbeat sends route through the active transport. Under
     // TRANSPORT=spectrum the legacy imessage_outgoing queue has NO drainer, so a
     // proactive enqueued there would rot forever; makeProactiveSender routes it
-    // through the LIVE Spectrum client (sendProactive) when connected and falls back
-    // to the durable legacy queue otherwise (legacy transport → byte-for-byte the
-    // old enqueueOutgoing path; Spectrum reconnecting → queue a retry, never a
-    // silent drop). See makeProactiveSender for the full rationale.
+    // through the LIVE Spectrum client (sendProactive) when connected. Legacy mode
+    // keeps the durable queue; Spectrum reconnects fail retryably because that queue
+    // is not drained in Spectrum mode. See makeProactiveSender for the full rationale.
     sendImessage: makeProactiveSender({
       getSpectrumClient: () => spectrumClientGetter?.() ?? null,
       enqueueLegacy: (to: string, text: string) => enqueueOutgoing(to, text),
+      transport: process.env.TRANSPORT === 'spectrum' ? 'spectrum' : 'legacy',
     }),
   });
   startHeartbeatScheduler({
