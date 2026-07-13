@@ -31,6 +31,39 @@ const NOOP: Observability = {
 /** agent_id partition in obs_messages/obs_contacts — lets one dashboard watch many agents. */
 export const OBS_AGENT_ID = process.env.GEORGE_OBS_AGENT_ID || 'george'
 
+/**
+ * Resolve the display channel (a dashboard channel-registry key) for a message.
+ *
+ * Reality check (verified against spectrum-ts in this repo): the shared-pool
+ * cloud iMessage provider does NOT surface the Apple sub-transport — it never
+ * sets `sender.service` and emits no "SMS"/"RCS", so iMessage vs SMS vs RCS is
+ * NOT distinguishable here. The reliable signal is `message.platform`
+ * ("iMessage" / "whatsapp-business" / "telegram" / …). We still prefer an
+ * explicit service hint when a provider ever supplies one (future-proof, and
+ * correct for the boilerplate's other adapters), then fall back to platform.
+ * Case-insensitive so it's robust to "iMessage" vs "imessage".
+ */
+export function resolveChannel(platform: string | undefined, serviceHint?: string | undefined): string {
+  const svc = serviceHint?.trim()
+  if (svc) {
+    switch (svc.toLowerCase()) {
+      case 'imessage': return 'iMessage'
+      case 'sms': return 'SMS'
+      case 'rcs': return 'RCS'
+      default: return svc
+    }
+  }
+  switch ((platform || '').toLowerCase()) {
+    case 'imessage': return 'iMessage'
+    case 'whatsapp':
+    case 'whatsapp-business': return 'WhatsApp'
+    case 'telegram': return 'Telegram'
+    case 'wechat': return 'WeChat'
+    case 'slack': return 'Slack'
+    default: return platform || 'unknown'
+  }
+}
+
 let instance: Observability | null = null
 let warnedNoEnv = false
 
