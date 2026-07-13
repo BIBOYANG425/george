@@ -20,7 +20,7 @@ import type { SpectrumClient, ReplyHandle } from './spectrum-client.js'
 import type { SpectrumCredentials } from './spectrum-client.js'
 import { createSpectrumClient } from './spectrum-client.js'
 import type { SpectrumClientHooks } from './spectrum-client.js'
-import { getObs, isObservabilityEnabled, outboundEvent } from '../observability/agent-obs/index.js'
+import { getObs, isObservabilityEnabled, outboundEvent, resolveChannel } from '../observability/agent-obs/index.js'
 import {
   recordSpectrumConnect,
   recordSpectrumInbound,
@@ -260,11 +260,15 @@ export async function runSpectrumLoop(
       // throws into the loop.
       {
         const obs = getObs()
+        // Spectrum's cloud iMessage doesn't expose the Apple sub-transport, so
+        // the channel comes from the platform (message.channel is the raw, usually
+        // undefined, service hint). See resolveChannel for the full rationale.
+        const channel = resolveChannel(message.platform, message.channel)
         obs.logMessage({
           conversationId: message.senderId,
           direction: 'inbound',
           platform: message.platform,
-          channel: message.channel,
+          channel,
           contentType: message.contentType,
           text: message.contentType === 'text' ? message.text : undefined,
           externalId: message.messageId,
@@ -274,7 +278,7 @@ export async function runSpectrumLoop(
           handle: message.senderId,
           displayName: message.senderName,
           platform: message.platform,
-          channel: message.channel,
+          channel,
         })
       }
 
@@ -621,7 +625,13 @@ export async function startSpectrumAdapter(
         const obs = getObs()
         void obs
           .resolveOutboundChannel(handle)
-          .then((channel) => obs.logMessage(outboundEvent(handle, text, channel, undefined, contentType)))
+          .then((sticky) => {
+            // Sends here are always the Spectrum iMessage transport; when the
+            // sticky cache has no prior signal (e.g. a proactive send to a handle
+            // never seen inbound), default to iMessage rather than "unknown".
+            const channel = sticky === 'unknown' ? resolveChannel('imessage') : sticky
+            obs.logMessage(outboundEvent(handle, text, channel, undefined, contentType))
+          })
           .catch(() => {})
       },
     }

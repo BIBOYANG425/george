@@ -38,9 +38,11 @@ export interface InboundMessage {
   // one project connection serves every line.
   linePhone?: string
   spaceType?: string         // 'dm' | 'group'
-  // Sub-transport within iMessage: 'iMessage' | 'SMS' | 'RCS'. Optional — the
-  // provider omits sender.service on some cloud-mode messages; downstream
-  // observability applies a sticky-channel rule so gaps don't downgrade it.
+  // Raw provider service hint (sender.service). NOTE: the current spectrum-ts
+  // shared-pool cloud iMessage provider does not populate this — it emits no
+  // SMS/RCS and sets no service, so this is ~always undefined today. Kept for
+  // future providers; observability derives the real channel from `platform`
+  // via resolveChannel(), not from this field.
   channel?: string
   senderName?: string        // provider-supplied display name, when present
 }

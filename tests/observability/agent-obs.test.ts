@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { getObs, isObservabilityEnabled, outboundEvent } from '../../src/observability/agent-obs/index.js'
+import { getObs, isObservabilityEnabled, outboundEvent, resolveChannel } from '../../src/observability/agent-obs/index.js'
 import { mountAgentControlEndpoint } from '../../src/observability/agent-obs/control-endpoint.js'
 
 const FLAG = 'GEORGE_MESSAGE_OBSERVABILITY_ENABLED'
@@ -37,6 +37,35 @@ describe('agent-obs default-OFF safety', () => {
     // No network client is created; calls remain safe.
     await expect(obs.isOptedOut('h')).resolves.toBe(false)
     expect(() => obs.logMessage({ conversationId: 'h', direction: 'outbound', platform: 'imessage' })).not.toThrow()
+  })
+})
+
+describe('resolveChannel — determines the display channel', () => {
+  it('maps platform → registry key (Spectrum exposes no sub-transport)', () => {
+    // spectrum-ts cloud iMessage sets no service, so platform is the signal.
+    expect(resolveChannel('iMessage')).toBe('iMessage')
+    expect(resolveChannel('imessage')).toBe('iMessage') // case-insensitive
+    expect(resolveChannel('whatsapp-business')).toBe('WhatsApp')
+    expect(resolveChannel('whatsapp')).toBe('WhatsApp')
+    expect(resolveChannel('telegram')).toBe('Telegram')
+    expect(resolveChannel('wechat')).toBe('WeChat')
+  })
+
+  it('prefers an explicit service hint when a provider supplies one (future-proof)', () => {
+    expect(resolveChannel('iMessage', 'SMS')).toBe('SMS')
+    expect(resolveChannel('iMessage', 'rcs')).toBe('RCS')
+    expect(resolveChannel('iMessage', 'iMessage')).toBe('iMessage')
+  })
+
+  it('never returns "unknown" for a known platform even with no service hint', () => {
+    expect(resolveChannel('iMessage', undefined)).toBe('iMessage')
+    expect(resolveChannel('iMessage', '')).toBe('iMessage')
+  })
+
+  it('falls back to the raw platform / unknown only when truly unclassifiable', () => {
+    expect(resolveChannel('discord')).toBe('discord')
+    expect(resolveChannel(undefined)).toBe('unknown')
+    expect(resolveChannel('')).toBe('unknown')
   })
 })
 
