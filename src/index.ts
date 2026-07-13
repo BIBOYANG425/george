@@ -54,6 +54,7 @@ import { ALL_TOOLS } from './tools/index.js'
 import { enqueueOutgoing, fetchPending, ackOutgoing } from './db/imessage-outgoing.js'
 import { supabase } from './db/client.js'
 import { createAdminDashboardRouter } from './admin/router.js'
+import { mountAgentControlEndpoint } from './observability/agent-obs/control-endpoint.js'
 import { auditInjectionBlock } from './admin/actions.js'
 import { extractCodeFromStartMessage, runHandshake } from './onboarding/handshake.js'
 import { toPublicAssetUrls } from './onboarding/showcase.js'
@@ -236,6 +237,11 @@ if (getFlags().adminDashboardEnabled) {
   app.use(createAdminDashboardRouter(supabase, config.adminToken, profileStore))
   console.log('[admin] dashboard mounted at /admin/dashboard (ADMIN_DASHBOARD_ENABLED=true)')
 }
+
+// Observability inbox control endpoint (/observ/send). Opt-in: mounts nothing
+// unless GEORGE_MESSAGE_OBSERVABILITY_ENABLED=true AND AGENT_CONTROL_SECRET is
+// set. See src/observability/agent-obs/control-endpoint.ts for the security posture.
+mountAgentControlEndpoint(app)
 
 // Dev test console endpoint — runs the full agent team end-to-end.
 // Gated by admin token so it isn't open to the public internet.

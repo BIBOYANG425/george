@@ -13,3 +13,4 @@ tests/eval/conversation/.out/
 
 # Review-fix scratch reports (.fixreport-*.md) — never commit
 .fixreport-*.md
+.gstack/
