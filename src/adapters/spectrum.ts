@@ -19,6 +19,8 @@ import path from 'node:path'
 import type { SpectrumClient, ReplyHandle } from './spectrum-client.js'
 import type { SpectrumCredentials } from './spectrum-client.js'
 import { createSpectrumClient } from './spectrum-client.js'
+import type { SpectrumClientHooks } from './spectrum-client.js'
+import { getObs, isObservabilityEnabled, outboundEvent } from '../observability/agent-obs/index.js'
 import {
   recordSpectrumConnect,
   recordSpectrumInbound,
@@ -251,6 +253,31 @@ export async function runSpectrumLoop(
         seen.add(message.messageId)
         if (seen.size > DEDUP_CAP) for (const id of Array.from(seen).slice(0, DEDUP_CAP / 2)) seen.delete(id)
       }
+
+      // Message observability (default OFF; no-op unless the flag + Supabase env
+      // are set). After dedup so redelivery isn't double-counted; before the
+      // text-only filter so attachments are recorded too. Non-blocking, never
+      // throws into the loop.
+      {
+        const obs = getObs()
+        obs.logMessage({
+          conversationId: message.senderId,
+          direction: 'inbound',
+          platform: message.platform,
+          channel: message.channel,
+          contentType: message.contentType,
+          text: message.contentType === 'text' ? message.text : undefined,
+          externalId: message.messageId,
+          senderName: message.senderName,
+        })
+        obs.upsertContact({
+          handle: message.senderId,
+          displayName: message.senderName,
+          platform: message.platform,
+          channel: message.channel,
+        })
+      }
+
       if (message.contentType !== 'text') continue
 
       // Pacing ON: a fresh inbound supersedes any pending scheduled bubbles for
@@ -581,6 +608,25 @@ export async function startSpectrumAdapter(
   const handlers = buildSpectrumHandlers(deps)
   let backoffMs = 1_000
 
+  // Message observability (default OFF). Warm the sticky-channel cache once so a
+  // restart doesn't start with every conversation as "unknown", and build the
+  // outbound hook that logs each successful send. Fire-and-forget; a resolve/log
+  // failure never touches the reply path. When disabled, obsHooks is undefined
+  // and createSpectrumClient runs byte-identically.
+  let obsHooks: SpectrumClientHooks | undefined
+  if (isObservabilityEnabled()) {
+    await getObs().seedChannelCache()
+    obsHooks = {
+      onOutbound: (handle, text, contentType) => {
+        const obs = getObs()
+        void obs
+          .resolveOutboundChannel(handle)
+          .then((channel) => obs.logMessage(outboundEvent(handle, text, channel, undefined, contentType)))
+          .catch(() => {})
+      },
+    }
+  }
+
   // Reliability watchdog: self-heal a silently-wedged Spectrum stream by
   // restarting the process (Railway brings up a fresh connection). Default-OFF —
   // startSpectrumWatchdog installs NO timer unless SPECTRUM_WATCHDOG_ENABLED is
@@ -612,7 +658,7 @@ export async function startSpectrumAdapter(
   try {
     while (!spectrumStopping) {
       try {
-        const client = await createSpectrumClient(creds)
+        const client = await createSpectrumClient(creds, obsHooks)
         activeSpectrumClient = client
         backoffMs = 1_000 // reset after a successful connect
         log('info', 'spectrum_connected', {})

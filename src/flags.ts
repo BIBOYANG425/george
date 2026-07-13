@@ -60,6 +60,8 @@ export interface Flags {
   pacingEnabled: boolean;
   // ── admin ──
   adminDashboardEnabled: boolean;
+  // ── observability ──
+  messageObservabilityEnabled: boolean;
 }
 
 export function getFlags(): Flags {
@@ -91,5 +93,6 @@ export function getFlags(): Flags {
     burstGuardEnabled: on(process.env.SPECTRUM_BURST_GUARD_ENABLED),
     pacingEnabled: on(process.env.GEORGE_PACING_ENABLED),
     adminDashboardEnabled: on(process.env.ADMIN_DASHBOARD_ENABLED),
+    messageObservabilityEnabled: on(process.env.GEORGE_MESSAGE_OBSERVABILITY_ENABLED),
   };
 }

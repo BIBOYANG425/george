@@ -38,6 +38,11 @@ export interface InboundMessage {
   // one project connection serves every line.
   linePhone?: string
   spaceType?: string         // 'dm' | 'group'
+  // Sub-transport within iMessage: 'iMessage' | 'SMS' | 'RCS'. Optional — the
+  // provider omits sender.service on some cloud-mode messages; downstream
+  // observability applies a sticky-channel rule so gaps don't downgrade it.
+  channel?: string
+  senderName?: string        // provider-supplied display name, when present
 }
 
 export interface ReplyHandle {
@@ -122,11 +127,19 @@ export async function sendWithRetry(
   }
 }
 
+// Optional observability seam. onOutbound fires after each SUCCESSFUL send with
+// the recipient handle — fire-and-forget, must never throw (the caller wraps it).
+// Kept as an injected hook so this transport file has no dependency on the
+// observability module; default OFF path passes nothing and is unchanged.
+export interface SpectrumClientHooks {
+  onOutbound?: (handle: string, text: string | undefined, contentType: 'text' | 'attachment') => void
+}
+
 // Real factory — wires spectrum-ts to the seam interfaces.
 // imessage.config() uses the Spectrum cloud-managed pool (local: false, no
 // dedicated-line address/token needed until Phase 2).
 // SDK is dynamic-imported here so the native chain is never loaded on Linux.
-export async function createSpectrumClient(creds: SpectrumCredentials): Promise<SpectrumClient> {
+export async function createSpectrumClient(creds: SpectrumCredentials, hooks?: SpectrumClientHooks): Promise<SpectrumClient> {
   const { Spectrum, attachment } = await import('spectrum-ts')
   const { imessage } = await import('spectrum-ts/providers/imessage')
 
@@ -153,6 +166,7 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
             try {
               await sendWithRetry(() => space.send(text))
               console.log(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=text chars=${text.length} ok`)
+              if (message.sender?.id) hooks?.onOutbound?.(message.sender.id, text, 'text')
             } catch (err) {
               console.error(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=text FAILED: ${(err as Error).message}`)
               throw err
@@ -162,6 +176,7 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
             try {
               await sendWithRetry(() => space.send(attachment(localPath)))
               console.log(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=attachment path=${localPath.split('/').pop()} ok`)
+              if (message.sender?.id) hooks?.onOutbound?.(message.sender.id, undefined, 'attachment')
             } catch (err) {
               console.error(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=attachment FAILED: ${(err as Error).message}`)
               throw err
@@ -193,6 +208,10 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
           messageId: message.id,
           linePhone: sp.phone,
           spaceType: sp.type,
+          // Transport rides on sender.service (the provider merges service/name
+          // onto the sender at runtime; they're not in spectrum-ts's User type).
+          channel: (message.sender as { service?: string } | undefined)?.service,
+          senderName: (message.sender as { name?: string } | undefined)?.name,
         }
         yield [replyHandle, inbound] as const
       }
@@ -216,6 +235,7 @@ export async function createSpectrumClient(creds: SpectrumCredentials): Promise<
         try {
           await sendWithRetry(() => space.send(b))
           console.log(`[spectrum OUT] line=proactive to=${redactHandle(handle)} kind=proactive chars=${b.length} ok`)
+          hooks?.onOutbound?.(handle, b, 'text')
         } catch (err) {
           console.error(`[spectrum OUT] line=proactive to=${redactHandle(handle)} kind=proactive FAILED: ${(err as Error).message}`)
           throw err
