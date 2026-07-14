@@ -45,6 +45,9 @@ export interface InboundMessage {
   // via resolveChannel(), not from this field.
   channel?: string
   senderName?: string        // provider-supplied display name, when present
+  // Inbound iMessage tapback (contentType === 'reaction'): the emoji and the
+  // guid of the message the user reacted to. Present only on reaction messages.
+  reaction?: { emoji: string; targetGuid?: string }
 }
 
 export interface ReplyHandle {
@@ -206,6 +209,14 @@ export async function createSpectrumClient(creds: SpectrumCredentials, hooks?: S
           // message.content is a Content discriminated union; narrow to text
           contentType: message.content.type,
           text: message.content.type === 'text' ? message.content.text : '',
+          // Surface inbound tapbacks so the loop can record them instead of dropping.
+          reaction:
+            message.content.type === 'reaction'
+              ? {
+                  emoji: (message.content as { emoji: string }).emoji,
+                  targetGuid: (message.content as { target?: { id?: string } }).target?.id,
+                }
+              : undefined,
           // message.id is the stable SDK-assigned guid
           messageId: message.id,
           linePhone: sp.phone,
