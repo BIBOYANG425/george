@@ -10,6 +10,7 @@ import { applyThreadedRepliesGate } from './threaded-replies-gate.js';
 import { applyVoiceExamplesGate } from './voice-examples-gate.js';
 import { isRecallToolEnabled } from '../tools/recall-memory.js';
 import { isUpdateMemoryToolEnabled } from '../tools/update-memory.js';
+import { isRichLinksEnabled } from '../tools/share-rich-link.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = path.resolve(__dirname, '../../prompts');
@@ -131,7 +132,12 @@ const RECALL_TOOL_DIRECT: readonly string[] = isRecallToolEnabled() ? ['recall_m
 // recall — personal continuity is the main agent's job, not a domain sub-agent's.
 // Appended ONLY when GEORGE_UPDATE_MEMORY_TOOL_ENABLED is on; OFF → array unchanged.
 const UPDATE_MEMORY_DIRECT: readonly string[] = isUpdateMemoryToolEnabled() ? ['update_memory'] : [];
-export const ORCHESTRATOR_DIRECT_TOOLS = ['set_reminder', 'load_skill', 'react_to_user', ...RECALL_TOOL_DIRECT, ...UPDATE_MEMORY_DIRECT] as const;
+// Outbound rich-link card tool sits on the orchestrator (it decides what's worth
+// surfacing as a card). Appended ONLY when GEORGE_RICH_LINKS_ENABLED is on; OFF →
+// array unchanged → tool absent from every derived allowlist, in lockstep with its
+// ALL_TOOLS registration.
+const RICH_LINK_DIRECT: readonly string[] = isRichLinksEnabled() ? ['share_rich_link'] : [];
+export const ORCHESTRATOR_DIRECT_TOOLS = ['set_reminder', 'load_skill', 'react_to_user', ...RECALL_TOOL_DIRECT, ...UPDATE_MEMORY_DIRECT, ...RICH_LINK_DIRECT] as const;
 
 export type SubAgentName = keyof typeof SUB_AGENTS;
 

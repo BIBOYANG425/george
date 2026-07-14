@@ -98,10 +98,25 @@ describe('collectOrchestratorReply — hooks', () => {
     expect(onReaction).toHaveBeenCalledWith('👍');
   });
 
-  it('ignores interstitial and reaction events when no hooks are supplied', async () => {
+  it('fires onRichLink only for richlink events carrying a url', async () => {
+    const onRichLink = vi.fn();
+    await collectOrchestratorReply(
+      stream(
+        { type: 'richlink', url: 'https://uscbia.com/events/city-walk' },
+        { type: 'richlink', url: '' }, // empty → skipped
+        { type: 'result', result: 'ok' },
+      ),
+      { onRichLink },
+    );
+    expect(onRichLink).toHaveBeenCalledTimes(1);
+    expect(onRichLink).toHaveBeenCalledWith('https://uscbia.com/events/city-walk');
+  });
+
+  it('ignores interstitial, reaction and richlink events when no hooks are supplied', async () => {
     const { text } = await collectOrchestratorReply(
       stream(
         { type: 'reaction', emoji: '👍' },
+        { type: 'richlink', url: 'https://x.co' },
         { type: 'interstitial', text: 'checking' },
         { type: 'result', result: 'reply' },
       ),

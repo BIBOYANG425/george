@@ -27,6 +27,7 @@ export { postSubletTool } from './post-sublet.js'
 export { setReminderTool } from './set-reminder.js'
 export { loadSkillTool } from './load-skill.js'
 export { reactToUserTool } from './react-to-user.js'
+export { shareRichLinkTool, isRichLinksEnabled } from './share-rich-link.js'
 export { dpsZoneCheckTool } from './dps-zone-check.js'
 export { distanceCompareTool } from './distance-compare.js'
 export { safeRouteTool } from './safe-route.js'
@@ -62,6 +63,7 @@ import { searchSubletsTool } from './search-sublets.js'
 import { postSubletTool } from './post-sublet.js'
 import { setReminderTool } from './set-reminder.js'
 import { reactToUserTool } from './react-to-user.js'
+import { shareRichLinkTool, isRichLinksEnabled } from './share-rich-link.js'
 import { loadSkillTool } from './load-skill.js'
 import { dpsZoneCheckTool } from './dps-zone-check.js'
 import { distanceCompareTool } from './distance-compare.js'
@@ -117,4 +119,8 @@ export const ALL_TOOLS = {
   // (default-OFF) — same lockstep registration/allowlisting as recall_memory above:
   // OFF → key absent → byte-identical pre-feature tool set.
   ...(isUpdateMemoryToolEnabled() ? { update_memory: updateMemoryTool } : {}),
+  // Outbound rich-link card tool, gated by GEORGE_RICH_LINKS_ENABLED (default-OFF)
+  // — same lockstep registration/allowlisting as recall_memory above: OFF → key
+  // absent → byte-identical pre-feature tool set.
+  ...(isRichLinksEnabled() ? { share_rich_link: shareRichLinkTool } : {}),
 }
