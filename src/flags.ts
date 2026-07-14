@@ -64,6 +64,8 @@ export interface Flags {
   messageObservabilityEnabled: boolean;
   // ── multimodal ──
   imageIntakeEnabled: boolean;
+  // ── threaded replies ──
+  threadedRepliesEnabled: boolean;
 }
 
 export function getFlags(): Flags {
@@ -97,5 +99,6 @@ export function getFlags(): Flags {
     adminDashboardEnabled: on(process.env.ADMIN_DASHBOARD_ENABLED),
     messageObservabilityEnabled: on(process.env.GEORGE_MESSAGE_OBSERVABILITY_ENABLED),
     imageIntakeEnabled: on(process.env.GEORGE_IMAGE_INTAKE_ENABLED),
+    threadedRepliesEnabled: on(process.env.GEORGE_THREADED_REPLIES_ENABLED),
   };
 }

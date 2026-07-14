@@ -62,6 +62,11 @@ export interface ReplyHandle {
   // (the SDK's message.react() returns undefined and warns). Never throws into
   // the reply path: a failed tapback must not break the text reply.
   react(emoji: string): Promise<void>
+  // Threaded reply: send `text` as an iMessage reply anchored to THIS inbound
+  // message (spectrum-ts message.reply). Falls back to a plain send when threading
+  // isn't supported or fails, so a reply is never lost. Retries once on a
+  // transient drop, same as sendText. Used by the {{THREAD}} opt-in.
+  replyThread(text: string): Promise<void>
   // Typing indicator ("…" bubble). Best-effort — platforms without a typing
   // API silently no-op. Used to show activity during the ~10s orchestrator turn.
   startTyping(): Promise<void>
@@ -201,6 +206,22 @@ export async function createSpectrumClient(creds: SpectrumCredentials, hooks?: S
               console.log(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=reaction emoji=${emoji} ok`)
             } catch (err) {
               console.error(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=reaction FAILED: ${(err as Error).message}`)
+            }
+          },
+          // Threaded reply anchored to THIS inbound message. Best-effort threading
+          // with a hard guarantee the reply still lands: if message.reply throws
+          // (platform without threading, or a transport error), fall back to a
+          // plain space.send so george's answer is never dropped for the sake of a
+          // thread. Fires onOutbound exactly once on whichever path delivers.
+          replyThread: async (text: string) => {
+            try {
+              await sendWithRetry(() => (message as unknown as { reply(c: string): Promise<unknown> }).reply(text))
+              console.log(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=reply-thread chars=${text.length} ok`)
+              if (message.sender?.id) hooks?.onOutbound?.(message.sender.id, text, 'text')
+            } catch (err) {
+              console.error(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=reply-thread FAILED (falling back to plain send): ${(err as Error).message}`)
+              await sendWithRetry(() => space.send(text))
+              if (message.sender?.id) hooks?.onOutbound?.(message.sender.id, text, 'text')
             }
           },
           startTyping: async () => { await space.startTyping() },

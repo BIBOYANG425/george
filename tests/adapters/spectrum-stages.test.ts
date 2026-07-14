@@ -11,6 +11,7 @@ import {
   stageReadReceiptDelay,
   stageGenerate,
   stageSend,
+  stageSendPaced,
   pickStillThinking,
   STILL_THINKING,
 } from '../../src/adapters/spectrum-stages.js';
@@ -18,14 +19,17 @@ import type { ReplyHandle } from '../../src/adapters/spectrum-client.js';
 
 function fakeReply() {
   const sent: string[] = [];
+  const threaded: string[] = [];
   const typing: string[] = [];
   const reply: ReplyHandle = {
     sendText: async (t) => { sent.push(t); },
     sendAttachment: async () => {},
+    react: async () => {},
+    replyThread: async (t) => { threaded.push(t); },
     startTyping: async () => { typing.push('start'); },
     stopTyping: async () => { typing.push('stop'); },
   };
-  return { reply, sent, typing };
+  return { reply, sent, threaded, typing };
 }
 
 const RR_FLAG = 'GEORGE_READRECEIPT_DELAY_ENABLED';
@@ -205,5 +209,43 @@ describe('stageSend', () => {
     ac.abort();
     await stageSend('should not send', reply, ac);
     expect(sent).toEqual([]);
+  });
+
+  it('threadFirst: threads bubble 0 (anchor), sends the rest normally', async () => {
+    const { reply, sent, threaded } = fakeReply();
+    const ac = new AbortController();
+    await stageSend('anchor line\n\nfollow up', reply, ac, { interMessageDelayMs: 0, threadFirst: true });
+    expect(threaded).toEqual(['anchor line']);
+    expect(sent).toEqual(['follow up']);
+  });
+
+  it('threadFirst=false (default): every bubble is a plain send (no threading)', async () => {
+    const { reply, sent, threaded } = fakeReply();
+    const ac = new AbortController();
+    await stageSend('one\n\ntwo', reply, ac, { interMessageDelayMs: 0 });
+    expect(threaded).toEqual([]);
+    expect(sent).toEqual(['one', 'two']);
+  });
+});
+
+describe('stageSendPaced — threadFirst', () => {
+  it('threads the inline bubble 0 and still defers the tail to the scheduler', async () => {
+    const { reply, sent, threaded } = fakeReply();
+    const ac = new AbortController();
+    const scheduled: string[][] = [];
+    await stageSendPaced('anchor\n\nb\n\nc', reply, 'h1', ac,
+      { schedule: async (_h, bubbles) => { scheduled.push(bubbles); } },
+      { threadFirst: true });
+    expect(threaded).toEqual(['anchor']); // inline bubble 0 threaded
+    expect(sent).toEqual([]);             // nothing sent plain inline
+    expect(scheduled[0]).toEqual(['anchor', 'b', 'c']); // full array handed off (scheduler drops idx 0)
+  });
+
+  it('threadFirst=false (default): bubble 0 is a plain inline send', async () => {
+    const { reply, sent, threaded } = fakeReply();
+    const ac = new AbortController();
+    await stageSendPaced('anchor\n\nb', reply, 'h1', ac, { schedule: async () => {} });
+    expect(threaded).toEqual([]);
+    expect(sent).toEqual(['anchor']);
   });
 });

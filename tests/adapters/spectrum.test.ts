@@ -4,12 +4,15 @@ import { sendWithRetry, redactHandle, isTransientSendError } from '../../src/ada
 import type { SpectrumClient, InboundMessage, ReplyHandle } from '../../src/adapters/spectrum-client.js'
 import { MAX_IMAGE_BYTES, MAX_IMAGES_PER_TURN } from '../../src/agent/image-part.js'
 
-function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: string[]; typing: string[] } {
+function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: string[]; threaded: string[]; typing: string[] } {
   const sent: string[] = []
+  const threaded: string[] = []
   const typing: string[] = []
   const reply: ReplyHandle = {
     sendText: async (t) => { sent.push(t) },
     sendAttachment: async () => {},
+    react: async () => {},
+    replyThread: async (t) => { threaded.push(t) },
     startTyping: async () => { typing.push('start') },
     stopTyping: async () => { typing.push('stop') },
   }
@@ -18,7 +21,7 @@ function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: str
     getLocation: async () => null,
     close: async () => {},
   }
-  return { client, sent, typing }
+  return { client, sent, threaded, typing }
 }
 
 const msg = (over: Partial<InboundMessage> = {}): InboundMessage => ({
@@ -409,6 +412,41 @@ describe('runSpectrumLoop — image intake', () => {
     const got = handle.mock.calls[0][5] as Array<{ dataBase64: string }>
     expect(got).toHaveLength(MAX_IMAGES_PER_TURN)
     expect(got[got.length - 1].dataBase64).toBe(Buffer.from(`IMG${MAX_IMAGES_PER_TURN + 1}`).toString('base64'))
+  })
+})
+
+// ── Threaded replies (Photon phase 2 "light", default-OFF) ──────────────────
+// Proves the {{THREAD}} opt-in threads bubble 0 to the anchor message ONLY when
+// GEORGE_THREADED_REPLIES_ENABLED is on; the token is always stripped (never
+// leaked); and the all-OFF default path is the plain send it always was.
+describe('runSpectrumLoop — threaded replies', () => {
+  const FLAG = 'GEORGE_THREADED_REPLIES_ENABLED'
+  let prev: string | undefined
+  beforeEach(() => { prev = process.env[FLAG] })
+  afterEach(() => { if (prev === undefined) delete process.env[FLAG]; else process.env[FLAG] = prev })
+
+  it('flag ON + {{THREAD}}: threads bubble 0 and strips the token', async () => {
+    process.env[FLAG] = 'true'
+    const { client, sent, threaded } = fakeClient([msg({ text: 'housing?' })])
+    await runSpectrumLoop(client, { handleText: async () => '{{THREAD}} parkside 稳', handleLocation: vi.fn() })
+    expect(threaded).toEqual(['parkside 稳'])
+    expect(sent).toEqual([])
+  })
+
+  it('flag OFF + {{THREAD}}: strips the token (never leaks) and sends normally', async () => {
+    delete process.env[FLAG]
+    const { client, sent, threaded } = fakeClient([msg({ text: 'housing?' })])
+    await runSpectrumLoop(client, { handleText: async () => '{{THREAD}} parkside 稳', handleLocation: vi.fn() })
+    expect(threaded).toEqual([])
+    expect(sent).toEqual(['parkside 稳']) // token stripped, not a plain-text leak
+  })
+
+  it('flag ON, no directive: plain send (no threading)', async () => {
+    process.env[FLAG] = 'true'
+    const { client, sent, threaded } = fakeClient([msg({ text: 'hi' })])
+    await runSpectrumLoop(client, { handleText: async () => 'yo 学弟', handleLocation: vi.fn() })
+    expect(threaded).toEqual([])
+    expect(sent).toEqual(['yo 学弟'])
   })
 })
 

@@ -223,22 +223,30 @@ export async function runSpectrumLoop(
         // the send entirely; otherwise strip the token so it can never reach a
         // user. Default OFF: this branch is exactly the previous send loop over
         // splitIntoMessages(out), so behavior is byte-for-byte unchanged.
-        let toSend: string | null = out
-        if (isNoReplyEnabled()) {
-          const { noReply, text } = parseControlTokens(out)
-          toSend = noReply ? null : text
-        }
+        // Always parse + STRIP output-format control tokens ({{NO_REPLY}},
+        // {{THREAD}}) so a stray token can never reach a user, regardless of flags.
+        // splitIntoMessages already strips markdown and trims each bubble, so for an
+        // ordinary token-free reply the stripped text yields byte-identical bubbles
+        // (the OFF path's SENT output is unchanged). The flags gate only BEHAVIOR:
+        // {{NO_REPLY}} suppresses the send when GEORGE_NOREPLY_ENABLED is on;
+        // {{THREAD}} threads bubble 0 to the anchor message when the threaded-replies
+        // flag is on. george only EMITS a token when its persona instruction is
+        // present, and each instruction is gated into master.md by the same flag.
+        const { noReply, thread, text: cleanText } = parseControlTokens(out)
+        const toSend: string | null = isNoReplyEnabled() && noReply ? null : cleanText
+        const threadFirst = getFlags().threadedRepliesEnabled && thread
         if (toSend) {
           // Record this reply's time so the next ping can measure the gap (P2).
           // Only on an actual send — a suppressed {{NO_REPLY}} is not a reply.
           lastReplyAt.set(senderId, Date.now())
           // Pacing ON (flag + scheduler present): bubble 0 inline, bubbles 1..N-1
           // persisted to the durable scheduler and drained out-of-band. OFF: the
-          // existing in-process stageSend, byte-for-byte unchanged.
+          // existing in-process stageSend, byte-for-byte unchanged. threadFirst
+          // threads bubble 0 as a reply to the anchor message ({{THREAD}} opt-in).
           if (opts.pacingEnabled && opts.scheduler) {
-            await stageSendPaced(toSend, buf.reply, senderId, ac, { schedule: opts.scheduler.schedule })
+            await stageSendPaced(toSend, buf.reply, senderId, ac, { schedule: opts.scheduler.schedule }, { threadFirst })
           } else {
-            await stageSend(toSend, buf.reply, ac)
+            await stageSend(toSend, buf.reply, ac, { threadFirst })
           }
         }
       }

@@ -15,6 +15,7 @@ import { createSendProactiveTool } from '../tools/heartbeat/send-proactive-messa
 import { createAddFollowupTool } from '../tools/heartbeat/add-followup.js';
 import { createHeartbeatOkTool } from '../tools/heartbeat/heartbeat-ok.js';
 import { applyNoReplyGate } from './noreply-gate.js';
+import { applyThreadedRepliesGate } from './threaded-replies-gate.js';
 import { applyVoiceExamplesGate } from './voice-examples-gate.js';
 import {
   extractOpenThreads,
@@ -98,8 +99,10 @@ const HEARTBEAT_PROMPT = fs.readFileSync(
   'utf-8'
 );
 const MASTER_PROMPT = applyVoiceExamplesGate(
-  applyNoReplyGate(
-    fs.readFileSync(path.resolve(__dirname, '../../prompts/master.md'), 'utf-8')
+  applyThreadedRepliesGate(
+    applyNoReplyGate(
+      fs.readFileSync(path.resolve(__dirname, '../../prompts/master.md'), 'utf-8')
+    )
   )
 );
 

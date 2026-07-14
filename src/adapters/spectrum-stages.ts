@@ -101,6 +101,10 @@ export async function stageGenerate(
 
 export interface StageSendOptions {
   interMessageDelayMs?: number
+  // Threaded-reply opt-in (default-OFF feature): when true, bubble 0 is sent as a
+  // threaded reply anchored to the inbound message (reply.replyThread); the rest
+  // send normally. Undefined/false → every bubble is a plain send (unchanged).
+  threadFirst?: boolean
 }
 
 // stageSend: split the reply into bubbles and send each with the inter-message
@@ -117,7 +121,8 @@ export async function stageSend(
   const parts = splitIntoMessages(toSend)
   for (let i = 0; i < parts.length; i++) {
     if (i > 0) await sleep(delay)
-    await reply.sendText(parts[i])
+    if (i === 0 && opts.threadFirst) await reply.replyThread(parts[i])
+    else await reply.sendText(parts[i])
   }
 }
 
@@ -139,13 +144,17 @@ export async function stageSendPaced(
   handle: string,
   ac: AbortController,
   deps: StageSendPacedDeps,
+  opts: { threadFirst?: boolean } = {},
 ): Promise<void> {
   if (ac.signal.aborted) return
   const parts = splitIntoMessages(toSend)
   if (parts.length === 0) return
   // Bubble 0 inline — keeps George's first-line responsiveness identical to the
   // OFF path. NEVER persisted (the scheduler also drops index 0 defensively).
-  await reply.sendText(parts[0])
+  // Threaded-reply opt-in threads this inline anchor bubble; the deferred tail
+  // (scheduled below) always sends as plain bubbles.
+  if (opts.threadFirst) await reply.replyThread(parts[0])
+  else await reply.sendText(parts[0])
   // Defer the tail. schedule() takes the FULL array and persists only [1..N-1].
   if (parts.length > 1) await deps.schedule(handle, parts)
 }
