@@ -67,6 +67,11 @@ export interface ReplyHandle {
   // isn't supported or fails, so a reply is never lost. Retries once on a
   // transient drop, same as sendText. Used by the {{THREAD}} opt-in.
   replyThread(text: string): Promise<void>
+  // Send `url` as an iMessage rich preview CARD (spectrum-ts richlink builder).
+  // Falls back to a plain text send of the URL when the card can't be built, so
+  // the link is never lost. Retries once on a transient drop. Used by the
+  // share_rich_link tool via the richlink orchestrator event.
+  sendRichLink(url: string): Promise<void>
   // Typing indicator ("…" bubble). Best-effort — platforms without a typing
   // API silently no-op. Used to show activity during the ~10s orchestrator turn.
   startTyping(): Promise<void>
@@ -154,7 +159,7 @@ export interface SpectrumClientHooks {
 // dedicated-line address/token needed until Phase 2).
 // SDK is dynamic-imported here so the native chain is never loaded on Linux.
 export async function createSpectrumClient(creds: SpectrumCredentials, hooks?: SpectrumClientHooks): Promise<SpectrumClient> {
-  const { Spectrum, attachment } = await import('spectrum-ts')
+  const { Spectrum, attachment, richlink } = await import('spectrum-ts')
   const { imessage } = await import('spectrum-ts/providers/imessage')
 
   const app = await Spectrum({
@@ -222,6 +227,21 @@ export async function createSpectrumClient(creds: SpectrumCredentials, hooks?: S
               console.error(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=reply-thread FAILED (falling back to plain send): ${(err as Error).message}`)
               await sendWithRetry(() => space.send(text))
               if (message.sender?.id) hooks?.onOutbound?.(message.sender.id, text, 'text')
+            }
+          },
+          // Rich preview card for `url`. Best-effort with a hard guarantee the link
+          // still lands: if the richlink build/send fails (unsupported platform or a
+          // transport error), fall back to sending the URL as plain text so george's
+          // shared link is never dropped. Fires onOutbound once on whichever delivers.
+          sendRichLink: async (url: string) => {
+            try {
+              await sendWithRetry(() => space.send(richlink(url)))
+              console.log(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=richlink ok`)
+              if (message.sender?.id) hooks?.onOutbound?.(message.sender.id, url, 'text')
+            } catch (err) {
+              console.error(`[spectrum OUT] line=${sp.phone ?? '?'} to=${redactHandle(message.sender?.id)} kind=richlink FAILED (falling back to plain send): ${(err as Error).message}`)
+              await sendWithRetry(() => space.send(url))
+              if (message.sender?.id) hooks?.onOutbound?.(message.sender.id, url, 'text')
             }
           },
           startTyping: async () => { await space.startTyping() },

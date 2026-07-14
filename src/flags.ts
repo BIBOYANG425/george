@@ -66,6 +66,8 @@ export interface Flags {
   imageIntakeEnabled: boolean;
   // ── threaded replies ──
   threadedRepliesEnabled: boolean;
+  // ── rich links ──
+  richLinksEnabled: boolean;
 }
 
 export function getFlags(): Flags {
@@ -100,5 +102,6 @@ export function getFlags(): Flags {
     messageObservabilityEnabled: on(process.env.GEORGE_MESSAGE_OBSERVABILITY_ENABLED),
     imageIntakeEnabled: on(process.env.GEORGE_IMAGE_INTAKE_ENABLED),
     threadedRepliesEnabled: on(process.env.GEORGE_THREADED_REPLIES_ENABLED),
+    richLinksEnabled: on(process.env.GEORGE_RICH_LINKS_ENABLED),
   };
 }

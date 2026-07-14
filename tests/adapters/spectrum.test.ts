@@ -13,6 +13,7 @@ function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: str
     sendAttachment: async () => {},
     react: async () => {},
     replyThread: async (t) => { threaded.push(t) },
+    sendRichLink: async () => {},
     startTyping: async () => { typing.push('start') },
     stopTyping: async () => { typing.push('stop') },
   }

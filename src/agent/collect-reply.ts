@@ -23,6 +23,7 @@ export interface OrchestratorEvent {
   text?: string;
   result?: string;
   emoji?: string;
+  url?: string;
   telemetry?: TurnTelemetry;
   message?: { content?: Array<{ type?: string; text?: string }> };
 }
@@ -35,6 +36,9 @@ export interface CollectHooks {
   // Fired when George taps back (react_to_user) with a non-empty emoji. Only the
   // Spectrum transport supplies this (native iMessage tapback); omit elsewhere.
   onReaction?: (emoji: string) => void | Promise<void>;
+  // Fired when George shares a rich link (share_rich_link) with a valid URL. Only
+  // the Spectrum transport supplies this (iMessage preview card); omit elsewhere.
+  onRichLink?: (url: string) => void | Promise<void>;
 }
 
 export interface CollectedReply {
@@ -62,6 +66,8 @@ export async function collectOrchestratorReply(
     // the order only groups the synthetic control events ahead of the reply events.
     if (e.type === 'reaction') {
       if (typeof e.emoji === 'string' && e.emoji) await hooks?.onReaction?.(e.emoji);
+    } else if (e.type === 'richlink') {
+      if (typeof e.url === 'string' && e.url) await hooks?.onRichLink?.(e.url);
     } else if (e.type === 'interstitial') {
       if (e.text) await hooks?.onInterstitial?.(e.text);
     } else if (e.type === 'telemetry') {

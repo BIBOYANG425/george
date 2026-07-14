@@ -769,7 +769,7 @@ export async function buildHistoryPrefix(
   return `<conversation_history>\n${historyLines}\n</conversation_history>\n\n`;
 }
 
-export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerator<{ type: string; text?: string; result?: string; telemetry?: TurnTelemetry; emoji?: string }> {
+export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerator<{ type: string; text?: string; result?: string; telemetry?: TurnTelemetry; emoji?: string; url?: string }> {
   if (args.mockMode) {
     // For tests: return a synthetic response without calling the real LLM.
     if (args.text.toLowerCase().match(/doctor|sick|medical/)) {
@@ -1054,6 +1054,15 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
               const emoji = (c.input?.emoji ?? '') as string;
               if (typeof emoji === 'string' && emoji.trim()) {
                 yield { type: 'reaction', emoji: emoji.trim() };
+              }
+            }
+            // Rich-link card: surface George's share_rich_link call as a richlink
+            // event so the transport (Spectrum) can send an iMessage preview card.
+            // No-op on channels that don't consume the event.
+            if (name.replace(/^mcp__[^_]+__/, '') === 'share_rich_link') {
+              const url = (c.input?.url ?? '') as string;
+              if (typeof url === 'string' && /^https?:\/\/\S+$/i.test(url.trim())) {
+                yield { type: 'richlink', url: url.trim() };
               }
             }
           }

@@ -573,6 +573,12 @@ export function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandle
             onReaction: (emoji) => {
               if (reply?.react) void reply.react(emoji).catch(() => {})
             },
+            // George shared a rich link (share_rich_link). Send the iMessage preview
+            // card; best-effort, never blocks the text reply. reply.sendRichLink
+            // itself falls back to a plain send if the card can't be built.
+            onRichLink: (url) => {
+              if (reply?.sendRichLink) void reply.sendRichLink(url).catch(() => {})
+            },
           },
         )
         finalText = collected.text
