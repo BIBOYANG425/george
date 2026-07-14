@@ -55,10 +55,19 @@ export function splitIntoMessages(response: string): string[] {
 // the text. Kept here next to splitIntoMessages because both are the adapter-layer
 // translation of in-band control markers George writes into its reply.
 const NO_REPLY_TOKEN = /\{\{\s*NO_REPLY\s*\}\}/gi
+// Threaded-reply opt-in: the model may emit {{THREAD}} to ask that this reply be
+// sent as an iMessage threaded reply anchored to the message it's answering (used
+// sparingly — e.g. picking a thought back up after a gap). `\bTHREAD` guards
+// against matching the REPLY inside {{NO_REPLY}} (distinct token). Whether it
+// actually threads is gated by GEORGE_THREADED_REPLIES_ENABLED at the call site;
+// stripping is unconditional so a stray token never reaches a user.
+const THREAD_TOKEN = /\{\{\s*THREAD\s*\}\}/gi
 
 export interface ControlTokens {
   // True if the reply carried a {{NO_REPLY}} token anywhere.
   noReply: boolean
+  // True if the reply carried a {{THREAD}} token anywhere (thread-to-anchor opt-in).
+  thread: boolean
   // The reply text with every control token removed and re-trimmed. When noReply
   // is true this is usually empty, but a model may pad the token with stray
   // words; callers that honor noReply ignore this, callers that don't still get
@@ -73,12 +82,14 @@ export interface ControlTokens {
 // are intentionally split so the env flag can gate suppression while stripping
 // stays unconditional (a stray token must never reach a user).
 export function parseControlTokens(response: string): ControlTokens {
-  if (!response) return { noReply: false, text: response ?? '' }
+  if (!response) return { noReply: false, thread: false, text: response ?? '' }
   const noReply = NO_REPLY_TOKEN.test(response)
-  // Reset lastIndex: the regex is /g, so .test() above advanced it.
+  const thread = THREAD_TOKEN.test(response)
+  // Reset lastIndex: the regexes are /g, so .test() above advanced them.
   NO_REPLY_TOKEN.lastIndex = 0
-  const text = response.replace(NO_REPLY_TOKEN, '').trim()
-  return { noReply, text }
+  THREAD_TOKEN.lastIndex = 0
+  const text = response.replace(NO_REPLY_TOKEN, '').replace(THREAD_TOKEN, '').trim()
+  return { noReply, thread, text }
 }
 
 // Convenience for the send sinks that don't themselves decide suppression: strip

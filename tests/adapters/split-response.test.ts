@@ -68,12 +68,13 @@ describe('parseControlTokens', () => {
   it('returns noReply:false and trimmed text for an ordinary reply', () => {
     expect(parseControlTokens('  BUAD 280 别上  ')).toEqual({
       noReply: false,
+      thread: false,
       text: 'BUAD 280 别上',
     })
   })
 
   it('detects a lone {{NO_REPLY}} token and yields empty text', () => {
-    expect(parseControlTokens('{{NO_REPLY}}')).toEqual({ noReply: true, text: '' })
+    expect(parseControlTokens('{{NO_REPLY}}')).toEqual({ noReply: true, thread: false, text: '' })
   })
 
   it('is case-insensitive and tolerates inner whitespace', () => {
@@ -100,9 +101,31 @@ describe('parseControlTokens', () => {
   })
 
   it('is safe on empty / null-ish input', () => {
-    expect(parseControlTokens('')).toEqual({ noReply: false, text: '' })
+    expect(parseControlTokens('')).toEqual({ noReply: false, thread: false, text: '' })
     // @ts-expect-error exercising the null-guard at runtime
-    expect(parseControlTokens(undefined)).toEqual({ noReply: false, text: '' })
+    expect(parseControlTokens(undefined)).toEqual({ noReply: false, thread: false, text: '' })
+  })
+
+  it('detects {{THREAD}} (thread-to-anchor opt-in), strips it, case/space tolerant', () => {
+    const r = parseControlTokens('这门我踩过坑 {{THREAD}}')
+    expect(r.thread).toBe(true)
+    expect(r.noReply).toBe(false)
+    expect(r.text).toBe('这门我踩过坑')
+    expect(parseControlTokens('{{ thread }}').thread).toBe(true)
+    expect(parseControlTokens('{{Thread}}').thread).toBe(true)
+  })
+
+  it('does NOT match the REPLY inside {{NO_REPLY}} as a THREAD/keeps them distinct', () => {
+    const r = parseControlTokens('{{NO_REPLY}}')
+    expect(r.thread).toBe(false)
+    expect(r.noReply).toBe(true)
+  })
+
+  it('honors both tokens together (suppress + thread flags independent)', () => {
+    const r = parseControlTokens('ok {{THREAD}} {{NO_REPLY}}')
+    expect(r.thread).toBe(true)
+    expect(r.noReply).toBe(true)
+    expect(r.text).toBe('ok')
   })
 
   it('is idempotent across calls (regex lastIndex is reset)', () => {

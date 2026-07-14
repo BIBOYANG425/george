@@ -74,8 +74,10 @@ describe('applyNoReplyGate', () => {
       expect(out).not.toContain('GEORGE_NOREPLY')
       expect(out).not.toContain('{{NO_REPLY}}')
       expect(out).not.toContain('Declining to reply')
-      // The block collapses to exactly the original paragraph break.
-      expect(out).toContain("Don't tack on a help-offer.\n\n## Grounding and tools")
+      // The NO_REPLY block collapses to a single paragraph break. The adjacent
+      // {{THREAD}} block is gated separately (applyThreadedRepliesGate), so this
+      // gate leaves it in place — it now sits immediately after the collapse.
+      expect(out).toContain("Don't tack on a help-offer.\n\n<!-- GEORGE_THREAD_BEGIN -->")
       expect(out).not.toMatch(/\n{3,}/)
     })
 

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from '../config.js';
 import { applyNoReplyGate } from './noreply-gate.js';
+import { applyThreadedRepliesGate } from './threaded-replies-gate.js';
 import { applyVoiceExamplesGate } from './voice-examples-gate.js';
 import { isRecallToolEnabled } from '../tools/recall-memory.js';
 import { isUpdateMemoryToolEnabled } from '../tools/update-memory.js';
@@ -17,13 +18,14 @@ function readPrompt(name: string): string {
   return fs.readFileSync(path.join(PROMPTS_DIR, `${name}.md`), 'utf-8');
 }
 
-// master.md carries two flag-gated sentinel blocks: the {{NO_REPLY}} opt-out
-// (applyNoReplyGate / GEORGE_NOREPLY_ENABLED) and the few-shot voice examples
-// (applyVoiceExamplesGate / GEORGE_VOICE_EXAMPLES_ENABLED). Each keeps its block
-// iff its flag is on, else strips it (both default OFF → byte-for-byte unchanged).
-// The two blocks are independent, so gate order does not matter. See the two
-// ./*-gate.ts files.
-export const MASTER_PROMPT = applyVoiceExamplesGate(applyNoReplyGate(readPrompt('master')));
+// master.md carries three flag-gated sentinel blocks: the {{NO_REPLY}} opt-out
+// (applyNoReplyGate / GEORGE_NOREPLY_ENABLED), the {{THREAD}} opt-in
+// (applyThreadedRepliesGate / GEORGE_THREADED_REPLIES_ENABLED), and the few-shot
+// voice examples (applyVoiceExamplesGate / GEORGE_VOICE_EXAMPLES_ENABLED). Each
+// keeps its block iff its flag is on, else strips it (all default OFF →
+// byte-for-byte unchanged). The blocks are independent, so gate order does not
+// matter. See the ./*-gate.ts files.
+export const MASTER_PROMPT = applyVoiceExamplesGate(applyThreadedRepliesGate(applyNoReplyGate(readPrompt('master'))));
 export const ORCHESTRATOR_PROMPT = readPrompt('orchestrator');
 const FIND_PEOPLE_PROMPT = readPrompt('find-people');
 const WHATS_HAPPENING_PROMPT = readPrompt('whats-happening');
