@@ -270,9 +270,10 @@ export async function runSpectrumLoop(
           platform: message.platform,
           channel,
           contentType: message.contentType,
-          text: message.contentType === 'text' ? message.text : undefined,
+          text: message.contentType === 'text' ? message.text : message.reaction?.emoji,
           externalId: message.messageId,
           senderName: message.senderName,
+          metadata: message.reaction ? { reaction: true, targetGuid: message.reaction.targetGuid } : undefined,
         })
         obs.upsertContact({
           handle: message.senderId,
@@ -282,7 +283,20 @@ export async function runSpectrumLoop(
         })
       }
 
-      if (message.contentType !== 'text') continue
+      // Non-text content routing. Reactions (inbound tapbacks) are recorded — a
+      // student 👍-ing George is a real ack signal, not noise — then the turn
+      // ends (a tapback is not a text prompt). Attachments/location fall through
+      // to skip for now (handled in later phases). Nothing here starts a turn.
+      if (message.contentType !== 'text') {
+        if (message.reaction) {
+          log('info', 'spectrum_inbound_reaction', {
+            senderId: message.senderId,
+            emoji: message.reaction.emoji,
+            targetGuid: message.reaction.targetGuid,
+          })
+        }
+        continue
+      }
 
       // Pacing ON: a fresh inbound supersedes any pending scheduled bubbles for
       // this sender (cheap indexed delete; returns 0 when nothing pending →
