@@ -13,6 +13,8 @@
 // to become a per-invocation factory that takes a profile argument.
 
 import { query, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import type { ImagePart } from './image-part.js';
+import { buildClaudePrompt } from './multimodal-prompt.js';
 import { MASTER_PROMPT, ORCHESTRATOR_PROMPT, SUB_AGENTS, ORCHESTRATOR_DIRECT_TOOLS, ORCHESTRATOR_MODEL, UNIFIED_DOMAIN_PROMPT, KNOW_THINGS_PROMPT, TRUNK_TOOLS, TRUNK_MODEL } from './agents.config.js';
 import { getFullCatalog } from '../skills/index.js';
 import { ALL_TOOLS } from '../tools/index.js';
@@ -70,6 +72,11 @@ export interface RunOrchestratorArgs {
   // the system prompt only — never persisted as the user turn. '' / undefined
   // when there's nothing to add (default-off behavior unchanged).
   delayContext?: string;
+  // Inbound images for this turn (image intake, default-OFF). When present, the
+  // Claude prompt is built as a multimodal user message (text + image blocks)
+  // instead of a bare string. Undefined/empty → the prompt is the plain string
+  // exactly as before, so text turns are byte-identical.
+  images?: ImagePart[];
 }
 
 // The 6 memory blocks rendered as a system-prompt section. Empty string when
@@ -877,7 +884,11 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // multi-agent) isn't diluted by fast-path turns, which are identical on both
   // arms and carry zero topology signal.
   const fastPathDisabled = getFlags().disableFastPath;
-  const fast = fastPathDisabled
+  // An image turn must always reach the full agent (vision) — the fast path is
+  // text-only and would answer a canned reply while ignoring the image. Skip it
+  // whenever images are present (no-op on the OFF/text path: length 0).
+  const hasImages = (args.images?.length ?? 0) > 0;
+  const fast = fastPathDisabled || hasImages
     ? null
     : await fastReply({
         text: args.text,
@@ -942,6 +953,11 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // sessionStore option mirrors transcripts to an external store — not the same
   // concept; we handle session state ourselves.
   const promptWithHistory = `${historyPrefix}${args.text}`;
+
+  // Image intake (default-OFF). With images, the prompt becomes a single
+  // streaming-input user message carrying text + image blocks so Claude sees them
+  // as vision. Without images this returns the plain string, byte-identical to before.
+  const queryPrompt = buildClaudePrompt(promptWithHistory, args.images);
 
   // One-time "checking…" interstitial: emitted the first time the model actually
   // calls a tool, so the user sees George got the message and is working (esp. on
@@ -1009,7 +1025,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     abortController: args.abortController,
   });
 
-  for await (const message of query({ prompt: promptWithHistory, options: queryOptions })) {
+  for await (const message of query({ prompt: queryPrompt, options: queryOptions })) {
     // Record actual web searches performed this turn (server-tool usage) against
     // the student's daily budget so the next turn's webAllowed check is accurate.
     const m = message as {

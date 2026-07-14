@@ -100,4 +100,16 @@ describe('runInboundPipeline — handle normalization + forwarding', () => {
     await runInboundPipeline(deps, { rawUserId: 'raw-handle', text: 'x' });
     expect(seenUid).toBe('raw-handle');
   });
+
+  it('forwards images as the 6th orchestrator arg, and undefined when none', async () => {
+    const images = [{ mimeType: 'image/jpeg' as const, dataBase64: 'ZZZ' }];
+    const seen: unknown[] = [];
+    const deps = makeDeps({
+      runOrchestratorText: async (_u, _t, _ac, _dc, _r, imgs) => { seen.push(imgs); return 'ok'; },
+    });
+    await runInboundPipeline(deps, { rawUserId: 'u', text: 'look', images });
+    await runInboundPipeline(deps, { rawUserId: 'u', text: 'plain text' });
+    expect(seen[0]).toBe(images);
+    expect(seen[1]).toBeUndefined();
+  });
 });

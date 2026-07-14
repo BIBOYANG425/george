@@ -15,6 +15,7 @@
 // Header last reviewed: 2026-06-24
 
 import type { ReplyHandle } from './spectrum-client.js'
+import type { ImagePart } from '../agent/image-part.js'
 import {
   splitIntoMessages,
   sleep,
@@ -50,6 +51,9 @@ export async function stageReadReceiptDelay(opts: StageReadReceiptOptions = {}):
 
 export interface StageGenerateOptions {
   interimDelayMs?: number
+  // Inbound images for this turn (image intake, default-OFF). Undefined/empty on
+  // the OFF path, so the handleText call is byte-identical to a text-only turn.
+  images?: ImagePart[]
 }
 
 // stageGenerate: owns startTyping (best-effort), the interim "still thinking"
@@ -69,6 +73,7 @@ export async function stageGenerate(
     reply: ReplyHandle,
     abortController?: AbortController,
     delayContext?: string,
+    images?: ImagePart[],
   ) => Promise<string | null>,
   delayContext: string,
   opts: StageGenerateOptions = {},
@@ -87,7 +92,7 @@ export async function stageGenerate(
     // note, NOT prepended to the user text — so it bypasses the injection /
     // handshake / user-command gates and is never persisted as the user's
     // message. '' by default (flag off / short gap).
-    const out = await handleText(senderId, texts.join('\n'), reply, ac, delayContext)
+    const out = await handleText(senderId, texts.join('\n'), reply, ac, delayContext, opts.images)
     return out
   } finally {
     clearTimeout(interimTimer)

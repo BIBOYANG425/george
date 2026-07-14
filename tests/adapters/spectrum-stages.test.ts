@@ -76,7 +76,26 @@ describe('stageGenerate', () => {
     const out = await stageGenerate('s1', ['hi'], reply, ac, handle, '', { interimDelayMs: 60_000 });
     expect(out).toBe('the reply');
     expect(typing).toContain('start');
-    expect(handle).toHaveBeenCalledWith('s1', 'hi', reply, ac, '');
+    // 6th arg is opts.images — undefined here (no images passed), so the call is
+    // byte-identical to a text-only turn plus a trailing undefined.
+    expect(handle).toHaveBeenCalledWith('s1', 'hi', reply, ac, '', undefined);
+  });
+
+  it('forwards opts.images as the 6th handleText arg', async () => {
+    const { reply } = fakeReply();
+    const ac = new AbortController();
+    const handle = vi.fn(async () => 'ok');
+    const images = [{ mimeType: 'image/png' as const, dataBase64: 'AAAA' }];
+    await stageGenerate('s1', ['see this'], reply, ac, handle, '', { interimDelayMs: 60_000, images });
+    expect(handle.mock.calls[0][5]).toBe(images);
+  });
+
+  it('passes undefined images when none are supplied (text turn unchanged)', async () => {
+    const { reply } = fakeReply();
+    const ac = new AbortController();
+    const handle = vi.fn(async () => 'ok');
+    await stageGenerate('s1', ['hi'], reply, ac, handle, '', { interimDelayMs: 60_000 });
+    expect(handle.mock.calls[0][5]).toBeUndefined();
   });
 
   it('joins multiple buffered texts with a newline', async () => {
