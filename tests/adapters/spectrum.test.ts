@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { runSpectrumLoop, stopSpectrumIntake, closeSpectrumClient } from '../../src/adapters/spectrum.js'
 import { sendWithRetry, redactHandle, isTransientSendError } from '../../src/adapters/spectrum-client.js'
 import type { SpectrumClient, InboundMessage, ReplyHandle } from '../../src/adapters/spectrum-client.js'
+import { MAX_IMAGE_BYTES, MAX_IMAGES_PER_TURN } from '../../src/agent/image-part.js'
 
 function fakeClient(msgs: InboundMessage[]): { client: SpectrumClient; sent: string[]; typing: string[] } {
   const sent: string[] = []
@@ -106,8 +107,9 @@ describe('runSpectrumLoop', () => {
     await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() })
     expect(handle).toHaveBeenCalledTimes(1)
     // 5th arg is the delay-context note; '' on a first turn (no prior reply) and
-    // when the activity-state flag is off (default).
-    expect(handle).toHaveBeenCalledWith('+15551234567', 'yo learn', expect.anything(), expect.anything(), '')
+    // when the activity-state flag is off (default). 6th is images — undefined on
+    // a text turn (image intake off / no attachment).
+    expect(handle).toHaveBeenCalledWith('+15551234567', 'yo learn', expect.anything(), expect.anything(), '', undefined)
   })
 
   it('dedups a repeated messageId', async () => {
@@ -329,6 +331,93 @@ describe('runSpectrumLoop — burst guard (flag ON)', () => {
 // after the drain). Both must be safe to call when the adapter never started
 // (all module handles null → no-ops) so index.ts's shutdown() never throws in the
 // TRANSPORT=legacy / adapter-not-booted case.
+// ── Image intake (Photon phase 1, default-OFF) ──────────────────────────────
+// Proves the loop downloads + threads inbound images to the handler ONLY when
+// GEORGE_IMAGE_INTAKE_ENABLED is on, and the OFF path never touches the network
+// (read handle untouched) and drops an image-only message like any non-text.
+describe('runSpectrumLoop — image intake', () => {
+  const FLAG = 'GEORGE_IMAGE_INTAKE_ENABLED'
+  let prev: string | undefined
+  beforeEach(() => { prev = process.env[FLAG] })
+  afterEach(() => { if (prev === undefined) delete process.env[FLAG]; else process.env[FLAG] = prev })
+
+  const imgMsg = (over: Partial<InboundMessage> = {}): InboundMessage =>
+    msg({ contentType: 'attachment', text: '', messageId: 'img1',
+      imageAttachment: { mimeType: 'image/png', read: async () => Buffer.from('PNGBYTES') }, ...over })
+
+  it('flag ON: downloads a supported image and threads it as the 6th handler arg', async () => {
+    process.env[FLAG] = 'true'
+    const read = vi.fn(async () => Buffer.from('PNGBYTES'))
+    const { client } = fakeClient([imgMsg({ imageAttachment: { mimeType: 'image/png', read } })])
+    const handle = vi.fn(async () => 'saw it')
+    await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() })
+    expect(read).toHaveBeenCalledTimes(1)
+    const images = handle.mock.calls[0][5] as Array<{ mimeType: string; dataBase64: string }>
+    expect(images).toHaveLength(1)
+    expect(images[0].mimeType).toBe('image/png')
+    expect(images[0].dataBase64).toBe(Buffer.from('PNGBYTES').toString('base64'))
+  })
+
+  it('flag OFF: never downloads and drops the image-only message (no handler call)', async () => {
+    delete process.env[FLAG]
+    const read = vi.fn(async () => Buffer.from('PNGBYTES'))
+    const { client } = fakeClient([imgMsg({ imageAttachment: { mimeType: 'image/png', read } })])
+    const handle = vi.fn(async () => 'x')
+    await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() })
+    expect(read).not.toHaveBeenCalled()
+    expect(handle).not.toHaveBeenCalled()
+  })
+
+  it('flag ON: skips an unsupported mime without downloading (message dropped)', async () => {
+    process.env[FLAG] = 'true'
+    const read = vi.fn(async () => Buffer.from('HEIC'))
+    const { client } = fakeClient([imgMsg({ imageAttachment: { mimeType: 'image/heic', read } })])
+    const handle = vi.fn(async () => 'x')
+    await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() })
+    expect(read).not.toHaveBeenCalled()
+    expect(handle).not.toHaveBeenCalled()
+  })
+
+  it('flag ON: skips an oversized image (downloaded then dropped, no handler call)', async () => {
+    process.env[FLAG] = 'true'
+    const huge = { length: MAX_IMAGE_BYTES + 1, toString: () => 'x' } as unknown as Buffer
+    const read = vi.fn(async () => huge)
+    const { client } = fakeClient([imgMsg({ imageAttachment: { mimeType: 'image/png', read } })])
+    const handle = vi.fn(async () => 'x')
+    await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() })
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(handle).not.toHaveBeenCalled()
+  })
+
+  it('flag ON: a text message with no attachment threads undefined images', async () => {
+    process.env[FLAG] = 'true'
+    const { client } = fakeClient([msg({ text: 'plain' })])
+    const handle = vi.fn(async () => 'ok')
+    await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() })
+    expect(handle.mock.calls[0][5]).toBeUndefined()
+  })
+
+  it('flag ON: caps a burst at MAX_IMAGES_PER_TURN, keeping the most recent', async () => {
+    process.env[FLAG] = 'true'
+    const imgs = Array.from({ length: MAX_IMAGES_PER_TURN + 2 }, (_, i) =>
+      imgMsg({ messageId: `img${i}`, imageAttachment: { mimeType: 'image/png', read: async () => Buffer.from(`IMG${i}`) } }))
+    const { client } = fakeClient(imgs)
+    const handle = vi.fn(async () => 'ok')
+    await runSpectrumLoop(client, { handleText: handle, handleLocation: vi.fn() })
+    // One coalesced turn for the sender; images capped, tail kept.
+    expect(handle).toHaveBeenCalledTimes(1)
+    const got = handle.mock.calls[0][5] as Array<{ dataBase64: string }>
+    expect(got).toHaveLength(MAX_IMAGES_PER_TURN)
+    expect(got[got.length - 1].dataBase64).toBe(Buffer.from(`IMG${MAX_IMAGES_PER_TURN + 1}`).toString('base64'))
+  })
+})
+
+// Kept LAST on purpose: stopSpectrumIntake() sets the module-global spectrumStopping
+// flag (dropping all subsequent inbound so a drain can finish) and nothing resets it
+// without a full adapter start. Any describe that runs a bare runSpectrumLoop must
+// come BEFORE this one, or its inbound gets silently dropped. Also proves the split
+// teardown is a no-op (all module handles null) so index.ts's shutdown() never throws
+// in the TRANSPORT=legacy / adapter-not-booted case.
 describe('spectrum shutdown split — stopSpectrumIntake / closeSpectrumClient', () => {
   it('stopSpectrumIntake resolves without a live client (no-op teardown)', async () => {
     await expect(stopSpectrumIntake()).resolves.toBeUndefined()

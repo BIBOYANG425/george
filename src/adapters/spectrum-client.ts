@@ -48,6 +48,10 @@ export interface InboundMessage {
   // Inbound iMessage tapback (contentType === 'reaction'): the emoji and the
   // guid of the message the user reacted to. Present only on reaction messages.
   reaction?: { emoji: string; targetGuid?: string }
+  // Inbound image attachment (contentType === 'attachment' with an image mime).
+  // The handle is lazy — `read()` triggers the download — so nothing is fetched
+  // unless a consumer (image intake) actually opts in.
+  imageAttachment?: { mimeType: string; read: () => Promise<Buffer> }
 }
 
 export interface ReplyHandle {
@@ -215,6 +219,16 @@ export async function createSpectrumClient(creds: SpectrumCredentials, hooks?: S
               ? {
                   emoji: (message.content as { emoji: string }).emoji,
                   targetGuid: (message.content as { target?: { id?: string } }).target?.id,
+                }
+              : undefined,
+          // Surface an inbound image attachment's lazy read handle (no download here).
+          imageAttachment:
+            message.content.type === 'attachment' &&
+            typeof (message.content as { mimeType?: string }).mimeType === 'string' &&
+            (message.content as { mimeType: string }).mimeType.startsWith('image/')
+              ? {
+                  mimeType: (message.content as { mimeType: string }).mimeType,
+                  read: () => (message.content as { read: () => Promise<Buffer> }).read(),
                 }
               : undefined,
           // message.id is the stable SDK-assigned guid

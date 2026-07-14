@@ -44,6 +44,7 @@ import { runOrchestrator } from '../agent/orchestrator.js'
 import { collectOrchestratorReply } from '../agent/collect-reply.js'
 import { runInboundPipeline } from '../agent/inbound-pipeline.js'
 import { getFlags } from '../flags.js'
+import { isSupportedImageMime, MAX_IMAGE_BYTES, MAX_IMAGES_PER_TURN, type ImagePart } from '../agent/image-part.js'
 import { inflightTurns } from '../agent/inflight-registry.js'
 import { captureFactsFromTurn } from '../memory/capture.js'
 import { TURN_EVALUATORS, dispatchEvaluators } from '../agent/evaluators/registry.js'
@@ -138,6 +139,12 @@ export async function runSpectrumLoop(
   const interimDelayMs = opts.interimDelayMs ?? 9000
   const seen = new Set<string>()
   const buffers = new Map<string, { texts: string[]; reply: ReplyHandle; timer: ReturnType<typeof setTimeout>; refolds: number }>()
+  // Image intake (default-OFF, GEORGE_IMAGE_INTAKE_ENABLED). Downloaded inbound
+  // images accumulate here per sender, keyed alongside `buffers`, and are drained
+  // into the same coalesced turn at flush. Kept OUT of the buffer entry so the
+  // burst refold/coalesce logic (which rebuilds `texts` in several places) stays
+  // untouched — the OFF path never writes this map, so text turns are unchanged.
+  const pendingImages = new Map<string, ImagePart[]>()
   // The turn currently running for each sender. A fresh mid-turn message aborts
   // this controller so we never reply to a superseded message (Bobby's intent).
   // With the burst guard ON we ALSO carry the in-flight `texts` forward (refold)
@@ -164,6 +171,10 @@ export async function runSpectrumLoop(
         const idleCutoff = now - 60 * 60_000 // forget a sender's last-reply after 1h idle
         for (const [k, t] of lastReplyAt) if (t < idleCutoff) lastReplyAt.delete(k)
         for (const [k, b] of burstState) if (b.cooldownUntil <= now) burstState.delete(k)
+        // Drop images stranded by a cooldown/rate-limit drop (accumulated but the
+        // message never reached the buffer, so no flush will drain them). Safe:
+        // a sender mid-burst still has a buffer or in-flight turn that owns them.
+        for (const k of pendingImages.keys()) if (!buffers.has(k) && !inflight.has(k)) pendingImages.delete(k)
       }, 10 * 60_000)
     : null
 
@@ -178,6 +189,10 @@ export async function runSpectrumLoop(
       return
     }
     buffers.delete(senderId)
+    // Drain any images this sender sent during the burst — they ride the same
+    // coalesced turn as the text. Empty/undefined on the OFF path (map never written).
+    const images = pendingImages.get(senderId)
+    pendingImages.delete(senderId)
     const ac = new AbortController()
     inflight.set(senderId, { ac, texts: buf.texts, refolds: buf.refolds })
     // If it's been a long time since George last replied to this sender, prepend
@@ -197,7 +212,7 @@ export async function runSpectrumLoop(
       // stageGenerate owns startTyping + the long-turn "still thinking" nudge +
       // the handleText await + clearTimeout on success/throw. delayContext rides
       // into the orchestrator as a per-turn system note. Returns out | null.
-      const out = await stageGenerate(senderId, buf.texts, buf.reply, ac, handlers.handleText, delayContext, { interimDelayMs })
+      const out = await stageGenerate(senderId, buf.texts, buf.reply, ac, handlers.handleText, delayContext, { interimDelayMs, images })
       // One idea per bubble: split on blank-line boundaries and send each as a
       // separate iMessage with a pause, matching george's short-burst cadence
       // (same as the legacy adapter). A single-paragraph reply stays one bubble.
@@ -270,7 +285,10 @@ export async function runSpectrumLoop(
           platform: message.platform,
           channel,
           contentType: message.contentType,
-          text: message.contentType === 'text' ? message.text : message.reaction?.emoji,
+          text:
+            message.contentType === 'text'
+              ? message.text
+              : (message.reaction?.emoji ?? (message.imageAttachment ? '[image]' : undefined)),
           externalId: message.messageId,
           senderName: message.senderName,
           metadata: message.reaction ? { reaction: true, targetGuid: message.reaction.targetGuid } : undefined,
@@ -283,11 +301,35 @@ export async function runSpectrumLoop(
         })
       }
 
+      // Image intake (default-OFF). Download an inbound image so it can ride the
+      // coalesced turn as vision. Guarded by mime allow-list + byte cap; the read
+      // handle is lazy so nothing is fetched unless the flag is on. Computed BEFORE
+      // the text-only gate below so an image message (contentType 'attachment')
+      // isn't dropped. OFF path: the condition is false, so this is a no-op.
+      let turnImage: ImagePart | undefined
+      if (
+        getFlags().imageIntakeEnabled &&
+        message.imageAttachment &&
+        isSupportedImageMime(message.imageAttachment.mimeType)
+      ) {
+        try {
+          const bytes = await message.imageAttachment.read()
+          if (bytes.length <= MAX_IMAGE_BYTES) {
+            turnImage = { mimeType: message.imageAttachment.mimeType, dataBase64: bytes.toString('base64') }
+          } else {
+            log('info', 'spectrum_image_skipped_too_large', { senderId: message.senderId, bytes: bytes.length })
+          }
+        } catch (err) {
+          log('warn', 'spectrum_image_download_failed', { senderId: message.senderId, error: (err as Error).message })
+        }
+      }
+
       // Non-text content routing. Reactions (inbound tapbacks) are recorded — a
       // student 👍-ing George is a real ack signal, not noise — then the turn
-      // ends (a tapback is not a text prompt). Attachments/location fall through
-      // to skip for now (handled in later phases). Nothing here starts a turn.
-      if (message.contentType !== 'text') {
+      // ends (a tapback is not a text prompt). A successfully-downloaded image
+      // falls THROUGH to the buffer below (it starts/joins a turn). Other non-text
+      // (location, unhandled attachments) still skip for now (later phases).
+      if (message.contentType !== 'text' && !turnImage) {
         if (message.reaction) {
           log('info', 'spectrum_inbound_reaction', {
             senderId: message.senderId,
@@ -296,6 +338,12 @@ export async function runSpectrumLoop(
           })
         }
         continue
+      }
+
+      // Accumulate the downloaded image for this sender (capped), drained at flush.
+      if (turnImage) {
+        const prior = pendingImages.get(message.senderId) ?? []
+        pendingImages.set(message.senderId, [...prior, turnImage].slice(-MAX_IMAGES_PER_TURN))
       }
 
       // Pacing ON: a fresh inbound supersedes any pending scheduled bubbles for
@@ -378,12 +426,12 @@ export interface TextHandlerDeps {
   // is forwarded to the orchestrator as a per-turn system note; '' when none.
   // `reply` is passed so an in-turn { type:'reaction' } event (George tapping
   // back via react_to_user) can be applied to the inbound message immediately.
-  runOrchestratorText: (userId: string, text: string, abortController?: AbortController, delayContext?: string, reply?: ReplyHandle) => Promise<string>
+  runOrchestratorText: (userId: string, text: string, abortController?: AbortController, delayContext?: string, reply?: ReplyHandle, images?: ImagePart[]) => Promise<string>
   normalizeHandle: (raw: string) => string
 }
 
 export function buildTextHandler(deps: TextHandlerDeps) {
-  return async (rawUserId: string, text: string, reply: ReplyHandle, abortController?: AbortController, delayContext?: string): Promise<string | null> => {
+  return async (rawUserId: string, text: string, reply: ReplyHandle, abortController?: AbortController, delayContext?: string, images?: ImagePart[]): Promise<string | null> => {
     // The injection → handshake → command → orchestrate sequence lives in the shared
     // runInboundPipeline; this transport flattens its discriminated outcome back to
     // the string | null the flush loop expects (byte-for-byte the previous behavior:
@@ -393,7 +441,7 @@ export function buildTextHandler(deps: TextHandlerDeps) {
       // tryHandshake takes a required ReplyHandle here; widen it to the pipeline's
       // optional-reply shape (spectrum always supplies one). Every other dep matches.
       { ...deps, tryHandshake: (u, t, r) => deps.tryHandshake(u, t, r as ReplyHandle) },
-      { rawUserId, text, reply, abortController, delayContext },
+      { rawUserId, text, reply, abortController, delayContext, images },
     )
     switch (outcome.kind) {
       case 'injection':
@@ -477,7 +525,7 @@ export function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandle
       return tryHandleUserCommand(userId, text)
     },
 
-    runOrchestratorText: async (userId: string, text: string, abortController?: AbortController, delayContext?: string, reply?: ReplyHandle): Promise<string> => {
+    runOrchestratorText: async (userId: string, text: string, abortController?: AbortController, delayContext?: string, reply?: ReplyHandle, images?: ImagePart[]): Promise<string> => {
       const turnStart = Date.now()
       const burst = readBurstConfig()
       const saveUserTurn = async () => {
@@ -509,6 +557,7 @@ export function buildSpectrumHandlers(deps: SpectrumAdapterDeps): SpectrumHandle
             profileStore: deps.profileStore,
             abortController,
             delayContext,
+            images,
           }),
           {
             // George tapped back (react_to_user). Apply the native iMessage tapback

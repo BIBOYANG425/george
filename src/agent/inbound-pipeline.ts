@@ -15,7 +15,9 @@
 // or the SDK. `TReply` is the transport's reply-handle type (Spectrum's ReplyHandle;
 // unused by queue-backed transports).
 //
-// Header last reviewed: 2026-07-07
+// Header last reviewed: 2026-07-13
+
+import type { ImagePart } from './image-part.js';
 
 export interface InboundPipelineDeps<TReply = unknown> {
   // Normalize the raw channel handle before any lookup/save. Optional → identity.
@@ -39,6 +41,7 @@ export interface InboundPipelineDeps<TReply = unknown> {
     abortController?: AbortController,
     delayContext?: string,
     reply?: TReply,
+    images?: ImagePart[],
   ) => Promise<string>;
 }
 
@@ -48,6 +51,11 @@ export interface InboundInput<TReply = unknown> {
   reply?: TReply;
   abortController?: AbortController;
   delayContext?: string;
+  // Inbound images for this turn (image intake, default-OFF). Forwarded to the
+  // orchestrator alongside the text; undefined/empty on the text-only path. Like
+  // delayContext, images bypass the injection / handshake / command gates — they
+  // reach only runOrchestratorText.
+  images?: ImagePart[];
 }
 
 // The stage that produced the outcome, so the caller can post-process per stage.
@@ -69,6 +77,6 @@ export async function runInboundPipeline<TReply = unknown>(
   if (await deps.tryHandshake(userId, input.text, input.reply)) return { kind: 'handshake' };
   const cmd = await deps.tryUserCommand(userId, input.text);
   if (cmd !== null) return { kind: 'command', reply: cmd };
-  const out = await deps.runOrchestratorText(userId, input.text, input.abortController, input.delayContext, input.reply);
+  const out = await deps.runOrchestratorText(userId, input.text, input.abortController, input.delayContext, input.reply, input.images);
   return { kind: 'orchestrator', reply: out };
 }
