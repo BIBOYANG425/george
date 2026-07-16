@@ -7,6 +7,11 @@ import {
 } from '../db/shipping-notifications.js'
 import { sendPlatformMessage } from '../adapters/send-message.js'
 import { log } from '../observability/logger.js'
+import { config } from '../config.js'
+
+// Pending rows are fetched LIMIT-bounded per tick; hitting this many means the
+// backlog is deeper than one tick can drain. Mirrors the db-layer LIMIT.
+const QUEUE_TICK_LIMIT = 100
 
 // Static bilingual copy per notification kind. Deterministic (no LLM) — shipping
 // status updates are transactional, not conversational. Pickup kinds template
@@ -97,9 +102,27 @@ export async function sendPendingShippingNotifications() {
   const staleCount = await markStaleNotificationsSkipped()
   if (staleCount > 0) {
     log('warn', 'shipping_notifications_stale_skipped', { count: staleCount })
+    // A large stale drop means we fell >24h behind — almost always a george
+    // host outage. Surface it loudly. NOTE: a full host-down state itself can't
+    // be detected here (this cron doesn't run when george is down); pair this
+    // with EXTERNAL uptime monitoring on the host.
+    if (staleCount >= config.shippingNotifier.queueAlertDepth) {
+      log('error', 'shipping_queue_alert', {
+        reason: 'stale_backlog_dropped',
+        count: staleCount,
+        hint: 'notifier was >24h behind — check the george host + add external uptime monitoring',
+      })
+    }
   }
 
   const pending = await getPendingShippingNotifications()
+  if (pending.length >= QUEUE_TICK_LIMIT) {
+    log('error', 'shipping_queue_alert', {
+      reason: 'backlog_at_tick_limit',
+      depth: pending.length,
+      hint: 'pending exceeds one tick — drain is falling behind, rows risk aging into the stale window',
+    })
+  }
   if (pending.length === 0) return
 
   for (const n of pending) {
@@ -138,6 +161,19 @@ export async function sendPendingShippingNotifications() {
     if (student.shipping_notif_opt_out) {
       await markShippingNotificationSkipped(id, 'opted_out')
       continue
+    }
+    // Dry-run allowlist (Phase-1 go-live): when SHIPPING_NOTIFIER_ALLOWLIST is
+    // set, only deliver to students whose wechat_open_id / imessage_id is listed;
+    // everyone else is skipped. Empty allowlist = no filtering (full operation).
+    const allowlist = config.shippingNotifier.allowlist
+    if (allowlist.length > 0) {
+      const handleIds = [student.wechat_open_id, student.imessage_id].filter(
+        Boolean,
+      ) as string[]
+      if (!handleIds.some((h) => allowlist.includes(h))) {
+        await markShippingNotificationSkipped(id, 'not_in_allowlist')
+        continue
+      }
     }
     // Delivery targets, primary first: WeChat if linked, else iMessage. If the
     // primary throws (e.g. WeChat 48h-window errcode after the errcode fix, or
