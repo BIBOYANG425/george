@@ -21,7 +21,7 @@ import { log } from '../observability/logger.js';
 import { config } from '../config.js';
 import { scanFabricationRisk } from './fast-path-guard.js';
 
-const NEEDS_AGENT = 'NEEDS_AGENT';
+export const NEEDS_AGENT = 'NEEDS_AGENT';
 
 const FAST_INSTRUCTION = [
   '# FAST RESPONDER MODE',
@@ -76,8 +76,14 @@ export async function fastReply(args: {
   // Per-user emotional-tier model (admin dashboard). null/undefined → today's
   // default selection (Doubao-if-configured, else lightweight). See routing below.
   emotionalModel?: string | null;
+  // Overrides the responder instruction appended to the system prompt. Defaults to
+  // FAST_INSTRUCTION (the timid "bail on anything factual" fast-path mode), so every
+  // existing caller is byte-identical. The router passes LITE_INSTRUCTION (answer
+  // confidently — the classifier already vouched this is a no-lookup turn).
+  instruction?: string;
 }): Promise<string | null> {
-  const system = [MASTER_PROMPT, renderDateBlock(), renderMoodBlock(), args.profileBlock, args.recallBlock, FAST_INSTRUCTION]
+  const instruction = args.instruction ?? FAST_INSTRUCTION;
+  const system = [MASTER_PROMPT, renderDateBlock(), renderMoodBlock(), args.profileBlock, args.recallBlock, instruction]
     .filter(Boolean)
     .join('\n\n');
   try {

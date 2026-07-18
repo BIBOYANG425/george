@@ -34,7 +34,7 @@ import { renderMoodBlock, renderDateBlock } from './calendar-mood.js';
 import { isRelationshipEvalEnabled } from './evaluators/relationship.js';
 import { renderActivityBlock } from './activity-state.js';
 import { getWorldStateStore, worldStateEnabled } from './world-state.js';
-import { fastReply } from './fast-path.js';
+import { decideCheapPath, type RouteVerdict } from './router.js';
 import { detectUnsourcedClaim } from './fast-path-guard.js';
 import { checkUsageAllowed, getMainModelOverride, resolveEmotionalModelForUser } from '../admin/user-controls.js';
 import { getFlags } from '../flags.js';
@@ -873,41 +873,41 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     }
   }
 
-  // FAST PATH: most messages (greetings, small talk, feelings, thanks) need no
+  // CHEAP PATH: most messages (greetings, small talk, feelings, thanks) need no
   // tools and no dispatch. Answer them with ONE direct flash call (~2-3s) instead
-  // of the full multi-hop engine (~50s). fastReply returns null — falling through
-  // to the full agent — for anything factual or uncertain, so anti-fabrication is
-  // preserved. (Skipped implicitly when it returns null.)
-  //
-  // GEORGE_DISABLE_FAST_PATH (default off) forces every turn through the full
-  // agent. The eval harness sets it so an A/B over the agent TOPOLOGY (trunk vs
-  // multi-agent) isn't diluted by fast-path turns, which are identical on both
-  // arms and carry zero topology signal.
-  const fastPathDisabled = getFlags().disableFastPath;
-  // An image turn must always reach the full agent (vision) — the fast path is
-  // text-only and would answer a canned reply while ignoring the image. Skip it
-  // whenever images are present (no-op on the OFF/text path: length 0).
-  const hasImages = (args.images?.length ?? 0) > 0;
-  const fast = fastPathDisabled || hasImages
-    ? null
-    : await fastReply({
-        text: args.text,
-        historyPrefix,
-        profileBlock: buildUserProfileBlock(profile),
-        recallBlock,
-        // Per-user emotional-tier model (admin dashboard). null when unset → fast
-        // path keeps its default selection. Keyed off the RAW handle (args.userId),
-        // matching resolveModelForUser — this runs before studentId resolution.
-        emotionalModel: resolveEmotionalModelForUser(args.userId),
-      });
-  if (fast !== null) {
-    yield { type: 'result', result: fast };
-    // Tag the turn as fast-path so the dashboard can tell it apart from a
-    // full-agent turn that lost telemetry. (fastReply doesn't expose token
-    // usage yet — wiring that through would let cost coverage include these.)
-    yield { type: 'telemetry', telemetry: { channel: args.channel, outcome: 'fast_path', model: 'fast', tools: [] } };
+  // of the full multi-hop engine (~50s). decideCheapPath (src/agent/router.ts)
+  // owns the three mutually-exclusive modes:
+  //   1. GEORGE_DISABLE_FAST_PATH → neither router nor fast path; every turn hits
+  //      the full agent (the eval harness sets it so a topology A/B — trunk vs
+  //      multi — isn't diluted by cheap-path turns that carry no topology signal).
+  //   2. GEORGE_ROUTER_ENABLED → NEW two-step router: a cheap classifier decides
+  //      general|full; 'general' answers as george-lite (persona, no tools), 'full'
+  //      falls through here. Leans full on doubt / timeout / error.
+  //   3. else → the EXISTING fast path, preserved verbatim (rollback + byte-identity).
+  // 'answered' → yield the reply + telemetry and return. 'fallthrough' → run the
+  // full agent, carrying the router verdict/latency onto this turn's telemetry.
+  // emotionalModel is keyed off the RAW handle (args.userId), matching
+  // resolveModelForUser — this runs before studentId resolution. Anti-fabrication
+  // is preserved: liteReply/fastReply return null (→ fallthrough) for anything they
+  // can't ground, and images always route full (vision needs the tool-using agent).
+  const cheap = await decideCheapPath({
+    channel: args.channel,
+    text: args.text,
+    historyPrefix,
+    hasImages: (args.images?.length ?? 0) > 0,
+    profileBlock: buildUserProfileBlock(profile),
+    recallBlock,
+    emotionalModel: resolveEmotionalModelForUser(args.userId),
+  });
+  if (cheap.kind === 'answered') {
+    yield { type: 'result', result: cheap.result };
+    yield { type: 'telemetry', telemetry: cheap.telemetry };
     return;
   }
+  // Router verdict/latency for a full turn (undefined when the router is off), stamped
+  // onto the turn telemetry accumulator further below so misroutes stay auditable.
+  const routeVerdict: RouteVerdict | undefined = cheap.routeVerdict;
+  const classifyMs: number | undefined = cheap.classifyMs;
 
   // Resolve the real students.id UUID so tools can receive it via the system
   // prompt. Fail-open: if the lookup errors, proceed with the raw userId so
@@ -974,6 +974,10 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // can attach it to the assistant message they persist. Best-effort only.
   const turnTools = new Set<string>();
   const telemetry: TurnTelemetry = { channel: args.channel, tools: [], outcome: 'success' };
+  // Carry the front-line router's verdict/latency onto this full turn (undefined
+  // when the router is off, so the OFF-path telemetry is byte-identical).
+  if (routeVerdict) telemetry.routeVerdict = routeVerdict;
+  if (typeof classifyMs === 'number') telemetry.classifyMs = classifyMs;
 
   // Three-way path precedence (default-OFF flags read as `=== 'true'`, exactly like
   // SINGLE_AGENT / WORLD_STATE_ENABLED / etc.):

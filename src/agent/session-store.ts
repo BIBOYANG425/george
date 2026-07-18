@@ -34,6 +34,11 @@ export interface TurnTelemetry {
   outcome?: string;
   isError?: boolean;
   perModel?: Record<string, unknown>;
+  // Front-line router (GEORGE_ROUTER_ENABLED): the classifier verdict for this turn
+  // ('general' → george-lite answered; 'full' → the full agent ran) and the
+  // classifier latency in ms. Undefined when the router is off. Ride in tool_calls.
+  routeVerdict?: 'general' | 'full';
+  classifyMs?: number;
 }
 
 export interface Session {
@@ -139,6 +144,8 @@ export class SupabaseSessionStore implements SessionStore {
         outcome: t.outcome ?? null,
         isError: t.isError ?? false,
         perModel: t.perModel ?? null,
+        routeVerdict: t.routeVerdict ?? null,
+        classifyMs: t.classifyMs ?? null,
       };
     }
     const { error } = await this.supabase.from('messages').insert(row);
