@@ -35,6 +35,9 @@ export interface Flags {
   trunkHybrid: boolean;
   singleAgent: boolean;
   disableFastPath: boolean;
+  // Front-line router: a cheap classifier picks general (george-lite) vs full
+  // (the whole tool-using agent). OFF → the existing fast path runs unchanged.
+  routerEnabled: boolean;
   // ── memory / recall ──
   recallEnabled: boolean;
   recallToolEnabled: boolean;
@@ -79,6 +82,7 @@ export function getFlags(): Flags {
     trunkHybrid: mode ? mode === 'trunk' : legacyTrunk,
     singleAgent: mode ? mode === 'single' : legacySingle,
     disableFastPath: on(process.env.GEORGE_DISABLE_FAST_PATH),
+    routerEnabled: on(process.env.GEORGE_ROUTER_ENABLED),
     recallEnabled: on(process.env.GEORGE_RECALL_ENABLED),
     recallToolEnabled: on(process.env.GEORGE_RECALL_TOOL_ENABLED),
     updateMemoryToolEnabled: on(process.env.GEORGE_UPDATE_MEMORY_TOOL_ENABLED),
