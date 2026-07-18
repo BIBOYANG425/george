@@ -12,7 +12,7 @@
  * generic parameters are difficult to thread through a reusable helper).
  * The returned array is still strongly typed at the call site.
  *
- * Header last reviewed: 2026-04-17
+ * Header last reviewed: 2026-07-17
  */
 import { supabase } from '../db/client.js'
 
@@ -21,6 +21,7 @@ import { supabase } from '../db/client.js'
 // on". Callers see fully-typed result rows via the generic R.
 type AnyFilterBuilder = {
   eq: (...args: unknown[]) => AnyFilterBuilder
+  neq: (...args: unknown[]) => AnyFilterBuilder
   ilike: (...args: unknown[]) => AnyFilterBuilder
   or: (...args: unknown[]) => AnyFilterBuilder
   textSearch: (...args: unknown[]) => AnyFilterBuilder

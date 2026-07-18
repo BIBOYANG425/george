@@ -35,6 +35,7 @@ import { isRelationshipEvalEnabled } from './evaluators/relationship.js';
 import { renderActivityBlock } from './activity-state.js';
 import { getWorldStateStore, worldStateEnabled } from './world-state.js';
 import { fastReply } from './fast-path.js';
+import { loadHouseRules } from '../tools/house-rules.js';
 import { detectUnsourcedClaim } from './fast-path-guard.js';
 import { checkUsageAllowed, getMainModelOverride, resolveEmotionalModelForUser } from '../admin/user-controls.js';
 import { getFlags } from '../flags.js';
@@ -231,8 +232,14 @@ export function buildOverlayStack(i: {
   relationshipNoteBlock?: string;
   recallBlock?: string;
   memoryToolsBlock?: string;
+  // Admin-taught HOUSE RULES ("Teach george", GEORGE_TEACH_ENABLED): pre-rendered
+  // by loadHouseRules(), '' when the flag is off or no rules exist — so the OFF
+  // path filters out and every builder stays byte-identical. Placed FIRST:
+  // standing admin policy outranks the per-turn context blocks.
+  houseRulesBlock?: string;
 }): string[] {
   return [
+    i.houseRulesBlock ?? '',
     // real current date — anchors "now" past the training cutoff
     renderDateBlock(),
     // Calendar-mood overlay (master.md "Calendar mood overlay"): the current
@@ -274,6 +281,7 @@ export function buildOrchestratorPrompt(
   webAllowed: boolean = false,
   recallBlock: string = '',
   handle?: string | null,
+  houseRulesBlock: string = '',
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`];
   parts.push(
@@ -285,6 +293,7 @@ export function buildOrchestratorPrompt(
       relationshipNoteBlock: buildRelationshipNoteBlock(profile),
       recallBlock,
       memoryToolsBlock: buildMemoryToolsContextBlock(handle),
+      houseRulesBlock,
     }),
   );
   // Web-search guidance reaches the orchestrator only while the student is under
@@ -338,6 +347,7 @@ export function buildSingleAgentPrompt(
   worldStateBlock: string = '',
   recallBlock: string = '',
   handle?: string | null,
+  houseRulesBlock: string = '',
 ): string {
   const parts = [`${MASTER_PROMPT}\n\n${ORCHESTRATOR_PROMPT}`, UNIFIED_DOMAIN_PROMPT, BATCH_TOOLS_GUIDANCE, COURSE_FASTPATH_GUIDANCE];
   // Same ordered overlay stack the orchestrator builds (see buildOverlayStack).
@@ -350,6 +360,7 @@ export function buildSingleAgentPrompt(
       relationshipNoteBlock: buildRelationshipNoteBlock(profile),
       recallBlock,
       memoryToolsBlock: buildMemoryToolsContextBlock(handle),
+      houseRulesBlock,
     }),
   );
   if (webAllowed) parts.push(webSearchGuidance());
@@ -425,6 +436,7 @@ export function buildTrunkPrompt(
   worldStateBlock: string = '',
   recallBlock: string = '',
   handle?: string | null,
+  houseRulesBlock: string = '',
 ): string {
   const parts = [
     `${MASTER_PROMPT}\n\n${TRUNK_ROUTING_PROMPT}`,
@@ -443,6 +455,7 @@ export function buildTrunkPrompt(
       relationshipNoteBlock: buildRelationshipNoteBlock(profile),
       recallBlock,
       memoryToolsBlock: buildMemoryToolsContextBlock(handle),
+      houseRulesBlock,
     }),
   );
   if (webAllowed) parts.push(webSearchGuidance());
@@ -462,8 +475,9 @@ export function buildTrunkAgentsConfig(
   studentId?: string | null,
   webAllowed: boolean = false,
   delayContext?: string,
+  houseRulesBlock: string = '',
 ): Record<string, { description: string; prompt: string; tools: string[]; model?: string }> {
-  const full = buildAgentsConfig(profile, studentId, webAllowed, delayContext);
+  const full = buildAgentsConfig(profile, studentId, webAllowed, delayContext, houseRulesBlock);
   const { ['know-things']: _knowThings, ...kept } = full;
   void _knowThings;
   return kept;
@@ -508,6 +522,7 @@ export function buildAgentsConfig(
   studentId?: string | null,
   webAllowed: boolean = false,
   delayContext?: string,
+  houseRulesBlock: string = '',
 ): Record<string, { description: string; prompt: string; tools: string[]; model?: string }> {
   // Sub-agents craft the actual reply, so they need the SAME per-turn overlay
   // stack the orchestrator / single-agent prompts get (see buildOverlayStack):
@@ -521,7 +536,10 @@ export function buildAgentsConfig(
   // / memoryTools blocks, so those are omitted here — the assembled overlay is the
   // subset it has always been. Built ONCE (the stack is identical across agents);
   // only the per-agent web block varies below.
-  const sharedOverlay = buildOverlayStack({ profile, studentId, delayContext });
+  // House rules ARE included for sub-agents (unlike worldState/relationshipNote/
+  // recall/memoryTools): a dispatched sub-agent crafts the final reply, so admin
+  // standing policy must reach it. '' when the teach flag is off → byte-identical.
+  const sharedOverlay = buildOverlayStack({ profile, studentId, delayContext, houseRulesBlock });
   const config: Record<string, { description: string; prompt: string; tools: string[]; model?: string }> = {};
   for (const [name, def] of Object.entries(SUB_AGENTS)) {
     // WebSearch (an SDK built-in, un-namespaced) goes to the two info agents
@@ -591,6 +609,10 @@ export interface QueryOptionsInputs {
   // user_id (resolved internally → students.user_id). Only surfaces in the prompt
   // when GEORGE_RECALL_TOOL_ENABLED is on; '' / unset → byte-identical OFF.
   handle?: string | null;
+  // Admin-taught HOUSE RULES block ("Teach george"), pre-rendered once per turn by
+  // loadHouseRules(). '' / unset when GEORGE_TEACH_ENABLED is off → every branch's
+  // prompt is byte-identical to pre-feature behavior.
+  houseRulesBlock?: string;
   // Already resolved by the caller from getMainModelOverride: resolvedModel =
   // override ?? ORCHESTRATOR_MODEL; trunkModel = override ?? TRUNK_MODEL (trunk path).
   resolvedModel: string;
@@ -664,6 +686,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.worldStateBlock,
         inputs.recallBlock,
         inputs.handle,
+        inputs.houseRulesBlock ?? '',
       ),
       model: inputs.trunkModel,
       ...providerOptionsForModel(inputs.trunkModel),
@@ -672,7 +695,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
       tools: trunkAllow,
       allowedTools: trunkAllow,
       agents: applyMainModelCollapse(
-        buildTrunkAgentsConfig(inputs.profile, inputs.studentId, inputs.webAllowed, inputs.delayContext),
+        buildTrunkAgentsConfig(inputs.profile, inputs.studentId, inputs.webAllowed, inputs.delayContext, inputs.houseRulesBlock ?? ''),
         inputs.mainModelOverride,
       ),
       maxTurns: inputs.maxTurns ?? 10,
@@ -691,6 +714,7 @@ export function buildQueryOptions(inputs: QueryOptionsInputs) {
         inputs.worldStateBlock,
         inputs.recallBlock,
         inputs.handle,
+        inputs.houseRulesBlock ?? '',
       ),
       model: inputs.resolvedModel,
       ...providerOptionsForModel(inputs.resolvedModel),
@@ -943,10 +967,15 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
   // Web search is rationed per student/day; when over cap, it's omitted from the
   // turn's tool set and the guidance block is dropped (find_places stays free).
   const webAllowed = !isWebSearchOverCap(studentId);
+  // Admin-taught HOUSE RULES ("Teach george"): loaded ONCE per full-agent turn,
+  // after the cheap-path early-returns above so fast turns pay nothing. Global
+  // (not per-user), 60s-cached, '' when GEORGE_TEACH_ENABLED is off → every
+  // prompt below is byte-identical to pre-feature behavior. Never throws.
+  const houseRulesBlock = await loadHouseRules();
   // args.userId is the RAW channel handle — threaded as the recall_memory tool's
   // user_id context (P6 Phase 5). Only surfaces when GEORGE_RECALL_TOOL_ENABLED is on.
-  const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext, worldStateBlock, webAllowed, recallBlock, args.userId);
-  const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed, args.delayContext);
+  const systemPrompt = buildOrchestratorPrompt(profile, studentId, args.delayContext, worldStateBlock, webAllowed, recallBlock, args.userId, houseRulesBlock);
+  const agentsConfig = buildAgentsConfig(profile, studentId, webAllowed, args.delayContext, houseRulesBlock);
   const orchestratorTools = buildOrchestratorToolNames(webAllowed);
 
   // historyPrefix was loaded above (shared with the fast path). The SDK's own
@@ -1015,6 +1044,7 @@ export async function* runOrchestrator(args: RunOrchestratorArgs): AsyncGenerato
     worldStateBlock,
     recallBlock,
     handle: args.userId,
+    houseRulesBlock,
     resolvedModel,
     trunkModel,
     mainModelOverride,

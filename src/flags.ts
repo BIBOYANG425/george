@@ -14,7 +14,7 @@
 // orchestrator's existing precedence. Semantics with MODE unset are byte-identical to
 // the previous inline reads.
 //
-// Header last reviewed: 2026-07-07
+// Header last reviewed: 2026-07-17
 
 export type AgentMode = 'trunk' | 'single' | 'multi';
 
@@ -60,6 +60,9 @@ export interface Flags {
   pacingEnabled: boolean;
   // ── admin ──
   adminDashboardEnabled: boolean;
+  // Teach george: admin-taught facts (write path + reserved-category exclusion)
+  // + live house-rules prompt injection. OFF → byte-identical everywhere.
+  teachEnabled: boolean;
   // ── observability ──
   messageObservabilityEnabled: boolean;
   // ── multimodal ──
@@ -99,6 +102,7 @@ export function getFlags(): Flags {
     burstGuardEnabled: on(process.env.SPECTRUM_BURST_GUARD_ENABLED),
     pacingEnabled: on(process.env.GEORGE_PACING_ENABLED),
     adminDashboardEnabled: on(process.env.ADMIN_DASHBOARD_ENABLED),
+    teachEnabled: on(process.env.GEORGE_TEACH_ENABLED),
     messageObservabilityEnabled: on(process.env.GEORGE_MESSAGE_OBSERVABILITY_ENABLED),
     imageIntakeEnabled: on(process.env.GEORGE_IMAGE_INTAKE_ENABLED),
     threadedRepliesEnabled: on(process.env.GEORGE_THREADED_REPLIES_ENABLED),

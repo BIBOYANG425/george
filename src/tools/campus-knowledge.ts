@@ -1,26 +1,14 @@
 import { z } from 'zod'
 import { searchWithFallback } from './search-helpers.js'
 import { wrapTool } from './_wrap.js'
+import { HOUSE_RULE_CATEGORY } from './house-rules.js'
+import { getFlags } from '../flags.js'
 
-// Embeds text via OpenAI text-embedding-3-small (1536-d, matches schema).
-// Returns null if OPENAI_API_KEY is not set — callers should fall back to
-// non-vector dedupe/search rather than throwing.
-export async function embedText(text: string): Promise<number[] | null> {
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) return null
-  const res = await fetch('https://api.openai.com/v1/embeddings', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ model: 'text-embedding-3-small', input: text }),
-    signal: AbortSignal.timeout(30_000),
-  })
-  if (!res.ok) throw new Error(`OpenAI embeddings error: ${res.status}`)
-  const data = (await res.json()) as { data: Array<{ embedding: number[] }> }
-  return data.data[0].embedding
-}
+// embedText moved to its own SDK-free leaf module (embed-text.ts) so the
+// dashboard write path (knowledge-admin.ts) can import it without dragging in
+// the agent SDK via _wrap.ts. Re-exported here so existing importers
+// (scripts/ingest-wechat.ts etc.) are unchanged.
+export { embedText } from './embed-text.js'
 
 const inputSchema = {
   query: z.string().describe('What to search for'),
@@ -41,7 +29,15 @@ export async function campusKnowledgeHandler(input: {
   }>('campus_knowledge', 'title, content, category', query, {
     ftsColumn: 'content',
     ilikeColumns: ['title', 'content'],
-    applyFilters: (q) => (category ? q.eq('category', category) : q),
+    // Teach george (GEORGE_TEACH_ENABLED): admin house-rule rows live in this
+    // table under a reserved category and must never surface as facts. The
+    // exclusion is itself flag-gated so a fully-OFF deployment issues the exact
+    // pre-feature query (byte-identical).
+    applyFilters: (q) => {
+      let out = category ? q.eq('category', category) : q
+      if (getFlags().teachEnabled) out = out.neq('category', HOUSE_RULE_CATEGORY)
+      return out
+    },
   })
 
   if (!data || data.length === 0) {
